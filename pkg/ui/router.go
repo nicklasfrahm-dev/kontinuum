@@ -24,6 +24,12 @@ type NamespaceLister interface {
 	List(ctx context.Context, opts metav1.ListOptions) (*corev1.NamespaceList, error)
 }
 
+// NamespaceListerFactory builds a NamespaceLister scoped to ctx. The caller
+// supplies one so the UI runs its own API calls as whatever identity ctx
+// carries — see pkg/auth.WithToken/TokenFromContext — instead of through a
+// separate, privileged internal client.
+type NamespaceListerFactory func(ctx context.Context) (NamespaceLister, error)
+
 //go:embed templates/*.html templates/components/*.html
 var templatesFS embed.FS
 
@@ -44,6 +50,7 @@ func mustParsePage(content ...string) *template.Template {
 		"templates/components/nav.html",
 		"templates/components/icon_tenants.html",
 		"templates/components/icon_settings.html",
+		"templates/components/icon_logout.html",
 	}
 
 	files := make([]string, 0, len(shared)+len(content))
@@ -55,26 +62,30 @@ func mustParsePage(content ...string) *template.Template {
 
 // Router handles HTTP routing for the /app UI.
 type Router struct {
-	namespaces NamespaceLister
-	pages      map[string]*template.Template
-	version    string
-	cfg        config.Config
+	namespacesFor NamespaceListerFactory
+	pages         map[string]*template.Template
+	version       string
+	cfg           config.Config
+	authEnabled   bool
 }
 
-// NewRouter creates a new UI router backed by namespaces. cfg is shown on
+// NewRouter creates a new UI router backed by namespacesFor. cfg is shown on
 // the settings page and is expected to already be redacted (see
-// config.Redact) — Router does not redact it itself.
-func NewRouter(namespaces NamespaceLister, version string, cfg config.Config) *Router {
+// config.Redact) — Router does not redact it itself. authEnabled shows or
+// hides the nav's logout link; pass true only when a /app/logout route is
+// actually registered (see pkg/auth), since otherwise the link would 404.
+func NewRouter(namespacesFor NamespaceListerFactory, version string, cfg config.Config, authEnabled bool) *Router {
 	pages := map[string]*template.Template{
 		pageHome:     mustParsePage("templates/home_content.html"),
 		pageSettings: mustParsePage("templates/settings_content.html"),
 	}
 
 	return &Router{
-		namespaces: namespaces,
-		pages:      pages,
-		version:    version,
-		cfg:        cfg,
+		namespacesFor: namespacesFor,
+		pages:         pages,
+		version:       version,
+		cfg:           cfg,
+		authEnabled:   authEnabled,
 	}
 }
 
@@ -87,11 +98,28 @@ func NewRouter(namespaces NamespaceLister, version string, cfg config.Config) *R
 // Accept header preferring text/html, so they fall through to a plain 404 —
 // same as any other unregistered path — instead of being redirected
 // somewhere their REST clients don't expect.
-func (r *Router) RegisterRoutes(mux *http.ServeMux) {
+//
+// appRoot and protect let a caller layer authentication onto the UI without
+// this package needing to know anything about it. appRoot overrides the
+// GET /app handler; nil keeps the default unconditional redirect to
+// /app/home. protect wraps the /app/home and /app/settings handlers; nil
+// leaves them unprotected. See pkg/auth for kontinuum's OIDC login flow,
+// which supplies both when OIDC is configured.
+func (r *Router) RegisterRoutes(
+	mux *http.ServeMux, appRoot http.HandlerFunc, protect func(http.HandlerFunc) http.HandlerFunc,
+) {
+	if appRoot == nil {
+		appRoot = handleAppRoot
+	}
+
+	if protect == nil {
+		protect = func(next http.HandlerFunc) http.HandlerFunc { return next }
+	}
+
 	mux.HandleFunc("GET /{$}", handleRoot)
-	mux.HandleFunc("GET /app", handleAppRoot)
-	mux.HandleFunc("GET /app/home", r.handleHome)
-	mux.HandleFunc("GET /app/settings", r.handleSettings)
+	mux.HandleFunc("GET /app", appRoot)
+	mux.HandleFunc("GET /app/home", protect(r.handleHome))
+	mux.HandleFunc("GET /app/settings", protect(r.handleSettings))
 }
 
 func handleRoot(writer http.ResponseWriter, request *http.Request) {
@@ -123,7 +151,14 @@ type tenant struct {
 }
 
 func (r *Router) handleHome(writer http.ResponseWriter, request *http.Request) {
-	list, err := r.namespaces.List(request.Context(), metav1.ListOptions{})
+	namespaces, err := r.namespacesFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	list, err := namespaces.List(request.Context(), metav1.ListOptions{})
 	if err != nil {
 		http.Error(writer, "failed to list namespaces: "+err.Error(), http.StatusBadGateway)
 
@@ -142,10 +177,11 @@ func (r *Router) handleHome(writer http.ResponseWriter, request *http.Request) {
 	sort.Slice(tenants, func(i, j int) bool { return tenants[i].Name < tenants[j].Name })
 
 	r.render(writer, pageHome, map[string]any{
-		"Title":      "Tenants",
-		"ActiveMenu": "home",
-		"Version":    r.version,
-		"Tenants":    tenants,
+		"Title":       "Tenants",
+		"ActiveMenu":  "home",
+		"Version":     r.version,
+		"Tenants":     tenants,
+		"AuthEnabled": r.authEnabled,
 	})
 }
 
@@ -159,6 +195,7 @@ func (r *Router) handleSettings(writer http.ResponseWriter, _ *http.Request) {
 		"StorageTarget":  r.cfg.Server.Storage,
 		"LogLevel":       r.cfg.Log.Level,
 		"LogFormat":      r.cfg.Log.Format,
+		"AuthEnabled":    r.authEnabled,
 	})
 }
 

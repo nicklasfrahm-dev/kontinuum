@@ -28,6 +28,8 @@ services:
       - go_build_cache:/root/.cache/go-build
     ports:
       - "8080:8080"
+    env_file:
+      - .env
     environment:
       KONTINUUM_SERVER_ADDR: ":8080"
       KONTINUUM_SERVER_STORAGE: "postgres://kontinuum:kontinuum@postgres:5432/kontinuum?sslmode=disable"

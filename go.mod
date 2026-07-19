@@ -14,9 +14,13 @@ replace k8s.io/kube-controller-manager => k8s.io/kube-controller-manager v0.32.6
 replace k8s.io/cri-client => k8s.io/cri-client v0.32.6
 
 require (
-	github.com/kommodity-io/kommodity v0.150.2-0.20260719000542-dfd19a16cc61
+	github.com/coreos/go-oidc/v3 v3.20.0
+	github.com/golang-jwt/jwt/v5 v5.3.0
+	github.com/kommodity-io/kommodity v0.150.2-0.20260719170510-0dbdae9ee193
 	github.com/lmittmann/tint v1.2.0
 	github.com/spf13/cobra v1.10.2
+	github.com/stretchr/testify v1.11.1
+	golang.org/x/oauth2 v0.36.0
 	k8s.io/api v0.32.6
 	k8s.io/apimachinery v0.32.6
 	k8s.io/client-go v0.32.6
@@ -101,6 +105,7 @@ require (
 	github.com/fzipp/gocyclo v0.6.0 // indirect
 	github.com/ghostiam/protogetter v0.3.20 // indirect
 	github.com/go-critic/go-critic v0.14.3 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-openapi/jsonpointer v0.21.1 // indirect
@@ -120,7 +125,6 @@ require (
 	github.com/godoc-lint/godoc-lint v0.11.2 // indirect
 	github.com/gofrs/flock v0.13.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
-	github.com/golang-jwt/jwt/v5 v5.3.0 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/golangci/asciicheck v0.5.0 // indirect
 	github.com/golangci/dupl v0.0.0-20250308024227-f665c8d69b32 // indirect
@@ -256,7 +260,6 @@ require (
 	github.com/stbenjam/no-sprintf-host-port v0.3.1 // indirect
 	github.com/stoewer/go-strcase v1.3.0 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
-	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/tetafro/godot v1.5.4 // indirect
 	github.com/tidwall/btree v1.8.1 // indirect
@@ -307,7 +310,6 @@ require (
 	golang.org/x/exp/typeparams v0.0.0-20260209203927-2842357ff358 // indirect
 	golang.org/x/mod v0.34.0 // indirect
 	golang.org/x/net v0.52.0 // indirect
-	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/term v0.41.0 // indirect

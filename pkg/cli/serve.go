@@ -17,6 +17,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
+	"github.com/nicklasfrahm/kontinuum/pkg/auth"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
 	"github.com/nicklasfrahm/kontinuum/pkg/logging"
 	"github.com/nicklasfrahm/kontinuum/pkg/ui"
@@ -70,7 +71,12 @@ func runServe(cmd *cobra.Command, addr string, storage string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	server, err := buildServer(cfg, logger)
+	authOpts, oidcHandler, err := configureOIDC(ctx, cfg, logger)
+	if err != nil {
+		return err
+	}
+
+	server, err := buildServer(cfg, logger, authOpts, oidcHandler)
 	if err != nil {
 		return err
 	}
@@ -138,33 +144,96 @@ func loadServeConfig(cmd *cobra.Command, addr string, storage string) (*config.C
 	return cfg, logger, nil
 }
 
-// buildServer creates the libkapi server with custom handlers.
-func buildServer(cfg *config.Config, logger *slog.Logger) (*libkapi.Server, error) {
-	clientset, err := kubernetes.NewForConfig(&rest.Config{Host: localBaseURL(cfg.Server.Addr)})
-	if err != nil {
-		return nil, fmt.Errorf("failed to build in-process Kubernetes client: %w", err)
-	}
-
-	uiRouter := ui.NewRouter(clientset.CoreV1().Namespaces(), version, config.Redact(*cfg))
+// buildServer creates the libkapi server with custom handlers. authOpts and
+// oidcHandler come from configureOIDC; oidcHandler is nil when OIDC is not
+// configured.
+func buildServer(
+	cfg *config.Config, logger *slog.Logger, authOpts []libkapi.Option, oidcHandler *auth.Handler,
+) (*libkapi.Server, error) {
+	uiRouter := ui.NewRouter(namespaceListerFactory(cfg.Server.Addr), version, config.Redact(*cfg), oidcHandler != nil)
 
 	kapiCfg := libkapi.Config{
 		Addr:    cfg.Server.Addr,
 		Storage: cfg.Server.Storage,
 		Logger:  logger,
 		Handlers: []libkapi.HTTPHandlerFactory{
-			customHandlers(uiRouter),
+			customHandlers(uiRouter, oidcHandler),
 		},
 	}
 
 	// Storage is resolved against a background context so the backend
 	// is only torn down by Server.Shutdown, not by the signal context
 	// that drives ListenAndServe.
-	server, err := libkapi.New(context.Background(), kapiCfg)
+	server, err := libkapi.New(context.Background(), kapiCfg, authOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build server: %w", err)
 	}
 
 	return server, nil
+}
+
+// namespaceListerFactory builds a ui.NamespaceListerFactory that calls back
+// into this same server over loopback HTTP, authenticated as whatever
+// identity ctx carries (see pkg/auth.TokenFromContext). This way the UI's
+// own namespace listing runs as the signed-in browser user — subject to the
+// same authorizer as any other client — instead of through a separate,
+// privileged internal client.
+func namespaceListerFactory(addr string) ui.NamespaceListerFactory {
+	return func(ctx context.Context) (ui.NamespaceLister, error) {
+		restCfg := &rest.Config{Host: localBaseURL(addr)}
+
+		if token := auth.TokenFromContext(ctx); token != "" {
+			restCfg.BearerToken = token
+		}
+
+		clientset, err := kubernetes.NewForConfig(restCfg)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build in-process kubernetes client: %w", err)
+		}
+
+		return clientset.CoreV1().Namespaces(), nil
+	}
+}
+
+// configureOIDC builds the resource-server bearer-token authenticator and
+// admin-group authorizer, plus the browser PKCE login handler, from
+// cfg.OIDC. Both return values are nil when cfg.OIDC.IssuerURL is empty,
+// matching kontinuum's default of no authentication. The issuer's discovery
+// document is fetched from ctx, so startup fails fast if the issuer is
+// unreachable or misconfigured.
+//
+// Authorization is deny-by-default: only system:masters, service accounts,
+// and the groups listed in cfg.OIDC.AdminGroups get access — see
+// libkapi.WithAdminAuthorizer. Server startup fails if AdminGroups is empty,
+// since an OIDC deployment with no admin groups configured would lock
+// everyone out.
+func configureOIDC(
+	ctx context.Context, cfg *config.Config, logger *slog.Logger,
+) ([]libkapi.Option, *auth.Handler, error) {
+	if cfg.OIDC.IssuerURL == "" {
+		return nil, nil, nil
+	}
+
+	oidcHandler, err := auth.NewHandler(ctx, auth.Config{
+		IssuerURL:   cfg.OIDC.IssuerURL,
+		ClientID:    cfg.OIDC.ClientID,
+		RedirectURL: cfg.OIDC.RedirectURL,
+	}, logger.With("component", "oidc"))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to configure oidc login flow: %w", err)
+	}
+
+	authOpts := []libkapi.Option{
+		libkapi.WithOIDC(libkapi.OIDCConfig{
+			IssuerURL: cfg.OIDC.IssuerURL,
+			ClientID:  cfg.OIDC.ClientID,
+		}),
+		libkapi.WithAdminAuthorizer(libkapi.AdminAuthorizerConfig{
+			AdminGroups: cfg.OIDC.AdminGroups,
+		}),
+	}
+
+	return authOpts, oidcHandler, nil
 }
 
 // shutdownServer gracefully stops the HTTP listener, the apiserver's
@@ -183,17 +252,24 @@ func shutdownServer(server *libkapi.Server, logger *slog.Logger) error {
 	return nil
 }
 
-// customHandlers mounts example routes and the /app UI alongside the built
-// API server. Any request that does not match a registered route falls
-// through to the Kubernetes API server's own handler.
-func customHandlers(uiRouter *ui.Router) libkapi.HTTPHandlerFactory {
+// customHandlers mounts the /app UI alongside the built API server. Any
+// request that does not match a registered route falls through to the
+// Kubernetes API server's own handler. oidcHandler is nil when OIDC is not
+// configured, leaving the UI unprotected.
+func customHandlers(uiRouter *ui.Router, oidcHandler *auth.Handler) libkapi.HTTPHandlerFactory {
 	return func(mux *http.ServeMux) error {
-		mux.HandleFunc("GET /kontinuum/info", func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"name":"kontinuum","kind":"kubernetes-style-api"}`))
-		})
+		var appRoot http.HandlerFunc
 
-		uiRouter.RegisterRoutes(mux)
+		var protect func(http.HandlerFunc) http.HandlerFunc
+
+		if oidcHandler != nil {
+			appRoot = oidcHandler.HandleApp
+			protect = oidcHandler.Protect
+			mux.HandleFunc("GET /app/login", oidcHandler.HandleLogin)
+			mux.HandleFunc("GET /app/logout", oidcHandler.HandleLogout)
+		}
+
+		uiRouter.RegisterRoutes(mux, appRoot, protect)
 
 		return nil
 	}

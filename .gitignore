@@ -20,3 +20,4 @@ release/
 # Local env / kubeconfig overrides
 .env
 .env.*
+!.env.example

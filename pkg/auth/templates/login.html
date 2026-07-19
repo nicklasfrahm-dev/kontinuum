@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign in - Kontinuum</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        accent: '#E0924F'
+                    },
+                    fontFamily: {
+                        mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'monospace']
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        #mesh-canvas {
+            position: fixed;
+            inset: 0;
+            z-index: 0;
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body class="bg-neutral-950 text-neutral-100 min-h-screen font-mono flex justify-end relative overflow-hidden">
+    <canvas id="mesh-canvas" aria-hidden="true"></canvas>
+    <script>
+    (() => {
+        // A triangulated mesh whose nodes slowly wander to new random spots
+        // near their grid "home" position. Each node independently eases
+        // toward a target over several seconds, then picks a new one, so
+        // the mesh is always gently deforming with no two nodes ever quite
+        // in sync.
+        const canvas = document.getElementById("mesh-canvas");
+        const ctx = canvas.getContext("2d");
+
+        const CELL = 64; // approximate spacing between nodes, in CSS px
+        const WANDER_RADIUS = CELL * 0.2;
+        const MIN_DURATION = 3000;
+        const MAX_DURATION = 7000;
+        const STROKE = "rgba(255, 255, 255, 0.16)";
+
+        const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+        let dpr = Math.min(window.devicePixelRatio || 1, 2);
+        let cols = 0;
+        let rows = 0;
+        let nodes = [];
+
+        function randBetween(min, max) {
+            return min + Math.random() * (max - min);
+        }
+
+        function newTarget(node) {
+            const angle = Math.random() * Math.PI * 2;
+            const r = Math.random() * WANDER_RADIUS;
+            node.fromX = node.x;
+            node.fromY = node.y;
+            node.toX = node.homeX + Math.cos(angle) * r;
+            node.toY = node.homeY + Math.sin(angle) * r;
+            node.start = performance.now();
+            node.duration = randBetween(MIN_DURATION, MAX_DURATION);
+        }
+
+        function buildNodes(width, height) {
+            // The grid is offset by half a cell and overscanned by an extra
+            // row/column of margin on each side, so no node or edge ever
+            // sits exactly on the viewport boundary and edge triangles
+            // extend past the visible canvas - no hard, static border to
+            // give away where the mesh "starts".
+            cols = Math.ceil(width / CELL) + 3;
+            rows = Math.ceil(height / CELL) + 3;
+
+            nodes = [];
+            for (let j = 0; j < rows; j++) {
+                for (let i = 0; i < cols; i++) {
+                    const homeX = (i - 1.5) * CELL;
+                    const homeY = (j - 1.5) * CELL;
+                    const node = { homeX, homeY, x: homeX, y: homeY };
+                    newTarget(node);
+                    // Stagger initial phase so nodes don't all retarget in
+                    // lockstep.
+                    node.start = performance.now() - Math.random() * node.duration;
+                    nodes.push(node);
+                }
+            }
+        }
+
+        function nodeAt(i, j) {
+            return nodes[j * cols + i];
+        }
+
+        function resize() {
+            dpr = Math.min(window.devicePixelRatio || 1, 2);
+            const width = window.innerWidth;
+            const height = window.innerHeight;
+            canvas.width = Math.round(width * dpr);
+            canvas.height = Math.round(height * dpr);
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            buildNodes(width, height);
+        }
+
+        function smoothstep(t) {
+            return t * t * (3 - 2 * t);
+        }
+
+        function updateNodes(now) {
+            for (const node of nodes) {
+                const elapsed = now - node.start;
+
+                if (elapsed >= node.duration) {
+                    newTarget(node);
+                    continue;
+                }
+
+                // Clamped defensively: elapsed/duration should always land
+                // in [0, 1) given the check above, but a negative elapsed
+                // (e.g. a backgrounded-tab timing hiccup) would otherwise
+                // extrapolate smoothstep() well outside [0, 1] and fling
+                // the node outside its wander radius.
+                const t = smoothstep(Math.min(1, Math.max(0, elapsed / node.duration)));
+                node.x = node.fromX + (node.toX - node.fromX) * t;
+                node.y = node.fromY + (node.toY - node.fromY) * t;
+            }
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.strokeStyle = STROKE;
+            ctx.lineWidth = 1;
+
+            // Grid edges (rows and columns)...
+            for (let j = 0; j < rows; j++) {
+                ctx.beginPath();
+                for (let i = 0; i < cols; i++) {
+                    const n = nodeAt(i, j);
+                    if (i === 0) {
+                        ctx.moveTo(n.x, n.y);
+                    } else {
+                        ctx.lineTo(n.x, n.y);
+                    }
+                }
+                ctx.stroke();
+            }
+
+            for (let i = 0; i < cols; i++) {
+                ctx.beginPath();
+                for (let j = 0; j < rows; j++) {
+                    const n = nodeAt(i, j);
+                    if (j === 0) {
+                        ctx.moveTo(n.x, n.y);
+                    } else {
+                        ctx.lineTo(n.x, n.y);
+                    }
+                }
+                ctx.stroke();
+            }
+
+            // ...plus one diagonal per cell to triangulate it, alternating
+            // direction per cell for a more organic, less repetitive look.
+            ctx.beginPath();
+            for (let j = 0; j < rows - 1; j++) {
+                for (let i = 0; i < cols - 1; i++) {
+                    if ((i + j) % 2 === 0) {
+                        const a = nodeAt(i, j);
+                        const b = nodeAt(i + 1, j + 1);
+                        ctx.moveTo(a.x, a.y);
+                        ctx.lineTo(b.x, b.y);
+                    } else {
+                        const a = nodeAt(i + 1, j);
+                        const b = nodeAt(i, j + 1);
+                        ctx.moveTo(a.x, a.y);
+                        ctx.lineTo(b.x, b.y);
+                    }
+                }
+            }
+            ctx.stroke();
+        }
+
+        function frame(now) {
+            if (!reduceMotion) {
+                updateNodes(now);
+            }
+            draw();
+            requestAnimationFrame(frame);
+        }
+
+        window.addEventListener("resize", resize);
+        resize();
+        requestAnimationFrame(frame);
+    })();
+    </script>
+
+    <aside class="relative z-10 flex w-full max-w-md shrink-0 flex-col items-start justify-center border-l border-neutral-800 bg-neutral-900/30 px-12 py-12 backdrop-blur-sm">
+        <h1 class="text-accent font-bold text-2xl tracking-tight">KONTINUUM</h1>
+        <p class="mt-1 mb-8 text-sm text-neutral-500">Sign in to continue</p>
+        <a href="/app/login"
+           class="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-accent px-4 py-3 text-sm font-bold uppercase tracking-wider text-neutral-950 transition-colors hover:bg-accent/90">
+            Login via SSO
+        </a>
+    </aside>
+</body>
+</html>
