@@ -9,6 +9,9 @@
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-okaidia.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js"></script>
     <script>
         tailwind.config = {
             darkMode: 'class',
@@ -25,10 +28,73 @@
         }
     </script>
     <style>
+        html {
+            /* Always reserve the scrollbar gutter so pages that grow past
+               the viewport (e.g. revealing the kubeconfig block) don't
+               shift the layout width when the scrollbar appears. */
+            overflow-y: scroll;
+            scrollbar-width: thin;
+            scrollbar-color: #404040 transparent;
+
+            /* The webkit scrollbar's track paints against html's own
+               background, not body's — duplicated here (not just on body)
+               so a "transparent" track (below) shows this gradient instead
+               of a flat black edge. */
+            background-color: #0a0a0a;
+            background-image: radial-gradient(at 15% 8%, rgba(255,255,255,0.04) 0px, transparent 45%),
+                               radial-gradient(at 85% 92%, rgba(255,255,255,0.03) 0px, transparent 40%);
+            background-attachment: fixed;
+        }
+
         body {
             background-image: radial-gradient(at 15% 8%, rgba(255,255,255,0.04) 0px, transparent 45%),
                                radial-gradient(at 85% 92%, rgba(255,255,255,0.03) 0px, transparent 40%);
             background-attachment: fixed;
+        }
+
+        ::-webkit-scrollbar {
+            width: 10px;
+            height: 10px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background-color: #404040;
+            border: 2px solid transparent;
+            background-clip: padding-box;
+            border-radius: 9999px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background-color: #525252;
+        }
+
+        /* Neutralize Prism's own theme styling — background, shadow, font
+           metrics, spacing — so it never competes with our own styling.
+           !important because the imported theme stylesheet's own rules
+           may be more specific than this one; we intend to fully own the
+           box model and typography here and only take Prism's token
+           colors, so overriding it unconditionally is the point, not a
+           workaround. Safe to reset broadly since (see
+           settings_content.html) nothing else gives its own pre/code
+           elements a "language-*" class or Tailwind box styling to fight
+           with. */
+        pre[class*="language-"],
+        code[class*="language-"] {
+            background: transparent !important;
+            text-shadow: none !important;
+            font-family: inherit !important;
+            /* Pinned to Tailwind's text-xs value directly, rather than
+               "inherit" — the theme stylesheet sets font-size on more than
+               one selector, and relying on inheritance meant whichever one
+               ends up governing was one specificity fight too many. */
+            font-size: 0.75rem !important;
+            line-height: 1rem !important;
+            margin: 0 !important;
+            padding: 0 !important;
         }
     </style>
 </head>

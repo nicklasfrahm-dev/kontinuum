@@ -21,6 +21,12 @@ import (
 // handleHome's error path.
 var errFactory = errors.New("factory failed")
 
+// Shared OIDC test fixture values, reused across handleSettings tests.
+const (
+	testOIDCIssuerURL = "https://auth.example.com"
+	testOIDCClientID  = "kontinuum"
+)
+
 // stubNamespaceLister is a fixed-response ui.NamespaceLister for tests.
 type stubNamespaceLister struct {
 	list *corev1.NamespaceList
@@ -159,8 +165,8 @@ func TestHandleSettingsShowsOIDCDetailsOnlyWhenAuthEnabled(t *testing.T) {
 	}
 
 	cfg := config.Config{}
-	cfg.OIDC.IssuerURL = "https://auth.example.com"
-	cfg.OIDC.ClientID = "kontinuum"
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+	cfg.OIDC.ClientID = testOIDCClientID
 	cfg.OIDC.AdminGroups = "platform-team"
 
 	for _, authEnabled := range []bool{true, false} {
@@ -179,13 +185,127 @@ func TestHandleSettingsShowsOIDCDetailsOnlyWhenAuthEnabled(t *testing.T) {
 		require.NoError(t, resp.Body.Close())
 
 		if authEnabled {
-			assert.Contains(t, string(body), "https://auth.example.com")
+			assert.Contains(t, string(body), testOIDCIssuerURL)
 			assert.Contains(t, string(body), "platform-team")
 		} else {
-			assert.NotContains(t, string(body), "https://auth.example.com")
+			assert.NotContains(t, string(body), testOIDCIssuerURL)
 			assert.NotContains(t, string(body), "platform-team")
 		}
 	}
+}
+
+func TestHandleSettingsShowsKubeconfigOnlyWhenAuthEnabled(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	cfg := config.Config{}
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+	cfg.OIDC.ClientID = testOIDCClientID
+
+	for _, authEnabled := range []bool{true, false} {
+		router := ui.NewRouter(factory, "test-version", cfg, authEnabled)
+
+		mux := http.NewServeMux()
+		router.RegisterRoutes(mux, nil, nil)
+
+		recorder := httptest.NewRecorder()
+		mux.ServeHTTP(recorder, newTestRequest(t, "/app/settings"))
+
+		resp := recorder.Result()
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+
+		if authEnabled {
+			assert.Contains(t, string(body), "kubectl access")
+			assert.Contains(t, string(body), "server: http://example.com")
+			assert.Contains(t, string(body), "insecure-skip-tls-verify: true")
+			assert.Contains(t, string(body), "name: example.com\n    cluster:")
+			assert.Contains(t, string(body), "cluster: example.com")
+			assert.Contains(t, string(body), "name: oidc@example.com")
+			assert.Contains(t, string(body), "current-context: oidc@example.com")
+			assert.Contains(t, string(body), "--oidc-issuer-url="+testOIDCIssuerURL)
+			assert.Contains(t, string(body), "--oidc-client-id="+testOIDCClientID)
+			assert.Contains(t, string(body), "downloadKubeconfig()")
+		} else {
+			assert.NotContains(t, string(body), "kubectl access")
+			assert.NotContains(t, string(body), "oidc-login")
+		}
+	}
+}
+
+func TestHandleSettingsStripsPortFromKubeconfigClusterName(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	cfg := config.Config{}
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+	cfg.OIDC.ClientID = testOIDCClientID
+
+	router := ui.NewRouter(factory, "test-version", cfg, true)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	request := newTestRequest(t, "/app/settings")
+	request.Host = "example.com:8443"
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, request)
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Contains(t, string(body), "server: http://example.com:8443")
+	assert.Contains(t, string(body), "name: example.com\n    cluster:")
+	assert.Contains(t, string(body), "cluster: example.com")
+	assert.Contains(t, string(body), "name: oidc@example.com")
+	assert.NotContains(t, string(body), "example.com:8443\n    cluster:")
+	assert.NotContains(t, string(body), "cluster: example.com:8443")
+	assert.NotContains(t, string(body), "oidc@example.com:8443")
+}
+
+func TestHandleSettingsUsesForwardedProtoForKubeconfigOrigin(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	cfg := config.Config{}
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+	cfg.OIDC.ClientID = testOIDCClientID
+
+	router := ui.NewRouter(factory, "test-version", cfg, true)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	request := newTestRequest(t, "/app/settings")
+	request.Header.Set("X-Forwarded-Proto", "https")
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, request)
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Contains(t, string(body), "server: https://example.com")
+	assert.Contains(t, string(body), "name: oidc@example.com")
+	assert.NotContains(t, string(body), "insecure-skip-tls-verify")
 }
 
 func TestRegisterRoutesDefaultsToUnconditionalAppRedirect(t *testing.T) {

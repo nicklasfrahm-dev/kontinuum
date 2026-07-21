@@ -76,8 +76,12 @@ type Router struct {
 // actually registered (see pkg/auth), since otherwise the link would 404.
 func NewRouter(namespacesFor NamespaceListerFactory, version string, cfg config.Config, authEnabled bool) *Router {
 	pages := map[string]*template.Template{
-		pageHome:     mustParsePage("templates/home_content.html"),
-		pageSettings: mustParsePage("templates/settings_content.html"),
+		pageHome: mustParsePage("templates/home_content.html"),
+		pageSettings: mustParsePage("templates/settings_content.html",
+			"templates/components/icon_copy.html", "templates/components/icon_download.html",
+			"templates/components/icon_eye.html", "templates/components/icon_eye_off.html",
+			"templates/components/icon_terminal.html", "templates/components/icon_server.html",
+			"templates/components/icon_shield.html", "templates/components/icon_check.html"),
 	}
 
 	return &Router{
@@ -185,8 +189,8 @@ func (r *Router) handleHome(writer http.ResponseWriter, request *http.Request) {
 	})
 }
 
-func (r *Router) handleSettings(writer http.ResponseWriter, _ *http.Request) {
-	r.render(writer, pageSettings, map[string]any{
+func (r *Router) handleSettings(writer http.ResponseWriter, request *http.Request) {
+	data := map[string]any{
 		"Title":           "Settings",
 		"ActiveMenu":      "settings",
 		"Version":         r.version,
@@ -199,7 +203,13 @@ func (r *Router) handleSettings(writer http.ResponseWriter, _ *http.Request) {
 		"OIDCIssuerURL":   r.cfg.OIDC.IssuerURL,
 		"OIDCClientID":    r.cfg.OIDC.ClientID,
 		"OIDCAdminGroups": r.cfg.OIDC.AdminGroups,
-	})
+	}
+
+	if r.authEnabled {
+		data["Kubeconfig"] = kubeconfig(requestOrigin(request), request.Host, r.cfg.OIDC.IssuerURL, r.cfg.OIDC.ClientID)
+	}
+
+	r.render(writer, pageSettings, data)
 }
 
 func (r *Router) render(writer http.ResponseWriter, page string, data any) {

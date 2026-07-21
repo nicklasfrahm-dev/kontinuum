@@ -5,8 +5,139 @@
         <p class="mt-1 text-sm text-neutral-500">Server configuration for this kontinuum instance.</p>
     </div>
 
+    {{if .AuthEnabled}}
     <div class="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
-        <div class="px-6 py-3 border-b border-neutral-800">
+        <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
+            {{template "icon-terminal"}}
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider">kubectl access</h2>
+        </div>
+        <div class="p-6">
+            <p class="text-sm text-neutral-500 mb-4">
+                Get access to the API server via
+                <a href="https://kubernetes.io/docs/reference/kubectl/" class="text-accent hover:underline">kubectl</a>
+                or
+                <a href="https://k9scli.io/" class="text-accent hover:underline">k9s</a>.
+                Authentication is done via
+                <a href="https://github.com/int128/kubelogin" class="text-accent hover:underline">oidc-login</a>.
+            </p>
+            <div class="flex items-center justify-end gap-2 mb-3">
+                <button type="button" onclick="toggleKubeconfig(this)"
+                        class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white hover:bg-neutral-700 transition-colors">
+                    <span data-icon-show>{{template "icon-eye"}}</span>
+                    <span data-icon-hide class="hidden">{{template "icon-eye-off"}}</span>
+                    <span data-label>Reveal</span>
+                </button>
+                <button type="button" onclick="copyKubeconfig(this)"
+                        class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white hover:bg-neutral-700 transition-colors">
+                    <span data-icon-copy>{{template "icon-copy"}}</span>
+                    <span data-icon-copied class="hidden text-emerald-400">{{template "icon-check"}}</span>
+                    <span data-label>Copy</span>
+                </button>
+                <button type="button" onclick="downloadKubeconfig()"
+                        class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white hover:bg-neutral-700 transition-colors">
+                    {{template "icon-download"}}
+                    Download
+                </button>
+            </div>
+            <div id="kubeconfig-wrapper" class="overflow-hidden transition-[height] duration-200 ease-out">
+                <!--
+                    Box styling (background, radius, padding) lives on these
+                    wrapper divs, not on the pre/code Prism touches inside —
+                    Prism's own theme sets its own background/font/radius on
+                    pre[class*="language-"]/code[class*="language-"], and
+                    those would otherwise fight our Tailwind utility classes
+                    for the same properties on the same element.
+                -->
+                <div id="kubeconfig-masked" class="bg-neutral-950 rounded-lg p-4 overflow-x-auto">
+                    <pre class="m-0 text-xs text-neutral-500">********************************</pre>
+                </div>
+                <div id="kubeconfig-content" class="hidden bg-neutral-950 rounded-lg p-4 overflow-x-auto">
+                    <pre class="m-0 text-xs"><code class="language-yaml">{{.Kubeconfig}}</code></pre>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        Prism.highlightElement(document.querySelector('#kubeconfig-content code'));
+
+        var kubeconfigResetTimer = null;
+
+        function toggleKubeconfig(button) {
+            var wrapper = document.getElementById('kubeconfig-wrapper');
+            var masked = document.getElementById('kubeconfig-masked');
+            var content = document.getElementById('kubeconfig-content');
+            var revealing = content.classList.contains('hidden');
+            var hideEl = revealing ? masked : content;
+            var showEl = revealing ? content : masked;
+
+            window.clearTimeout(kubeconfigResetTimer);
+
+            // Pin the wrapper to its current height so the height transition
+            // below has a defined starting point — height: auto can't be
+            // animated directly. No opacity fade here on purpose: fading a
+            // solid-background element makes it briefly translucent, which
+            // blends its bg-neutral-950 with the card's bg-neutral-900
+            // behind it — visibly, if subtly, shifting its color mid-fade.
+            // A height-only transition avoids that entirely.
+            wrapper.style.height = wrapper.getBoundingClientRect().height + 'px';
+            void wrapper.offsetHeight;
+
+            hideEl.classList.add('hidden');
+            showEl.classList.remove('hidden');
+
+            wrapper.style.height = showEl.scrollHeight + 'px';
+
+            // Once the height transition settles, unpin back to auto so the
+            // wrapper keeps tracking content size (e.g. on resize) instead
+            // of staying locked to a stale pixel value.
+            kubeconfigResetTimer = window.setTimeout(function () { wrapper.style.height = 'auto'; }, 200);
+
+            button.querySelector('[data-icon-show]').classList.toggle('hidden', revealing);
+            button.querySelector('[data-icon-hide]').classList.toggle('hidden', !revealing);
+            button.querySelector('[data-label]').textContent = revealing ? 'Hide' : 'Reveal';
+        }
+
+        function copyKubeconfig(button) {
+            var content = document.getElementById('kubeconfig-content').textContent;
+
+            navigator.clipboard.writeText(content).then(function () {
+                var iconCopy = button.querySelector('[data-icon-copy]');
+                var iconCopied = button.querySelector('[data-icon-copied]');
+                var label = button.querySelector('[data-label]');
+                var originalLabel = label.textContent;
+
+                iconCopy.classList.add('hidden');
+                iconCopied.classList.remove('hidden');
+                label.textContent = 'Copied';
+
+                setTimeout(function () {
+                    iconCopy.classList.remove('hidden');
+                    iconCopied.classList.add('hidden');
+                    label.textContent = originalLabel;
+                }, 1500);
+            });
+        }
+
+        function downloadKubeconfig() {
+            var content = document.getElementById('kubeconfig-content').textContent;
+            var blob = new Blob([content], { type: 'application/yaml' });
+            var url = URL.createObjectURL(blob);
+            var link = document.createElement('a');
+
+            link.href = url;
+            link.download = 'kontinuum-kubeconfig.yaml';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+        }
+    </script>
+    {{end}}
+
+    <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+        <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
+            {{template "icon-server"}}
             <h2 class="text-sm font-bold text-white uppercase tracking-wider">Server</h2>
         </div>
         <dl class="divide-y divide-neutral-800">
@@ -38,7 +169,8 @@
     </div>
 
     <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
-        <div class="px-6 py-3 border-b border-neutral-800">
+        <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
+            {{template "icon-shield"}}
             <h2 class="text-sm font-bold text-white uppercase tracking-wider">Authentication</h2>
         </div>
         <dl class="divide-y divide-neutral-800">
