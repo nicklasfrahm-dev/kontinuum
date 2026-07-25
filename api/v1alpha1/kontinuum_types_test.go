@@ -16,7 +16,7 @@ func TestGroupVersion(t *testing.T) {
 
 	gv := v1alpha1.GroupVersion()
 
-	assert.Equal(t, "kontinuum.io", gv.Group)
+	assert.Equal(t, "kontinuum.sh", gv.Group)
 	assert.Equal(t, "v1alpha1", gv.Version)
 }
 

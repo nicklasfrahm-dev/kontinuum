@@ -50,16 +50,6 @@ func (r *TTLReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	return ctrl.Result{RequeueAfter: r.StaleThreshold - now.Sub(last)}, nil
 }
 
-// SetupWithManager registers r on mgr, watching Kontinuum objects.
-func (r *TTLReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	err := ctrl.NewControllerManagedBy(mgr).For(&v1alpha1.Kontinuum{}).Complete(r)
-	if err != nil {
-		return fmt.Errorf("failed to register server ttl controller: %w", err)
-	}
-
-	return nil
-}
-
 // deleteStale deletes server, which was last seen at lastHeartbeat.
 func (r *TTLReconciler) deleteStale(ctx context.Context, server *v1alpha1.Kontinuum, lastHeartbeat time.Time) error {
 	err := r.Client.Delete(ctx, server)

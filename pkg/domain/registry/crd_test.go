@@ -16,7 +16,7 @@ func TestCustomResourceDefinition(t *testing.T) {
 
 	crd := registry.CustomResourceDefinition()
 
-	assert.Equal(t, "kontinuums.kontinuum.io", crd.Name)
+	assert.Equal(t, "kontinuums.kontinuum.sh", crd.Name)
 	assert.Equal(t, v1alpha1.GroupName, crd.Spec.Group)
 	assert.Equal(t, apiextensionsv1.ClusterScoped, crd.Spec.Scope)
 	assert.Equal(t, "Kontinuum", crd.Spec.Names.Kind)

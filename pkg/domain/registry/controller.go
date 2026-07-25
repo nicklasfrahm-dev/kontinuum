@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -36,7 +37,7 @@ type Config struct {
 	StaleThreshold time.Duration
 }
 
-// Controller wires kontinuum's server registry — the kontinuums.kontinuum.io
+// Controller wires kontinuum's server registry — the kontinuums.kontinuum.sh
 // CRD, a TTL reconciler that deletes stale Kontinuum objects, and a runnable
 // that registers this process and heartbeats it — onto a controller-runtime
 // Manager. See NewController.
@@ -58,12 +59,20 @@ func NewController(cfg Config) *Controller {
 	return &Controller{Config: cfg}
 }
 
-// SetupWithManager registers the TTL reconciler and the heartbeat runnable
-// on mgr. The kontinuums.kontinuum.io CRD itself is ensured separately, via
+// SetupWithManager registers the TTL reconciler and the heartbeat on mgr.
+// The kontinuums.kontinuum.sh CRD itself is ensured separately, via
 // EnsureCRD registered as a libkapi.WithPostStartHook (see pkg/cli/serve.go)
-// — not here, and not from the heartbeat runnable, since SetupWithManager
-// runs before the listener is bound and a Runnable has no ordering
-// guarantee relative to any other registered Runnable.
+// — not here, and not from the heartbeat, since SetupWithManager runs
+// before the listener is bound and a Runnable has no ordering guarantee
+// relative to any other registered Runnable.
+//
+// TTLReconciler and Heartbeat both watch Kontinuum, but controller-runtime
+// requires controller names to be unique (for metrics), and
+// ctrl.NewControllerManagedBy(mgr).For(&v1alpha1.Kontinuum{}) derives the
+// same default name from the GVK regardless of which reconciler it wraps —
+// registering each separately collides ("controller with name kontinuum
+// already exists"). combinedReconciler merges them onto the one Controller
+// both need.
 func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 	reconciler := &TTLReconciler{
 		Client:         mgr.GetClient(),
@@ -71,12 +80,7 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		Logger:         c.Config.Logger,
 	}
 
-	err := reconciler.SetupWithManager(mgr)
-	if err != nil {
-		return err
-	}
-
-	heartbeatRunnable := &Heartbeat{
+	heartbeat := &Heartbeat{
 		Client:   mgr.GetClient(),
 		Name:     InstanceName(os.Hostname()),
 		Spec:     v1alpha1.KontinuumSpec{Role: c.Config.Role, Region: c.Config.Region, Zone: c.Config.Zone},
@@ -84,12 +88,52 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		Logger:   c.Config.Logger,
 	}
 
-	err = mgr.Add(heartbeatRunnable)
+	combined := &CombinedReconciler{TTL: reconciler, Heartbeat: heartbeat}
+
+	err := ctrl.NewControllerManagedBy(mgr).For(&v1alpha1.Kontinuum{}).Complete(combined)
+	if err != nil {
+		return fmt.Errorf("failed to register server controller: %w", err)
+	}
+
+	err = mgr.Add(heartbeat)
 	if err != nil {
 		return fmt.Errorf("failed to register server heartbeat runnable: %w", err)
 	}
 
 	return nil
+}
+
+// CombinedReconciler runs TTLReconciler's staleness-based deletion and
+// Heartbeat's self-healing re-registration through the single
+// reconcile.Reconciler both are wired onto (see Controller.SetupWithManager's
+// doc for why they can't each register their own Controller). Every
+// reconcile runs TTL's staleness check unconditionally — it applies to
+// every Kontinuum, including this instance's own, same as if it still ran
+// alone: a live heartbeat means self is never actually stale, so this is a
+// no-op for it in practice, but it's what makes ctrl.Result.RequeueAfter
+// keep re-checking self's own expiry too, not just every other instance's.
+// Heartbeat's Reconcile additionally runs whenever req names this
+// instance's own object, on top of - not instead of - the TTL check.
+type CombinedReconciler struct {
+	TTL       *TTLReconciler
+	Heartbeat *Heartbeat
+}
+
+// Reconcile implements reconcile.Reconciler.
+func (r *CombinedReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	result, err := r.TTL.Reconcile(ctx, req)
+	if err != nil {
+		return result, err
+	}
+
+	if req.Name == r.Heartbeat.Name {
+		_, err := r.Heartbeat.Reconcile(ctx, req)
+		if err != nil {
+			return result, err
+		}
+	}
+
+	return result, nil
 }
 
 // InstanceName derives this process's Kontinuum object name from hostname

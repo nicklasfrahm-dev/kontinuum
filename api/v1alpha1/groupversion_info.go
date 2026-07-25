@@ -1,4 +1,4 @@
-// +groupName=kontinuum.io
+// +groupName=kontinuum.sh
 // +kubebuilder:object:generate=true
 
 package v1alpha1
@@ -11,7 +11,7 @@ import (
 
 const (
 	// GroupName is the API group Kontinuum and KontinuumList belong to.
-	GroupName = "kontinuum.io"
+	GroupName = "kontinuum.sh"
 	// APIVersion is the API version Kontinuum and KontinuumList belong to.
 	APIVersion = "v1alpha1"
 )

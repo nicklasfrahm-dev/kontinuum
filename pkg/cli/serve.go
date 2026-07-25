@@ -166,7 +166,7 @@ func buildServer(
 
 	err := v1alpha1.AddToScheme(scheme)
 	if err != nil {
-		return nil, fmt.Errorf("failed to register kontinuum.io/v1alpha1 scheme: %w", err)
+		return nil, fmt.Errorf("failed to register kontinuum.sh/v1alpha1 scheme: %w", err)
 	}
 
 	uiRouter := ui.NewRouter(
@@ -199,7 +199,7 @@ func buildServer(
 // registryOptions builds the libkapi options that wire kontinuum's server
 // registry (see pkg/domain/registry) onto the Server: WithScheme registers
 // Kontinuum's GVK so the registry controller's watches (and EnsureCRD's own
-// client) resolve; WithPostStartHook ensures the kontinuums.kontinuum.io CRD
+// client) resolve; WithPostStartHook ensures the kontinuums.kontinuum.sh CRD
 // exists as soon as the listener is up, before the controller manager
 // starts — see registry.EnsureCRD's doc for why that timing matters; and
 // WithController hands the TTL reconciler and heartbeat runnable off to
@@ -257,7 +257,7 @@ func namespaceListerFactory(addr string) ui.NamespaceListerFactory {
 // kontinuumListerFactory builds a ui.KontinuumClientFactory that calls back
 // into this same server over loopback HTTP, authenticated as whatever
 // identity ctx carries — see namespaceListerFactory, which this mirrors.
-// scheme must already have kontinuum.io/v1alpha1 registered (see
+// scheme must already have kontinuum.sh/v1alpha1 registered (see
 // v1alpha1.AddToScheme) so the controller-runtime client can resolve
 // Kontinuum's GVK.
 func kontinuumListerFactory(addr string, scheme *runtime.Scheme) ui.KontinuumClientFactory {

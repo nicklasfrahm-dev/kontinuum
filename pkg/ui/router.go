@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -36,7 +37,7 @@ type NamespaceListerFactory func(ctx context.Context) (NamespaceLister, error)
 
 // KontinuumClient is the subset of the Kubernetes API the UI needs to list
 // and delete registered kontinuum instances (see pkg/domain/registry, which
-// owns the kontinuums.kontinuum.io CRD and the objects it acts on). It is
+// owns the kontinuums.kontinuum.sh CRD and the objects it acts on). It is
 // satisfied by a controller-runtime client.Client.
 type KontinuumClient interface {
 	List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error
@@ -256,6 +257,15 @@ type instance struct {
 // would produce — so the htmx button that triggers this (hx-select'ing
 // #topology-content out of the response, same as the page's own polling)
 // shows the updated list immediately instead of waiting for the next poll.
+// deleteDebounce is how long handleDeleteInstance waits after a successful
+// Delete before re-rendering the topology page. A live instance re-registers
+// itself the moment its own deletion reaches the registry's self-healing
+// controller (see pkg/domain/registry.Heartbeat.Reconcile) — typically well
+// under this window. Rendering immediately would instead show the row gone
+// for this one response, then have it reappear on the next poll, which
+// reads as "the delete didn't work" rather than what actually happened.
+const deleteDebounce = 500 * time.Millisecond
+
 func (r *Router) handleDeleteInstance(writer http.ResponseWriter, request *http.Request) {
 	kontinuums, err := r.kontinuumsFor(request.Context())
 	if err != nil {
@@ -277,6 +287,11 @@ func (r *Router) handleDeleteInstance(writer http.ResponseWriter, request *http.
 		http.Error(writer, "failed to delete kontinuum instance: "+err.Error(), http.StatusBadGateway)
 
 		return
+	}
+
+	select {
+	case <-time.After(deleteDebounce):
+	case <-request.Context().Done():
 	}
 
 	r.renderTopology(writer, request)

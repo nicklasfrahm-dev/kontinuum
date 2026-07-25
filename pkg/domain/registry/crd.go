@@ -48,12 +48,12 @@ func crdBackoff() wait.Backoff {
 	}
 }
 
-// crdName is the kontinuums.kontinuum.io CustomResourceDefinition's name.
+// crdName is the kontinuums.kontinuum.sh CustomResourceDefinition's name.
 func crdName() string {
 	return crdPlural + "." + v1alpha1.GroupName
 }
 
-// CustomResourceDefinition builds the kontinuums.kontinuum.io CRD:
+// CustomResourceDefinition builds the kontinuums.kontinuum.sh CRD:
 // cluster-scoped, v1alpha1, with a structural schema and a status
 // subresource so the heartbeat runnable can update status.lastHeartbeatTime
 // independently of spec.
@@ -195,7 +195,7 @@ func waitForDiscoverable(ctx context.Context, loopbackConfig *restclient.Config,
 	return nil
 }
 
-// ensureCRD creates the kontinuums.kontinuum.io CRD if it doesn't already
+// ensureCRD creates the kontinuums.kontinuum.sh CRD if it doesn't already
 // exist, then waits for it to become Established. The Create call is inside
 // the same retry loop as the Established check — not just a single
 // unretried attempt — since a transient failure here (the apiserver still
@@ -213,7 +213,7 @@ func ensureCRD(ctx context.Context, client apiextensionsclientset.Interface, log
 		func(ctx context.Context) (bool, error) {
 			_, err := crds.Create(ctx, CustomResourceDefinition(), metav1.CreateOptions{})
 			if err != nil && !apierrors.IsAlreadyExists(err) {
-				logger.Warn("Failed to create kontinuums.kontinuum.io crd, retrying", "error", err)
+				logger.Warn("Failed to create kontinuums.kontinuum.sh crd, retrying", "error", err)
 
 				return false, nil
 			}
@@ -224,7 +224,7 @@ func ensureCRD(ctx context.Context, client apiextensionsclientset.Interface, log
 			// that simply isn't Established are treated the same way.
 			crd, getErr := crds.Get(ctx, crdName(), metav1.GetOptions{})
 			if crd == nil || !crdEstablished(crd) {
-				logger.Warn("Waiting for kontinuums.kontinuum.io crd to become established", "error", getErr)
+				logger.Warn("Waiting for kontinuums.kontinuum.sh crd to become established", "error", getErr)
 
 				return false, nil
 			}

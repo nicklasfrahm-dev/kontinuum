@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.17.3
-  name: kontinuums.kontinuum.io
+  name: kontinuums.kontinuum.sh
 spec:
-  group: kontinuum.io
+  group: kontinuum.sh
   names:
     kind: Kontinuum
     listKind: KontinuumList
