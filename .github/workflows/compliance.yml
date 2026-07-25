@@ -12,8 +12,8 @@ permissions:
   pull-requests: read
 
 jobs:
-  conventional-commit:
-    name: conventional-commit
+  check-title:
+    name: Check title
     runs-on: ubuntu-latest
     steps:
       - name: Validate PR title

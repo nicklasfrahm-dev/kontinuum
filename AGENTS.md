@@ -36,6 +36,12 @@
 - Tests must use `github.com/stretchr/testify`'s `assert`/`require` packages.
 - Tests must run with `-race`.
 
+## CI
+
+- Job IDs must follow verb-noun naming (the noun is optional, e.g. `test` for a job that only runs tests).
+- Every job must have a human-readable `name`.
+- Prefer adding a job to an existing workflow over creating a new one, unless its trigger differs significantly from the existing workflows'.
+
 ## Validating changes
 
 Before considering a task done, run:
