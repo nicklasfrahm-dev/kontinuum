@@ -49,6 +49,7 @@ jobs:
         uses: gwatts/go-coverage-action@v2
         with:
           cover-pkg: ./...
+          cover-mode: atomic
           test-args: '["-race"]'
 
   containerize:
