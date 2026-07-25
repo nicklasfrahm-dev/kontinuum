@@ -80,12 +80,15 @@ jobs:
       - name: Create semantic-release config
         if: github.event_name != 'pull_request'
         run: |
-          cat <<EOF > .releaserc.json
+          cat <<'EOF' > .releaserc.json
           {
             "branches": ["main"],
             "plugins": [
               "@semantic-release/commit-analyzer",
               "@semantic-release/release-notes-generator",
+              ["@semantic-release/exec", {
+                "generateNotesCmd": "echo ${nextRelease.version} > /tmp/semantic-release-next-version.txt"
+              }],
               "@semantic-release/github"
             ]
           }
@@ -101,9 +104,10 @@ jobs:
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             VERSION=$(git describe --tags --always)
           else
-            NEXT_VERSION=$(npx semantic-release --dry-run | grep -oP '(?<=The next release version is )\S+' || true)
-            if [[ -n "$NEXT_VERSION" ]]; then
-              VERSION="v${NEXT_VERSION}"
+            rm -f /tmp/semantic-release-next-version.txt
+            npx -p semantic-release -p @semantic-release/exec -- semantic-release --dry-run
+            if [[ -s /tmp/semantic-release-next-version.txt ]]; then
+              VERSION="v$(cat /tmp/semantic-release-next-version.txt)"
             else
               VERSION=$(git describe --tags --always)
             fi
@@ -143,12 +147,15 @@ jobs:
 
       - name: Create semantic-release config
         run: |
-          cat <<EOF > .releaserc.json
+          cat <<'EOF' > .releaserc.json
           {
             "branches": ["main"],
             "plugins": [
               "@semantic-release/commit-analyzer",
               "@semantic-release/release-notes-generator",
+              ["@semantic-release/exec", {
+                "generateNotesCmd": "echo ${nextRelease.version} > /tmp/semantic-release-next-version.txt"
+              }],
               "@semantic-release/github"
             ]
           }
@@ -158,4 +165,4 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           npm_config_min_release_age: "15"
-        run: npx semantic-release
+        run: npx -p semantic-release -p @semantic-release/exec -- semantic-release
