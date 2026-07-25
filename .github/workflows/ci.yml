@@ -57,16 +57,54 @@ jobs:
 
   containerize:
     name: Containerize
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Set up Node.js
+        if: github.event_name != 'pull_request'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Create semantic-release config
+        if: github.event_name != 'pull_request'
+        run: |
+          cat <<EOF > .releaserc.json
+          {
+            "branches": ["main"],
+            "plugins": [
+              "@semantic-release/commit-analyzer",
+              "@semantic-release/release-notes-generator",
+              "@semantic-release/github"
+            ]
+          }
+          EOF
+
+      - name: Determine VERSION
+        id: version
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eou pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            VERSION=$(git describe --tags --always)
+          else
+            NEXT_VERSION=$(npx semantic-release --dry-run | grep -oP '(?<=The next release version is )\S+' || true)
+            if [[ -n "$NEXT_VERSION" ]]; then
+              VERSION="v${NEXT_VERSION}"
+            else
+              VERSION=$(git describe --tags --always)
+            fi
+          fi
+          echo "Resolved VERSION: ${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Build container image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -76,4 +114,55 @@ jobs:
           platforms: linux/amd64
           push: false
           build-args: |
-            VERSION=${{ github.sha }}
+            VERSION=${{ steps.version.outputs.version }}
+
+  release:
+    name: Release
+    needs: containerize
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Create semantic-release config
+        run: |
+          cat <<EOF > .releaserc.json
+          {
+            "branches": ["main"],
+            "plugins": [
+              "@semantic-release/commit-analyzer",
+              "@semantic-release/release-notes-generator",
+              "@semantic-release/github"
+            ]
+          }
+          EOF
+
+      - name: Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx semantic-release
+
+      - name: Update rolling release tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eou pipefail
+          git fetch --tags
+          LATEST_TAG=$(git describe --tags --abbrev=0)
+          ROLLING_TAG=$(echo $LATEST_TAG | grep -oE 'v[0-9]+')
+          echo "Latest tag: $LATEST_TAG"
+          echo "Rolling tag: $ROLLING_TAG"
+          git tag -f $ROLLING_TAG
+          git push https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git $ROLLING_TAG --force
