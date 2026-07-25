@@ -45,8 +45,8 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Run tests with coverage
-        uses: gwatts/go-coverage-action@v2
+      - name: Report Go Code Coverage
+        uses: nicklasfrahm-dev/go-coverage-action@v2.0.3
         with:
           cover-pkg: ./...
           cover-mode: atomic
