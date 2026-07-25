@@ -4,6 +4,12 @@ A Kubernetes-style API server built on [kommodity](https://github.com/kommodity-
 
 > **Warning:** The server ships with no TLS and no authentication by default. Put a TLS-terminating, authenticating proxy in front before exposing it outside a trusted network.
 
+<p align="center">
+  <img src="docs/screenshots/login.png" width="32%" alt="Login screen" />
+  <img src="docs/screenshots/topology.png" width="32%" alt="Topology view" />
+  <img src="docs/screenshots/settings.png" width="32%" alt="Settings view" />
+</p>
+
 ## Quick start
 
 ### Prerequisites
