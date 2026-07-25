@@ -1,0 +1,27 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 15
+    commit-message:
+      prefix: "fix(deps)"
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 15
+    commit-message:
+      prefix: "fix(deps)"
+    groups:
+      gomod:
+        patterns:
+          - "*"
