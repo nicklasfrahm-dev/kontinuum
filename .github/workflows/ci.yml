@@ -64,6 +64,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up QEMU
+        if: github.ref == 'refs/heads/main'
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
@@ -91,6 +95,7 @@ jobs:
         id: version
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          npm_config_min_release_age: "15"
         run: |
           set -eou pipefail
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
@@ -111,7 +116,7 @@ jobs:
         with:
           context: .
           file: Containerfile
-          platforms: linux/amd64
+          platforms: ${{ github.ref == 'refs/heads/main' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           push: false
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
@@ -152,4 +157,5 @@ jobs:
       - name: Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          npm_config_min_release_age: "15"
         run: npx semantic-release
