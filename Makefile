@@ -33,6 +33,11 @@ help: ## Display this help
 
 ##@ Development
 
+.PHONY: generate
+generate: ## Regenerate deepcopy methods and CRDs for api/... via controller-gen
+	go tool controller-gen object paths="./api/..."
+	go tool controller-gen crd paths="./api/..." output:crd:artifacts:config=config/crd
+
 .PHONY: build
 build: ## Build the binary
 	@mkdir -p $(BINDIR)

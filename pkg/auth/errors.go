@@ -29,9 +29,32 @@ var (
 // MapError converts a technical error into a human-readable message.
 // If the error is not recognized, it returns the error's original message.
 func MapError(err error) string {
+	sentinelMessage := mapSentinelError(err)
+
 	switch {
 	case err == nil:
 		return ""
+	case sentinelMessage != "":
+		return sentinelMessage
+	// Forbidden means the Kubernetes API server's authorizer (see libkapi's
+	// AdminAuthorizer) rejected the request — the caller authenticated fine
+	// but isn't in the configured admin group, system:masters, or a service
+	// account. That RBAC-style reason is meant for kubectl output, not this
+	// UI, so swap it for something a browser user can act on.
+	case apierrors.IsForbidden(err):
+		return "You're signed in, but your account isn't authorized to access this. " +
+			"Ask an administrator to grant you the necessary permissions."
+	default:
+		return err.Error()
+	}
+}
+
+// mapSentinelError returns the human-readable message for one of this
+// package's own sentinel errors, or "" if err doesn't match any of them.
+// Split out of MapError purely to keep each function's branching under the
+// cyclomatic-complexity limit — it's still a plain switch, just a second one.
+func mapSentinelError(err error) string {
+	switch {
 	case errors.Is(err, ErrIssuerURLRequired):
 		return "The OIDC issuer URL is missing from the configuration."
 	case errors.Is(err, ErrClientIDRequired):
@@ -46,15 +69,7 @@ func MapError(err error) string {
 		return "Security validation failed (nonce mismatch). Please try signing in again."
 	case errors.Is(err, ErrMissingIDToken):
 		return "The server failed to receive a valid identity token. Please try signing in again."
-	// Forbidden means the Kubernetes API server's authorizer (see libkapi's
-	// AdminAuthorizer) rejected the request — the caller authenticated fine
-	// but isn't in the configured admin group, system:masters, or a service
-	// account. That RBAC-style reason is meant for kubectl output, not this
-	// UI, so swap it for something a browser user can act on.
-	case apierrors.IsForbidden(err):
-		return "You're signed in, but your account isn't authorized to access this. " +
-			"Ask an administrator to grant you the necessary permissions."
 	default:
-		return err.Error()
+		return ""
 	}
 }

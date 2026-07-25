@@ -11,13 +11,17 @@ import (
 	"github.com/nicklasfrahm/kontinuum/pkg/auth"
 )
 
+var (
+	errTestForbiddenReason = errors.New(
+		"forbidden: user is not in admin group, system:masters group, or a service account")
+	errTestContext = errors.New("context")
+	errTestBoom    = errors.New("boom")
+)
+
 func TestMapError(t *testing.T) {
 	t.Parallel()
 
-	forbidden := apierrors.NewForbidden(
-		schema.GroupResource{Resource: "namespaces"}, "",
-		errors.New("forbidden: user is not in admin group, system:masters group, or a service account"),
-	)
+	forbidden := apierrors.NewForbidden(schema.GroupResource{Resource: "namespaces"}, "", errTestForbiddenReason)
 
 	tests := map[string]struct {
 		err  error
@@ -32,7 +36,7 @@ func TestMapError(t *testing.T) {
 			want: "Your login session has expired. Please try signing in again.",
 		},
 		"wrapped known sentinel error is mapped": {
-			err:  errors.Join(errors.New("context"), auth.ErrStateMismatch),
+			err:  errors.Join(errTestContext, auth.ErrStateMismatch),
 			want: "Security validation failed (state mismatch). Please try signing in again.",
 		},
 		"forbidden kubernetes error is mapped": {
@@ -41,7 +45,7 @@ func TestMapError(t *testing.T) {
 				"Ask an administrator to grant you the necessary permissions.",
 		},
 		"unrecognized error falls back to its own message": {
-			err:  errors.New("boom"),
+			err:  errTestBoom,
 			want: "boom",
 		},
 	}

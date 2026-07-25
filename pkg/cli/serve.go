@@ -15,11 +15,15 @@ import (
 
 	"github.com/kommodity-io/kommodity/pkg/libkapi"
 	"github.com/spf13/cobra"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/nicklasfrahm/kontinuum/api/v1alpha1"
 	"github.com/nicklasfrahm/kontinuum/pkg/auth"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/registry"
 	"github.com/nicklasfrahm/kontinuum/pkg/logging"
 	"github.com/nicklasfrahm/kontinuum/pkg/ui"
 )
@@ -158,15 +162,28 @@ func buildServer(
 		invalidateSession = oidcHandler.InvalidateSession
 	}
 
+	scheme := runtime.NewScheme()
+
+	err := v1alpha1.AddToScheme(scheme)
+	if err != nil {
+		return nil, fmt.Errorf("failed to register kontinuum.io/v1alpha1 scheme: %w", err)
+	}
+
 	uiRouter := ui.NewRouter(
-		namespaceListerFactory(cfg.Server.Addr), version, config.Redact(*cfg), oidcHandler != nil, invalidateSession)
+		namespaceListerFactory(cfg.Server.Addr), kontinuumListerFactory(cfg.Server.Addr, scheme),
+		version, config.Redact(*cfg), oidcHandler != nil, invalidateSession)
+
+	registryOpts, err := registryOptions(cfg, logger, scheme)
+	if err != nil {
+		return nil, err
+	}
 
 	opts := slices.Concat([]libkapi.Option{
 		libkapi.WithAddr(cfg.Server.Addr),
 		libkapi.WithStorage(cfg.Server.Storage),
 		libkapi.WithLogger(logger),
 		libkapi.WithHTTPHandlerFactory(customHandlers(uiRouter, oidcHandler)),
-	}, authOpts)
+	}, authOpts, registryOpts)
 
 	// Storage is resolved against a background context so the backend
 	// is only torn down by Server.Shutdown, not by the signal context
@@ -177,6 +194,41 @@ func buildServer(
 	}
 
 	return server, nil
+}
+
+// registryOptions builds the libkapi options that wire kontinuum's server
+// registry (see pkg/domain/registry) onto the Server: WithScheme registers
+// Kontinuum's GVK so the registry controller's watches (and EnsureCRD's own
+// client) resolve; WithPostStartHook ensures the kontinuums.kontinuum.io CRD
+// exists as soon as the listener is up, before the controller manager
+// starts — see registry.EnsureCRD's doc for why that timing matters; and
+// WithController hands the TTL reconciler and heartbeat runnable off to
+// libkapi's own Manager lifecycle, started once the server is serving,
+// stopped before the HTTP listener closes on Shutdown.
+func registryOptions(cfg *config.Config, logger *slog.Logger, scheme *runtime.Scheme) ([]libkapi.Option, error) {
+	role, err := registry.Role(cfg.Server.Region, cfg.Server.Zone)
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine server registry role: %w", err)
+	}
+
+	registryLogger := logger.With("component", "registry")
+
+	controller := registry.NewController(registry.Config{
+		Role:   role,
+		Region: cfg.Server.Region,
+		Zone:   cfg.Server.Zone,
+		Logger: registryLogger,
+	})
+
+	ensureCRD := func(ctx context.Context, loopbackConfig *rest.Config) error {
+		return registry.EnsureCRD(ctx, loopbackConfig, registryLogger)
+	}
+
+	return []libkapi.Option{
+		libkapi.WithScheme(scheme),
+		libkapi.WithPostStartHook(ensureCRD),
+		libkapi.WithController(controller),
+	}, nil
 }
 
 // namespaceListerFactory builds a ui.NamespaceListerFactory that calls back
@@ -199,6 +251,29 @@ func namespaceListerFactory(addr string) ui.NamespaceListerFactory {
 		}
 
 		return clientset.CoreV1().Namespaces(), nil
+	}
+}
+
+// kontinuumListerFactory builds a ui.KontinuumClientFactory that calls back
+// into this same server over loopback HTTP, authenticated as whatever
+// identity ctx carries — see namespaceListerFactory, which this mirrors.
+// scheme must already have kontinuum.io/v1alpha1 registered (see
+// v1alpha1.AddToScheme) so the controller-runtime client can resolve
+// Kontinuum's GVK.
+func kontinuumListerFactory(addr string, scheme *runtime.Scheme) ui.KontinuumClientFactory {
+	return func(ctx context.Context) (ui.KontinuumClient, error) {
+		restCfg := &rest.Config{Host: localBaseURL(addr)}
+
+		if token := auth.TokenFromContext(ctx); token != "" {
+			restCfg.BearerToken = token
+		}
+
+		c, err := ctrlclient.New(restCfg, ctrlclient.Options{Scheme: scheme})
+		if err != nil {
+			return nil, fmt.Errorf("failed to build in-process kontinuum client: %w", err)
+		}
+
+		return c, nil
 	}
 }
 

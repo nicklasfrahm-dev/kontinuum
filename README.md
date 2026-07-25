@@ -52,6 +52,8 @@ Configuration is loaded from `KONTINUUM_`-prefixed environment variables. Env-va
 | ------------------------------ | ----------------------------------------------------------------------------------- | ---------------------------- |
 | `KONTINUUM_SERVER_ADDR`       | Listener address                                                                     | `:8080`                     |
 | `KONTINUUM_SERVER_STORAGE`    | Storage connection string (`sqlite://`, `postgres://`, `mysql://`, `etcd://`, ...)   | `sqlite://kontinuum.db`     |
+| `KONTINUUM_SERVER_REGION`     | Region this server manages. Leave unset, along with Zone, to run as the control-plane entrypoint. | *(empty)*    |
+| `KONTINUUM_SERVER_ZONE`       | Availability zone this server manages. Leave unset, along with Region, to run as the control-plane entrypoint. | *(empty)* |
 | `KONTINUUM_LOG_LEVEL`         | Log level (`debug`, `info`, `warn`, `error`)                                         | `warn`                      |
 | `KONTINUUM_LOG_FORMAT`        | Log format (`console`, `text`, `json`)                                              | `json`                      |
 | `KONTINUUM_OIDC_ISSUER_URL`   | OIDC issuer URL (e.g. Dex). Empty disables OIDC entirely.                            | *(empty)*                   |
@@ -87,6 +89,7 @@ General
   help           Display this help
 
 Development
+  generate       Regenerate deepcopy methods and CRDs for api/... via controller-gen
   build          Build the binary
   run            Run the server locally with dev-friendly logging (info, console)
   dev            Start development environment with hot reload (air + postgres)

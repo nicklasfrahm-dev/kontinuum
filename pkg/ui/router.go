@@ -15,7 +15,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/nicklasfrahm/kontinuum/api/v1alpha1"
 	"github.com/nicklasfrahm/kontinuum/pkg/auth"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
 )
@@ -32,6 +34,20 @@ type NamespaceLister interface {
 // separate, privileged internal client.
 type NamespaceListerFactory func(ctx context.Context) (NamespaceLister, error)
 
+// KontinuumClient is the subset of the Kubernetes API the UI needs to list
+// and delete registered kontinuum instances (see pkg/domain/registry, which
+// owns the kontinuums.kontinuum.io CRD and the objects it acts on). It is
+// satisfied by a controller-runtime client.Client.
+type KontinuumClient interface {
+	List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error
+	Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error
+}
+
+// KontinuumClientFactory builds a KontinuumClient scoped to ctx — see
+// NamespaceListerFactory, which follows the same per-request-identity
+// pattern.
+type KontinuumClientFactory func(ctx context.Context) (KontinuumClient, error)
+
 // SessionInvalidator ends the caller's session and sends them back to the
 // login page with message shown as a human-readable error. Called when a
 // Kubernetes API request comes back Forbidden — a valid session cookie only
@@ -47,6 +63,7 @@ var templatesFS embed.FS
 
 const (
 	pageHome     = "home"
+	pageTopology = "topology"
 	pageSettings = "settings"
 )
 
@@ -61,6 +78,7 @@ func mustParsePage(content ...string) *template.Template {
 		"templates/layout.html",
 		"templates/components/nav.html",
 		"templates/components/icon_tenants.html",
+		"templates/components/icon_topology.html",
 		"templates/components/icon_settings.html",
 		"templates/components/icon_logout.html",
 	}
@@ -75,6 +93,7 @@ func mustParsePage(content ...string) *template.Template {
 // Router handles HTTP routing for the /app UI.
 type Router struct {
 	namespacesFor     NamespaceListerFactory
+	kontinuumsFor     KontinuumClientFactory
 	pages             map[string]*template.Template
 	version           string
 	cfg               config.Config
@@ -82,18 +101,21 @@ type Router struct {
 	invalidateSession SessionInvalidator
 }
 
-// NewRouter creates a new UI router backed by namespacesFor. cfg is shown on
-// the settings page and is expected to already be redacted (see
-// config.Redact) — Router does not redact it itself. authEnabled shows or
-// hides the nav's logout link; pass true only when a /app/logout route is
-// actually registered (see pkg/auth), since otherwise the link would 404.
-// invalidateSession may be nil (see SessionInvalidator).
+// NewRouter creates a new UI router backed by namespacesFor and
+// kontinuumsFor. cfg is shown on the settings page and is expected to
+// already be redacted (see config.Redact) — Router does not redact it
+// itself. authEnabled shows or hides the nav's logout link; pass true only
+// when a /app/logout route is actually registered (see pkg/auth), since
+// otherwise the link would 404. invalidateSession may be nil (see
+// SessionInvalidator).
 func NewRouter(
-	namespacesFor NamespaceListerFactory, version string, cfg config.Config, authEnabled bool,
-	invalidateSession SessionInvalidator,
+	namespacesFor NamespaceListerFactory, kontinuumsFor KontinuumClientFactory,
+	version string, cfg config.Config, authEnabled bool, invalidateSession SessionInvalidator,
 ) *Router {
 	pages := map[string]*template.Template{
 		pageHome: mustParsePage("templates/home_content.html"),
+		pageTopology: mustParsePage("templates/topology_content.html",
+			"templates/components/icon_trash.html"),
 		pageSettings: mustParsePage("templates/settings_content.html",
 			"templates/components/icon_copy.html", "templates/components/icon_download.html",
 			"templates/components/icon_eye.html", "templates/components/icon_eye_off.html",
@@ -103,6 +125,7 @@ func NewRouter(
 
 	return &Router{
 		namespacesFor:     namespacesFor,
+		kontinuumsFor:     kontinuumsFor,
 		pages:             pages,
 		version:           version,
 		cfg:               cfg,
@@ -141,6 +164,8 @@ func (r *Router) RegisterRoutes(
 	mux.HandleFunc("GET /{$}", handleRoot)
 	mux.HandleFunc("GET /app", appRoot)
 	mux.HandleFunc("GET /app/home", protect(r.handleHome))
+	mux.HandleFunc("GET /app/topology", protect(r.renderTopology))
+	mux.HandleFunc("DELETE /app/topology/{name}", protect(r.handleDeleteInstance))
 	mux.HandleFunc("GET /app/settings", protect(r.handleSettings))
 }
 
@@ -213,6 +238,99 @@ func (r *Router) handleHome(writer http.ResponseWriter, request *http.Request) {
 		"ActiveMenu":  "home",
 		"Version":     r.version,
 		"Tenants":     tenants,
+		"AuthEnabled": r.authEnabled,
+	})
+}
+
+// instance is a Kontinuum object rendered as a topology row in the UI.
+type instance struct {
+	Name   string
+	Role   string
+	Region string
+	Zone   string
+	Age    string
+}
+
+// handleDeleteInstance deletes the Kontinuum object named by the {name}
+// path value, then re-renders the topology page — the same response a GET
+// would produce — so the htmx button that triggers this (hx-select'ing
+// #topology-content out of the response, same as the page's own polling)
+// shows the updated list immediately instead of waiting for the next poll.
+func (r *Router) handleDeleteInstance(writer http.ResponseWriter, request *http.Request) {
+	kontinuums, err := r.kontinuumsFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	target := &v1alpha1.Kontinuum{ObjectMeta: metav1.ObjectMeta{Name: request.PathValue("name")}}
+
+	err = kontinuums.Delete(request.Context(), target)
+	if err != nil && !apierrors.IsNotFound(err) {
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return
+		}
+
+		http.Error(writer, "failed to delete kontinuum instance: "+err.Error(), http.StatusBadGateway)
+
+		return
+	}
+
+	r.renderTopology(writer, request)
+}
+
+// renderTopology is GET /app/topology's handler — it lists Kontinuum
+// instances and renders the topology page. Also called by
+// handleDeleteInstance after a delete, so both the page's own polling and a
+// delete action produce byte-identical #topology-content.
+func (r *Router) renderTopology(writer http.ResponseWriter, request *http.Request) {
+	kontinuums, err := r.kontinuumsFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	var list v1alpha1.KontinuumList
+
+	err = kontinuums.List(request.Context(), &list)
+	if err != nil {
+		// Forbidden means the signed-in identity is authenticated but not
+		// authorized — the session itself isn't the problem, but there's
+		// no reason to keep it either, so send the caller back to sign in
+		// rather than leave them stuck on a page they can't use.
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return
+		}
+
+		http.Error(writer, "failed to list kontinuum instances: "+err.Error(), http.StatusBadGateway)
+
+		return
+	}
+
+	instances := make([]instance, 0, len(list.Items))
+	for _, item := range list.Items {
+		instances = append(instances, instance{
+			Name:   item.Name,
+			Role:   item.Spec.Role,
+			Region: item.Spec.Region,
+			Zone:   item.Spec.Zone,
+			Age:    formatAge(item.Status.LastHeartbeatTime.Time),
+		})
+	}
+
+	sort.Slice(instances, func(i, j int) bool { return instances[i].Name < instances[j].Name })
+
+	r.render(writer, pageTopology, map[string]any{
+		"Title":       "Topology",
+		"ActiveMenu":  "topology",
+		"Version":     r.version,
+		"Instances":   instances,
 		"AuthEnabled": r.authEnabled,
 	})
 }

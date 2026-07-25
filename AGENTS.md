@@ -3,6 +3,7 @@
 ## Rules
 
 - Every package must always have tests.
+- Each controller must live in its own domain package under `pkg/domain/` (e.g. `pkg/domain/registry`).
 - `//nolint` comments are strictly prohibited. Fix the code, not the linter.
 - Linters may never be disabled via the config. Fix the code, not the linter.
 - Comments must be on their own line above the code, never on the same line. This applies to all files, including markdown code blocks.

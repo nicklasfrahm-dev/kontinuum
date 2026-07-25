@@ -20,6 +20,19 @@ linters:
         - github.com/google/cel-go
         - k8s.io/kube-controller-manager
         - k8s.io/cri-client
+    ireturn:
+      # runtime.Object and client.Client are Kubernetes/controller-runtime's
+      # own foundational interfaces: every DeepCopyObject in the ecosystem
+      # returns runtime.Object by contract, and controller-runtime's fake
+      # client builder only exposes its result as client.Client/WithWatch —
+      # its concrete type is unexported. Neither has a concrete-type
+      # alternative.
+      allow:
+        - error
+        - empty
+        - stdlib
+        - runtime\.Object
+        - client\.Client
 
 issues:
   max-issues-per-linter: 0

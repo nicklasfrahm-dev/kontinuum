@@ -141,6 +141,19 @@ func (h *Handler) HandleLogout(writer http.ResponseWriter, request *http.Request
 	http.Redirect(writer, request, "/app", http.StatusFound)
 }
 
+// InvalidateSession clears the session cookie and redirects to the login
+// page with reason shown as a human-readable error — the same treatment a
+// failed login gets (see redirectLoginError, which this wraps). Exported
+// for callers outside this package that determine, on their own, that a
+// session already past HandleApp/Protect should no longer be trusted — for
+// example pkg/ui, when the Kubernetes API rejects an otherwise
+// authenticated request as Forbidden. A valid session cookie only proves
+// who the caller is, not what they're allowed to do, so that kind of
+// rejection is a real reason to send them back to sign in.
+func (h *Handler) InvalidateSession(writer http.ResponseWriter, request *http.Request, reason string) {
+	h.redirectLoginError(writer, request, reason)
+}
+
 // validSessionToken returns the request's session cookie value and true if
 // it holds a signature-valid, unexpired ID token for this client.
 func (h *Handler) validSessionToken(request *http.Request) (string, bool) {
@@ -263,17 +276,4 @@ func (h *Handler) redirectLoginError(writer http.ResponseWriter, request *http.R
 
 	target := url.URL{Path: "/app", RawQuery: url.Values{"error": {message}}.Encode()}
 	http.Redirect(writer, request, target.String(), http.StatusFound)
-}
-
-// InvalidateSession clears the session cookie and redirects to the login
-// page with reason shown as a human-readable error — the same treatment a
-// failed login gets (see redirectLoginError, which this wraps). Exported
-// for callers outside this package that determine, on their own, that a
-// session already past HandleApp/Protect should no longer be trusted — for
-// example pkg/ui, when the Kubernetes API rejects an otherwise
-// authenticated request as Forbidden. A valid session cookie only proves
-// who the caller is, not what they're allowed to do, so that kind of
-// rejection is a real reason to send them back to sign in.
-func (h *Handler) InvalidateSession(writer http.ResponseWriter, request *http.Request, reason string) {
-	h.redirectLoginError(writer, request, reason)
 }

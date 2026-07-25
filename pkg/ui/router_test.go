@@ -11,8 +11,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/nicklasfrahm/kontinuum/api/v1alpha1"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
 	"github.com/nicklasfrahm/kontinuum/pkg/ui"
 )
@@ -20,6 +24,10 @@ import (
 // errFactory is returned by a stub NamespaceListerFactory to exercise
 // handleHome's error path.
 var errFactory = errors.New("factory failed")
+
+// errTestForbidden is the wrapped reason on a forbidden test fixture — see
+// TestHandleTopologyInvalidatesSessionOnForbidden.
+var errTestForbidden = errors.New("forbidden: user is not in admin group")
 
 // Shared OIDC test fixture values, reused across handleSettings tests.
 const (
@@ -37,10 +45,39 @@ func (s stubNamespaceLister) List(context.Context, metav1.ListOptions) (*corev1.
 	return s.list, s.err
 }
 
+// stubKontinuumLister is a fixed-response ui.KontinuumClient for tests.
+type stubKontinuumLister struct {
+	items     []v1alpha1.Kontinuum
+	err       error
+	deleteErr error
+}
+
+func (s stubKontinuumLister) List(_ context.Context, list client.ObjectList, _ ...client.ListOption) error {
+	if s.err != nil {
+		return s.err
+	}
+
+	if kontinuumList, ok := list.(*v1alpha1.KontinuumList); ok {
+		kontinuumList.Items = s.items
+	}
+
+	return nil
+}
+
+func (s stubKontinuumLister) Delete(_ context.Context, _ client.Object, _ ...client.DeleteOption) error {
+	return s.deleteErr
+}
+
 func newTestRequest(t *testing.T, target string) *http.Request {
 	t.Helper()
 
 	return httptest.NewRequestWithContext(context.Background(), http.MethodGet, target, nil)
+}
+
+func newTestDeleteRequest(t *testing.T, target string) *http.Request {
+	t.Helper()
+
+	return httptest.NewRequestWithContext(context.Background(), http.MethodDelete, target, nil)
 }
 
 func TestHandleHomeRendersTenants(t *testing.T) {
@@ -52,7 +89,11 @@ func TestHandleHomeRendersTenants(t *testing.T) {
 		}}, nil
 	}
 
-	router := ui.NewRouter(factory, "test-version", config.Config{}, false, nil)
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -78,7 +119,11 @@ func TestHandleHomeReturnsServerErrorWhenFactoryFails(t *testing.T) {
 		return nil, errFactory
 	}
 
-	router := ui.NewRouter(factory, "test-version", config.Config{}, false, nil)
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -100,7 +145,11 @@ func TestRegisterRoutesUsesCustomAppRootAndProtect(t *testing.T) {
 		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
 	}
 
-	router := ui.NewRouter(factory, "test-version", config.Config{}, false, nil)
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
 
 	appRootCalled := false
 	appRoot := func(http.ResponseWriter, *http.Request) { appRootCalled = true }
@@ -135,7 +184,11 @@ func TestHandleHomeShowsLogoutLinkOnlyWhenAuthEnabled(t *testing.T) {
 	}
 
 	for _, authEnabled := range []bool{true, false} {
-		router := ui.NewRouter(factory, "test-version", config.Config{}, authEnabled, nil)
+		kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+			return stubKontinuumLister{}, nil
+		}
+
+		router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, authEnabled, nil)
 
 		mux := http.NewServeMux()
 		router.RegisterRoutes(mux, nil, nil)
@@ -170,7 +223,11 @@ func TestHandleSettingsShowsOIDCDetailsOnlyWhenAuthEnabled(t *testing.T) {
 	cfg.OIDC.AdminGroups = "platform-team"
 
 	for _, authEnabled := range []bool{true, false} {
-		router := ui.NewRouter(factory, "test-version", cfg, authEnabled, nil)
+		kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+			return stubKontinuumLister{}, nil
+		}
+
+		router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, authEnabled, nil)
 
 		mux := http.NewServeMux()
 		router.RegisterRoutes(mux, nil, nil)
@@ -206,7 +263,11 @@ func TestHandleSettingsShowsKubeconfigOnlyWhenAuthEnabled(t *testing.T) {
 	cfg.OIDC.ClientID = testOIDCClientID
 
 	for _, authEnabled := range []bool{true, false} {
-		router := ui.NewRouter(factory, "test-version", cfg, authEnabled, nil)
+		kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+			return stubKontinuumLister{}, nil
+		}
+
+		router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, authEnabled, nil)
 
 		mux := http.NewServeMux()
 		router.RegisterRoutes(mux, nil, nil)
@@ -249,7 +310,11 @@ func TestHandleSettingsStripsPortFromKubeconfigClusterName(t *testing.T) {
 	cfg.OIDC.IssuerURL = testOIDCIssuerURL
 	cfg.OIDC.ClientID = testOIDCClientID
 
-	router := ui.NewRouter(factory, "test-version", cfg, true, nil)
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, true, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -286,7 +351,11 @@ func TestHandleSettingsUsesForwardedProtoForKubeconfigOrigin(t *testing.T) {
 	cfg.OIDC.IssuerURL = testOIDCIssuerURL
 	cfg.OIDC.ClientID = testOIDCClientID
 
-	router := ui.NewRouter(factory, "test-version", cfg, true, nil)
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, true, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -315,7 +384,11 @@ func TestRegisterRoutesDefaultsToUnconditionalAppRedirect(t *testing.T) {
 		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
 	}
 
-	router := ui.NewRouter(factory, "test-version", config.Config{}, false, nil)
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -329,4 +402,180 @@ func TestRegisterRoutesDefaultsToUnconditionalAppRedirect(t *testing.T) {
 
 	assert.Equal(t, http.StatusFound, resp.StatusCode)
 	assert.Equal(t, "/app/home", resp.Header.Get("Location"))
+}
+
+func TestHandleTopologyRendersInstances(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{items: []v1alpha1.Kontinuum{
+			{ObjectMeta: metav1.ObjectMeta{Name: "demo"}, Spec: v1alpha1.KontinuumSpec{Role: v1alpha1.RoleControlPlane}},
+		}}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/topology"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "demo")
+}
+
+func TestHandleTopologyReturnsServerErrorWhenFactoryFails(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return nil, errFactory
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/topology"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+}
+
+// assertForbiddenInvalidatesSession drives request through a router backed
+// by kontinuumFactory and asserts the Forbidden response redirected via
+// invalidateSession — shared by the list and delete handlers' equivalent
+// tests, which differ only in which request they send and which
+// stubKontinuumLister field carries the Forbidden error.
+func assertForbiddenInvalidatesSession(
+	t *testing.T, request *http.Request, kontinuumFactory ui.KontinuumClientFactory,
+) {
+	t.Helper()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	var invalidatedWith string
+
+	invalidateSession := func(writer http.ResponseWriter, _ *http.Request, message string) {
+		invalidatedWith = message
+
+		writer.WriteHeader(http.StatusFound)
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, invalidateSession)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, request)
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusFound, resp.StatusCode)
+	assert.NotEmpty(t, invalidatedWith)
+}
+
+func TestHandleTopologyInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	forbiddenReason := schema.GroupResource{Group: v1alpha1.GroupName, Resource: "kontinuums"}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{err: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
+	}
+
+	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/topology"), kontinuumFactory)
+}
+
+func TestHandleDeleteInstanceRemovesInstanceAndRerendersTopology(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestDeleteRequest(t, "/app/topology/demo"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "No instances found")
+}
+
+func TestHandleDeleteInstanceReturnsBadGatewayOnFailure(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{deleteErr: errFactory}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestDeleteRequest(t, "/app/topology/demo"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
+}
+
+func TestHandleDeleteInstanceInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	forbiddenReason := schema.GroupResource{Group: v1alpha1.GroupName, Resource: "kontinuums"}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{deleteErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
+	}
+
+	assertForbiddenInvalidatesSession(t, newTestDeleteRequest(t, "/app/topology/demo"), kontinuumFactory)
 }

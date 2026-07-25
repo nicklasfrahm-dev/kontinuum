@@ -30,6 +30,13 @@ type ServerConfig struct {
 	// Storage is the connection string for the storage backend.
 	// See pkg/libkapi for supported schemes (sqlite, postgres, mysql, etcd, ...).
 	Storage string `default:"sqlite://kontinuum.db"`
+	// Region is the region this server manages. Leave unset, along with
+	// Zone, to run as the control-plane entrypoint — see registry.Role.
+	Region string `default:""`
+	// Zone is the availability zone this server manages. Leave unset,
+	// along with Region, to run as the control-plane entrypoint — see
+	// registry.Role.
+	Zone string `default:""`
 }
 
 // LogConfig holds logging configuration. Level and Format are stored as
