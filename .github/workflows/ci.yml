@@ -13,6 +13,7 @@ permissions:
 jobs:
   lint:
     name: Lint
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -36,6 +37,7 @@ jobs:
 
   test:
     name: Test
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
