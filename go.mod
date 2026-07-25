@@ -15,7 +15,7 @@ replace k8s.io/cri-client => k8s.io/cri-client v0.32.6
 
 require (
 	github.com/coreos/go-oidc/v3 v3.20.0
-	github.com/golang-jwt/jwt/v5 v5.3.0
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/kommodity-io/kommodity v0.151.0
 	github.com/lmittmann/tint v1.2.0
