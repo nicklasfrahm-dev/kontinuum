@@ -49,8 +49,7 @@ jobs:
         uses: gwatts/go-coverage-action@v2
         with:
           cover-pkg: ./...
-          test-args: |
-            -race
+          test-args: '["-race"]'
 
   containerize:
     name: Containerize
