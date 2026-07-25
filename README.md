@@ -98,6 +98,7 @@ Development
   generate       Regenerate deepcopy methods and CRDs for api/... via controller-gen
   build          Build the binary
   run            Run the server locally with dev-friendly logging (info, console)
+  install        Build the binary and install it to ~/.local/bin
   dev            Start development environment with hot reload (air + postgres)
   dev-down       Stop development environment
   dev-clean      Stop development environment and remove volumes
