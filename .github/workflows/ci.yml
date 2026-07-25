@@ -153,16 +153,3 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npx semantic-release
-
-      - name: Update rolling release tag
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -eou pipefail
-          git fetch --tags
-          LATEST_TAG=$(git describe --tags --abbrev=0)
-          ROLLING_TAG=$(echo $LATEST_TAG | grep -oE 'v[0-9]+')
-          echo "Latest tag: $LATEST_TAG"
-          echo "Rolling tag: $ROLLING_TAG"
-          git tag -f $ROLLING_TAG
-          git push https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git $ROLLING_TAG --force
