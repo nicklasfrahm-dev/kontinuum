@@ -101,14 +101,13 @@ jobs:
         id: version
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          npm_config_min_release_age: "15"
         run: |
           set -eou pipefail
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             VERSION=$(git describe --tags --always)
           else
             rm -f /tmp/semantic-release-next-version.txt
-            npx -p semantic-release -p @semantic-release/exec -- semantic-release --dry-run
+            npx --min-release-age=15 -p semantic-release -p @semantic-release/exec -- semantic-release --dry-run
             if [[ -s /tmp/semantic-release-next-version.txt ]]; then
               VERSION="v$(cat /tmp/semantic-release-next-version.txt)"
             else
@@ -178,5 +177,4 @@ jobs:
       - name: Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          npm_config_min_release_age: "15"
-        run: npx -p semantic-release -p @semantic-release/exec -- semantic-release
+        run: npx --min-release-age=15 -p semantic-release -p @semantic-release/exec -- semantic-release
