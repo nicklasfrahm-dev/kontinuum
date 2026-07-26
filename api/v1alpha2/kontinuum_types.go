@@ -75,7 +75,7 @@ type KontinuumStatus struct {
 	// +optional
 	SecretRef KontinuumSecretReference `json:"secretRef"`
 	// Config is this process's own non-confidential configuration, shown on
-	// its per-instance settings page (/app/topology/{name}). Its shape
+	// its per-instance settings page (/app/kontinuums/{name}). Its shape
 	// mirrors pkg/config.Config's own Server/Log/OIDC grouping exactly —
 	// pkg/config.Config.Log and .OIDC are in fact this same
 	// KontinuumLogConfigStatus/KontinuumOIDCConfigStatus type (see that

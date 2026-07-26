@@ -1,8 +1,13 @@
 {{define "content"}}
 <div>
-    <div class="mb-6">
-        <h1 class="text-xl font-bold text-white">Settings</h1>
-        <p class="mt-1 text-sm text-neutral-500">Access this kontinuum deployment's API server.</p>
+    <div class="mb-6 flex items-center gap-4">
+        <div class="text-accent [&>svg]:h-10 [&>svg]:w-10">
+            {{template "icon-settings"}}
+        </div>
+        <div>
+            <h1 class="text-xl font-bold text-white">Settings</h1>
+            <p class="mt-1 text-sm text-neutral-500">Access this kontinuum deployment's API server.</p>
+        </div>
     </div>
 
     {{if .AuthEnabled}}

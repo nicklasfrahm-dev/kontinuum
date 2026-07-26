@@ -1,8 +1,13 @@
 {{define "content"}}
 <div>
-    <div class="mb-6">
-        <h1 class="text-xl font-bold text-white">Tenants</h1>
-        <p class="mt-1 text-sm text-neutral-500">Kubernetes namespaces exposed as tenants.</p>
+    <div class="mb-6 flex items-center gap-4">
+        <div class="text-accent [&>svg]:h-10 [&>svg]:w-10">
+            {{template "icon-tenants"}}
+        </div>
+        <div>
+            <h1 class="text-xl font-bold text-white">Tenants</h1>
+            <p class="mt-1 text-sm text-neutral-500">Kubernetes namespaces exposed as tenants.</p>
+        </div>
     </div>
 
     <div class="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">

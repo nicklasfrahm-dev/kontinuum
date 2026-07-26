@@ -92,7 +92,7 @@ func TestHeartbeatRegistersAndUpdatesStatus(t *testing.T) {
 	assert.Equal(t, "eu-1a", server.Spec.Zone)
 	assert.Equal(t, "v1.2.3", server.Status.Version)
 	assert.Equal(t, v1alpha2.KontinuumSecretReference{
-		Name:      "test-server",
+		Name:      "kontinuum-test-server",
 		Namespace: v1alpha2.DefaultSecretNamespace,
 	}, server.Status.SecretRef)
 	assertConfigSecret(t, fakeClient, server.Status.SecretRef, heartbeat.SecretData)

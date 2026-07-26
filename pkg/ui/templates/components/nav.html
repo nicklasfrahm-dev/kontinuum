@@ -10,9 +10,9 @@
            class="p-2 rounded-lg {{if eq .ActiveMenu "home"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-tenants"}}
         </a>
-        <a href="/app/topology"
-           class="p-2 rounded-lg {{if eq .ActiveMenu "topology"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
-            {{template "icon-topology"}}
+        <a href="/app/kontinuums"
+           class="p-2 rounded-lg {{if eq .ActiveMenu "registry"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
+            {{template "icon-registry"}}
         </a>
         <a href="/app/settings"
            class="p-2 rounded-lg {{if eq .ActiveMenu "settings"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
@@ -42,10 +42,10 @@
             Tenants
         </a>
         <div class="flex-1"></div>
-        <a href="/app/topology"
-           class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "topology"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
-            {{template "icon-topology"}}
-            Topology
+        <a href="/app/kontinuums"
+           class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "registry"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
+            {{template "icon-registry"}}
+            Registry
         </a>
         <a href="/app/settings"
            class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "settings"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">

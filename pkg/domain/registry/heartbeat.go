@@ -11,9 +11,26 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 )
+
+// secretNamePrefix makes a Kontinuum's config Secret recognizable by name
+// alone (e.g. "kontinuum-worker-1"), rather than colliding namespace-wide
+// with anything else named after the instance — shared by Heartbeat, which
+// creates the Secret, and TTLReconciler, which deletes it once the
+// Kontinuum itself is gone. This is a name prefix, not a credential — gosec's
+// G101 flags it purely because "SECRET" appears in the identifier.
+//
+//nolint:gosec // false positive: a name prefix, not a credential value
+const secretNamePrefix = "kontinuum-"
+
+// secretName derives the Secret name for a Kontinuum instance named
+// instanceName — see secretNamePrefix.
+func secretName(instanceName string) string {
+	return secretNamePrefix + instanceName
+}
 
 // deregisterTimeout bounds the final Delete call Heartbeat.Start makes
 // after its ctx is canceled.
@@ -133,7 +150,7 @@ func (h *Heartbeat) beat(ctx context.Context, server *v1alpha2.Kontinuum) {
 		return
 	}
 
-	secretRef, err := h.ensureSecret(ctx)
+	secretRef, err := h.ensureSecret(ctx, server)
 	if err != nil {
 		h.Logger.Error("Failed to ensure server config secret", "name", h.Name, "error", err)
 
@@ -158,19 +175,27 @@ func (h *Heartbeat) beat(ctx context.Context, server *v1alpha2.Kontinuum) {
 // default into.
 func (h *Heartbeat) secretRef() v1alpha2.KontinuumSecretReference {
 	return v1alpha2.KontinuumSecretReference{
-		Name:      h.Name,
+		Name:      secretName(h.Name),
 		Namespace: v1alpha2.DefaultSecretNamespace,
 	}
 }
 
 // ensureSecret upserts the Secret h.secretRef points to with h.SecretData,
-// creating its namespace first if it doesn't already exist. It runs on
-// every beat/reregister, not just once at startup, so it's self-healing the
-// same way the rest of this file is: if the namespace or Secret is deleted
-// out from under a running process — manually, or by anything else with
-// access — the next tick recreates them rather than leaving
-// status.secretRef pointing at nothing.
-func (h *Heartbeat) ensureSecret(ctx context.Context) (v1alpha2.KontinuumSecretReference, error) {
+// owned by server (see controllerutil.SetControllerReference) so a real
+// Kubernetes garbage collector would clean it up the moment server is
+// deleted — kontinuum's own apiserver doesn't run one today, so
+// TTLReconciler's Reconcile deletes it explicitly instead the next time it
+// observes server gone; the owner reference is set regardless, both because
+// it's the correct thing to record and in case that ever changes. It also
+// creates the Secret's namespace first if it doesn't already exist. All of
+// this runs on every beat/reregister, not just once at startup, so it's
+// self-healing the same way the rest of this file is: if the namespace or
+// Secret is deleted out from under a running process — manually, or by
+// anything else with access — the next tick recreates them rather than
+// leaving status.secretRef pointing at nothing.
+func (h *Heartbeat) ensureSecret(
+	ctx context.Context, server *v1alpha2.Kontinuum,
+) (v1alpha2.KontinuumSecretReference, error) {
 	ref := h.secretRef()
 
 	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ref.Namespace}}
@@ -185,6 +210,11 @@ func (h *Heartbeat) ensureSecret(ctx context.Context) (v1alpha2.KontinuumSecretR
 		StringData: h.SecretData,
 	}
 
+	err = controllerutil.SetControllerReference(server, secret, h.Client.Scheme())
+	if err != nil {
+		return ref, fmt.Errorf("failed to set owner reference on %q secret: %w", ref.Name, err)
+	}
+
 	err = h.Client.Create(ctx, secret)
 	if apierrors.IsAlreadyExists(err) {
 		var existing corev1.Secret
@@ -195,6 +225,12 @@ func (h *Heartbeat) ensureSecret(ctx context.Context) (v1alpha2.KontinuumSecretR
 		}
 
 		existing.StringData = h.SecretData
+
+		err = controllerutil.SetControllerReference(server, &existing, h.Client.Scheme())
+		if err != nil {
+			return ref, fmt.Errorf("failed to set owner reference on %q secret: %w", ref.Name, err)
+		}
+
 		err = h.Client.Update(ctx, &existing)
 	}
 
@@ -229,7 +265,7 @@ func (h *Heartbeat) reregister(ctx context.Context, server *v1alpha2.Kontinuum) 
 		return
 	}
 
-	secretRef, err := h.ensureSecret(ctx)
+	secretRef, err := h.ensureSecret(ctx, server)
 	if err != nil {
 		h.Logger.Error("Failed to ensure server config secret after re-registering", "name", h.Name, "error", err)
 

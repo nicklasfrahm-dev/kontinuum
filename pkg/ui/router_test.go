@@ -26,7 +26,7 @@ import (
 var errFactory = errors.New("factory failed")
 
 // errTestForbidden is the wrapped reason on a forbidden test fixture — see
-// TestHandleTopologyInvalidatesSessionOnForbidden.
+// TestHandleRegistryInvalidatesSessionOnForbidden.
 var errTestForbidden = errors.New("forbidden: user is not in admin group")
 
 // Shared OIDC test fixture values, reused across handleSettings tests.
@@ -303,7 +303,7 @@ func TestHandleInstanceDetailRendersInstanceSettings(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/topology/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -342,7 +342,7 @@ func TestHandleInstanceDetailHidesOIDCDetailsWhenInstanceOIDCDisabled(t *testing
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/topology/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -370,7 +370,7 @@ func TestHandleInstanceDetailReturnsNotFoundForUnknownInstance(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/topology/missing"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums/missing"))
 
 	resp := recorder.Result()
 
@@ -396,7 +396,7 @@ func TestHandleInstanceDetailReturnsServerErrorWhenFactoryFails(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/topology/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -414,7 +414,7 @@ func TestHandleInstanceDetailInvalidatesSessionOnForbidden(t *testing.T) {
 		return stubKontinuumLister{getErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
 	}
 
-	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/topology/worker-1"), kontinuumFactory)
+	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/kontinuums/worker-1"), kontinuumFactory)
 }
 
 func TestHandleSettingsShowsKubeconfigOnlyWhenAuthEnabled(t *testing.T) {
@@ -615,7 +615,7 @@ func TestRegisterRoutesDefaultsToUnconditionalAppRedirect(t *testing.T) {
 	assert.Equal(t, "/app/home", resp.Header.Get("Location"))
 }
 
-func TestHandleTopologyRendersInstances(t *testing.T) {
+func TestHandleRegistryRendersInstances(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -634,7 +634,7 @@ func TestHandleTopologyRendersInstances(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/topology"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums"))
 
 	resp := recorder.Result()
 
@@ -647,7 +647,7 @@ func TestHandleTopologyRendersInstances(t *testing.T) {
 	assert.Contains(t, string(body), "demo")
 }
 
-func TestHandleTopologyReturnsServerErrorWhenFactoryFails(t *testing.T) {
+func TestHandleRegistryReturnsServerErrorWhenFactoryFails(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -664,7 +664,7 @@ func TestHandleTopologyReturnsServerErrorWhenFactoryFails(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/topology"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums"))
 
 	resp := recorder.Result()
 
@@ -711,7 +711,7 @@ func assertForbiddenInvalidatesSession(
 	assert.NotEmpty(t, invalidatedWith)
 }
 
-func TestHandleTopologyInvalidatesSessionOnForbidden(t *testing.T) {
+func TestHandleRegistryInvalidatesSessionOnForbidden(t *testing.T) {
 	t.Parallel()
 
 	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: "kontinuums"}
@@ -720,10 +720,10 @@ func TestHandleTopologyInvalidatesSessionOnForbidden(t *testing.T) {
 		return stubKontinuumLister{err: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
 	}
 
-	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/topology"), kontinuumFactory)
+	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/kontinuums"), kontinuumFactory)
 }
 
-func TestHandleDeleteInstanceRemovesInstanceAndRerendersTopology(t *testing.T) {
+func TestHandleDeleteInstanceRemovesInstanceAndRerendersRegistry(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -740,7 +740,7 @@ func TestHandleDeleteInstanceRemovesInstanceAndRerendersTopology(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestDeleteRequest(t, "/app/topology/demo"))
+	mux.ServeHTTP(recorder, newTestDeleteRequest(t, "/app/kontinuums/demo"))
 
 	resp := recorder.Result()
 
@@ -770,7 +770,7 @@ func TestHandleDeleteInstanceReturnsBadGatewayOnFailure(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestDeleteRequest(t, "/app/topology/demo"))
+	mux.ServeHTTP(recorder, newTestDeleteRequest(t, "/app/kontinuums/demo"))
 
 	resp := recorder.Result()
 
@@ -788,5 +788,5 @@ func TestHandleDeleteInstanceInvalidatesSessionOnForbidden(t *testing.T) {
 		return stubKontinuumLister{deleteErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
 	}
 
-	assertForbiddenInvalidatesSession(t, newTestDeleteRequest(t, "/app/topology/demo"), kontinuumFactory)
+	assertForbiddenInvalidatesSession(t, newTestDeleteRequest(t, "/app/kontinuums/demo"), kontinuumFactory)
 }

@@ -65,7 +65,7 @@ var templatesFS embed.FS
 
 const (
 	pageHome     = "home"
-	pageTopology = "topology"
+	pageRegistry = "registry"
 	pageInstance = "instance"
 	pageSettings = "settings"
 )
@@ -81,7 +81,7 @@ func mustParsePage(content ...string) *template.Template {
 		"templates/layout.html",
 		"templates/components/nav.html",
 		"templates/components/icon_tenants.html",
-		"templates/components/icon_topology.html",
+		"templates/components/icon_registry.html",
 		"templates/components/icon_settings.html",
 		"templates/components/icon_logout.html",
 	}
@@ -117,10 +117,11 @@ func NewRouter(
 ) *Router {
 	pages := map[string]*template.Template{
 		pageHome: mustParsePage("templates/home_content.html"),
-		pageTopology: mustParsePage("templates/topology_content.html",
+		pageRegistry: mustParsePage("templates/registry_content.html",
 			"templates/components/icon_trash.html"),
 		pageInstance: mustParsePage("templates/instance_content.html",
-			"templates/components/icon_server.html", "templates/components/icon_shield.html"),
+			"templates/components/icon_server.html", "templates/components/icon_shield.html",
+			"templates/components/icon_chevron_left.html"),
 		pageSettings: mustParsePage("templates/settings_content.html",
 			"templates/components/icon_copy.html", "templates/components/icon_download.html",
 			"templates/components/icon_eye.html", "templates/components/icon_eye_off.html",
@@ -169,9 +170,9 @@ func (r *Router) RegisterRoutes(
 	mux.HandleFunc("GET /{$}", handleRoot)
 	mux.HandleFunc("GET /app", appRoot)
 	mux.HandleFunc("GET /app/home", protect(r.handleHome))
-	mux.HandleFunc("GET /app/topology", protect(r.renderTopology))
-	mux.HandleFunc("GET /app/topology/{name}", protect(r.handleInstanceDetail))
-	mux.HandleFunc("DELETE /app/topology/{name}", protect(r.handleDeleteInstance))
+	mux.HandleFunc("GET /app/kontinuums", protect(r.renderRegistry))
+	mux.HandleFunc("GET /app/kontinuums/{name}", protect(r.handleInstanceDetail))
+	mux.HandleFunc("DELETE /app/kontinuums/{name}", protect(r.handleDeleteInstance))
 	mux.HandleFunc("GET /app/settings", protect(r.handleSettings))
 }
 
@@ -248,7 +249,7 @@ func (r *Router) handleHome(writer http.ResponseWriter, request *http.Request) {
 	})
 }
 
-// instance is a Kontinuum object rendered as a topology row in the UI.
+// instance is a Kontinuum object rendered as a registry row in the UI.
 type instance struct {
 	Name          string
 	Role          string
@@ -257,15 +258,16 @@ type instance struct {
 	LastHeartbeat string
 	Age           string
 	APIVersion    string
+	Version       string
 }
 
 // handleDeleteInstance deletes the Kontinuum object named by the {name}
-// path value, then re-renders the topology page — the same response a GET
+// path value, then re-renders the registry page — the same response a GET
 // would produce — so the htmx button that triggers this (hx-select'ing
-// #topology-content out of the response, same as the page's own polling)
+// #registry-content out of the response, same as the page's own polling)
 // shows the updated list immediately instead of waiting for the next poll.
 // deleteDebounce is how long handleDeleteInstance waits after a successful
-// Delete before re-rendering the topology page. A live instance re-registers
+// Delete before re-rendering the registry page. A live instance re-registers
 // itself the moment its own deletion reaches the registry's self-healing
 // controller (see pkg/domain/registry.Heartbeat.Reconcile) — typically well
 // under this window. Rendering immediately would instead show the row gone
@@ -301,14 +303,14 @@ func (r *Router) handleDeleteInstance(writer http.ResponseWriter, request *http.
 	case <-request.Context().Done():
 	}
 
-	r.renderTopology(writer, request)
+	r.renderRegistry(writer, request)
 }
 
-// renderTopology is GET /app/topology's handler — it lists Kontinuum
-// instances and renders the topology page. Also called by
+// renderRegistry is GET /app/kontinuums's handler — it lists Kontinuum
+// instances and renders the registry page. Also called by
 // handleDeleteInstance after a delete, so both the page's own polling and a
-// delete action produce byte-identical #topology-content.
-func (r *Router) renderTopology(writer http.ResponseWriter, request *http.Request) {
+// delete action produce byte-identical #registry-content.
+func (r *Router) renderRegistry(writer http.ResponseWriter, request *http.Request) {
 	kontinuums, err := r.kontinuumsFor(request.Context())
 	if err != nil {
 		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
@@ -345,21 +347,22 @@ func (r *Router) renderTopology(writer http.ResponseWriter, request *http.Reques
 			LastHeartbeat: formatAge(item.Status.LastHeartbeatTime.Time),
 			Age:           formatAge(item.CreationTimestamp.Time),
 			APIVersion:    v1alpha2.GroupVersion().String(),
+			Version:       item.Status.Version,
 		})
 	}
 
 	sort.Slice(instances, func(i, j int) bool { return instances[i].Name < instances[j].Name })
 
-	r.render(writer, pageTopology, map[string]any{
-		"Title":       "Topology",
-		"ActiveMenu":  "topology",
+	r.render(writer, pageRegistry, map[string]any{
+		"Title":       "Registry",
+		"ActiveMenu":  "registry",
 		"Version":     r.version,
 		"Instances":   instances,
 		"AuthEnabled": r.authEnabled,
 	})
 }
 
-// handleInstanceDetail is GET /app/topology/{name}'s handler — it shows one
+// handleInstanceDetail is GET /app/kontinuums/{name}'s handler — it shows one
 // Kontinuum instance's own settings (status.config, status.secretRef),
 // sourced from the shared Kontinuum object store rather than this
 // process's own local config, so it renders the same regardless of which
@@ -403,7 +406,7 @@ func (r *Router) handleInstanceDetail(writer http.ResponseWriter, request *http.
 
 	r.render(writer, pageInstance, map[string]any{
 		"Title":           item.Name,
-		"ActiveMenu":      "topology",
+		"ActiveMenu":      "registry",
 		"Version":         r.version,
 		"AuthEnabled":     r.authEnabled,
 		"Name":            item.Name,

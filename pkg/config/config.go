@@ -23,7 +23,7 @@ const envPrefix = "KONTINUUM_"
 // Log and OIDC are v1alpha2's own KontinuumLogConfigStatus/
 // KontinuumOIDCConfigStatus types, not locally redefined ones: those types
 // are also what a Kontinuum's status.config reports on its per-instance
-// settings page (/app/topology/{name}), so this is the one place their
+// settings page (/app/kontinuums/{name}), so this is the one place their
 // shape (field names, `default` values) is declared — see
 // v1alpha2.KontinuumStatus.Config's doc for why Server isn't shared the
 // same way (Region/Zone belong on KontinuumSpec, and Storage here must stay
