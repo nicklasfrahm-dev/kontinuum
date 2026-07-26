@@ -56,7 +56,7 @@ install: build ## Build the binary and install it to ~/.local/bin
 	install $(BINARY) $(INSTALLDIR)/kontinuum
 
 .PHONY: dev
-dev: ## Start development environment with hot reload (air + postgres)
+dev: ## Start development environment with hot reload (air + postgres + proxy)
 	@printf '$(CYAN)Starting development environment...$(RESET)\n'
 	docker compose --profile dev up
 

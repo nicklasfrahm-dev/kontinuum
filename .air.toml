@@ -1,21 +1,28 @@
 # Avoid issues with incorrect JSON schema.
 #:schema none
 root = "."
-tmp_dir = "bin"
+tmp_dir = "/tmp/kontinuum-air"
 
 [build]
-  entrypoint = "./bin/kontinuum"
-  cmd = "go build -buildvcs=false -o ./bin/kontinuum ./cmd/kontinuum"
+  # Built to /tmp (outside the bind-mounted repo root) rather than ./bin, so
+  # air's build output never leaves permission-mismatched files behind in
+  # bin/ on the host (see Makefile's build target, which does write there).
+  # args_bin (rather than appending "serve" onto entrypoint/full_bin as one
+  # string) is load-bearing: air only shell-splits full_bin, not entrypoint,
+  # and an absolute entrypoint path with an appended arg fails with a
+  # confusing "not found" since it's run as a single, unsplit argv[0].
+  entrypoint = "/tmp/kontinuum-air/kontinuum"
+  args_bin = ["serve"]
+  cmd = "go build -buildvcs=false -o /tmp/kontinuum-air/kontinuum ./cmd/kontinuum"
   delay = 1000
   exclude_dir = ["bin", "vendor"]
   exclude_regex = ["_test.go"]
   exclude_unchanged = false
   follow_symlink = false
-  full_bin = "./bin/kontinuum serve"
   include_dir = ["."]
   include_ext = ["go", "tpl", "tmpl", "html", "yaml"]
   kill_delay = "2s"
-  log = "bin/build-errors.log"
+  log = "/tmp/kontinuum-air/build-errors.log"
   send_interrupt = true
   stop_on_error = true
 
