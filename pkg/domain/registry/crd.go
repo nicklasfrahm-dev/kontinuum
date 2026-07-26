@@ -2,10 +2,12 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
 	"reflect"
+	"strings"
 	"time"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -14,8 +16,10 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	restclient "k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
@@ -125,25 +129,39 @@ func kontinuumSchema() *apiextensionsv1.JSONSchemaProps {
 
 // EnsureCRD is a libkapi.PostStartHookFunc — see its registration in
 // pkg/cli/serve.go via libkapi.WithPostStartHook. It builds an
-// apiextensions client from loopbackConfig (the server's own privileged
-// identity, only reachable once libkapi's post-start hooks run — after
-// ListenAndServe's listener is bound and Serve is already running, but
-// before the controller manager starts), creates the CRD and waits for it
-// to become Established, then waits for Kontinuum's GVK to actually resolve
-// through a RESTMapper built off the same loopbackConfig — the same kind of
-// RESTMapper the registry's own Manager (and any other controller-runtime
-// client) uses. Established alone doesn't guarantee that; since
-// WithPostStartHook registrations run before the controller manager starts
-// (see libkapi's own doc on WithPostStartHook and WithController), this
-// closes the gap before anything downstream can lose the race. logger
-// receives a warning for every retry along the way.
+// apiextensions client and a Kontinuum client (the latter only needed to
+// delete stale objects if ApplyCRD hits a stale-stored-version conflict —
+// see migrateStaleStoredVersions) from loopbackConfig (the server's own
+// privileged identity, only reachable once libkapi's post-start hooks run —
+// after ListenAndServe's listener is bound and Serve is already running,
+// but before the controller manager starts), creates the CRD and waits for
+// it to become Established, then waits for Kontinuum's GVK to actually
+// resolve through a RESTMapper built off the same loopbackConfig — the same
+// kind of RESTMapper the registry's own Manager (and any other
+// controller-runtime client) uses. Established alone doesn't guarantee
+// that; since WithPostStartHook registrations run before the controller
+// manager starts (see libkapi's own doc on WithPostStartHook and
+// WithController), this closes the gap before anything downstream can lose
+// the race. logger receives a warning for every retry along the way.
 func EnsureCRD(ctx context.Context, loopbackConfig *restclient.Config, logger *slog.Logger) error {
-	client, err := apiextensionsclientset.NewForConfig(loopbackConfig)
+	apiextensionsClient, err := apiextensionsclientset.NewForConfig(loopbackConfig)
 	if err != nil {
 		return fmt.Errorf("failed to build apiextensions client: %w", err)
 	}
 
-	err = ensureCRD(ctx, client, logger)
+	scheme := runtime.NewScheme()
+
+	err = v1alpha2.AddToScheme(scheme)
+	if err != nil {
+		return fmt.Errorf("failed to register kontinuum.sh/v1alpha2 scheme: %w", err)
+	}
+
+	kontinuums, err := client.New(loopbackConfig, client.Options{Scheme: scheme})
+	if err != nil {
+		return fmt.Errorf("failed to build kontinuum client: %w", err)
+	}
+
+	err = ensureCRD(ctx, apiextensionsClient, kontinuums, logger)
 	if err != nil {
 		return err
 	}
@@ -207,15 +225,18 @@ func waitForDiscoverable(ctx context.Context, loopbackConfig *restclient.Config,
 // another kontinuum replica reconciling the same CRD concurrently) isn't
 // fatal, only crdEstablishTimeout running out is. Retries use crdBackoff
 // (exponential, capped at crdMaxPollInterval); each retry logs a warning.
-func ensureCRD(ctx context.Context, client apiextensionsclientset.Interface, logger *slog.Logger) error {
-	crds := client.ApiextensionsV1().CustomResourceDefinitions()
+func ensureCRD(
+	ctx context.Context, apiextensionsClient apiextensionsclientset.Interface, kontinuums client.Client,
+	logger *slog.Logger,
+) error {
+	crds := apiextensionsClient.ApiextensionsV1().CustomResourceDefinitions()
 
 	timeoutCtx, cancel := context.WithTimeout(ctx, crdEstablishTimeout)
 	defer cancel()
 
 	err := wait.ExponentialBackoffWithContext(timeoutCtx, crdBackoff(),
 		func(ctx context.Context) (bool, error) {
-			err := ApplyCRD(ctx, crds)
+			err := ApplyCRD(ctx, crds, kontinuums, logger)
 			if err != nil {
 				logger.Warn("Failed to create or update kontinuums.kontinuum.sh crd, retrying", "error", err)
 
@@ -250,7 +271,17 @@ func ensureCRD(ctx context.Context, client apiextensionsclientset.Interface, log
 // definition forever, since Create alone is a no-op once the object exists.
 // A no-op Update when the spec already matches is avoided so this doesn't
 // churn the CRD's resourceVersion on every retry once it's converged.
-func ApplyCRD(ctx context.Context, crds apiextensionsv1client.CustomResourceDefinitionInterface) error {
+//
+// An update can still fail with isStaleStoredVersionError: status.storedVersions
+// (bookkeeping the apiserver — not this code — maintains) can reference a
+// version, like v1alpha1 before the Role-into-status migration, that
+// CustomResourceDefinition() no longer lists at all, and apiextensions
+// refuses to drop a version still referenced there. kontinuums is only
+// needed to recover from that one case — see migrateStaleStoredVersions.
+func ApplyCRD(
+	ctx context.Context, crds apiextensionsv1client.CustomResourceDefinitionInterface, kontinuums client.Client,
+	logger *slog.Logger,
+) error {
 	desired := CustomResourceDefinition()
 
 	_, err := crds.Create(ctx, desired, metav1.CreateOptions{})
@@ -274,8 +305,93 @@ func ApplyCRD(ctx context.Context, crds apiextensionsv1client.CustomResourceDefi
 	existing.Spec = desired.Spec
 
 	_, err = crds.Update(ctx, existing, metav1.UpdateOptions{})
-	if err != nil {
+	if err == nil {
+		return nil
+	}
+
+	if !isStaleStoredVersionError(err) {
 		return fmt.Errorf("failed to update existing %s crd: %w", crdName(), err)
+	}
+
+	err = migrateStaleStoredVersions(ctx, crds, kontinuums, logger)
+	if err != nil {
+		return fmt.Errorf("failed to migrate %s crd off a removed api version: %w", crdName(), err)
+	}
+
+	return nil
+}
+
+// isStaleStoredVersionError reports whether err is the specific
+// apiextensions validation failure that fires when status.storedVersions
+// references an API version CustomResourceDefinition() no longer lists in
+// spec.versions — the case migrateStaleStoredVersions handles.
+func isStaleStoredVersionError(err error) bool {
+	var statusErr *apierrors.StatusError
+
+	if !errors.As(err, &statusErr) || statusErr.Status().Details == nil {
+		return false
+	}
+
+	for _, cause := range statusErr.Status().Details.Causes {
+		if strings.HasPrefix(cause.Field, "status.storedVersions") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// migrateStaleStoredVersions handles isStaleStoredVersionError: a version
+// this process no longer knows about — e.g. v1alpha1, from before the Role
+// moved into status — is still recorded in status.storedVersions from a
+// previous run, and apiextensions refuses to drop a version that's still
+// referenced there. Kontinuum objects are ephemeral heartbeats, not data
+// worth preserving across an API shape change (see Heartbeat and
+// TTLReconciler): a live process re-registers its own within one heartbeat
+// interval, and anything else was already a TTL-deletion candidate. So this
+// deletes every existing Kontinuum, resets status.storedVersions to just
+// the current storage version, and updates the spec to match — which by
+// then no longer conflicts, since nothing references the removed version
+// anymore.
+func migrateStaleStoredVersions(
+	ctx context.Context, crds apiextensionsv1client.CustomResourceDefinitionInterface, kontinuums client.Client,
+	logger *slog.Logger,
+) error {
+	var list v1alpha2.KontinuumList
+
+	err := kontinuums.List(ctx, &list)
+	if err != nil {
+		return fmt.Errorf("failed to list existing kontinuums: %w", err)
+	}
+
+	for i := range list.Items {
+		item := &list.Items[i]
+
+		err := kontinuums.Delete(ctx, item)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete kontinuum %q registered under a removed api version: %w", item.Name, err)
+		}
+
+		logger.Warn("Deleted kontinuum registered under a removed api version", "name", item.Name)
+	}
+
+	crd, err := crds.Get(ctx, crdName(), metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to fetch %s crd: %w", crdName(), err)
+	}
+
+	crd.Status.StoredVersions = []string{v1alpha2.APIVersion}
+
+	crd, err = crds.UpdateStatus(ctx, crd, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to reset stored versions: %w", err)
+	}
+
+	crd.Spec = CustomResourceDefinition().Spec
+
+	_, err = crds.Update(ctx, crd, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update spec after resetting stored versions: %w", err)
 	}
 
 	return nil
