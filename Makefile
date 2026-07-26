@@ -8,6 +8,9 @@ RESET := \033[0m
 BINDIR := bin
 BINARY := $(BINDIR)/kontinuum
 
+# Install
+INSTALLDIR ?= $(HOME)/.local/bin
+
 # Version, derived from git. Falls back to "dev" outside a git repo.
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -ldflags "-X github.com/nicklasfrahm/kontinuum/pkg/cli.version=$(VERSION)"
@@ -46,6 +49,11 @@ build: ## Build the binary
 .PHONY: run
 run: build ## Run the server locally with dev-friendly logging (info, console)
 	KONTINUUM_LOG_LEVEL=info KONTINUUM_LOG_FORMAT=console ./$(BINARY) serve
+
+.PHONY: install
+install: build ## Build the binary and install it to ~/.local/bin
+	@mkdir -p $(INSTALLDIR)
+	install $(BINARY) $(INSTALLDIR)/kontinuum
 
 .PHONY: dev
 dev: ## Start development environment with hot reload (air + postgres)

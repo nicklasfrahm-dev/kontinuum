@@ -3,6 +3,8 @@ package cli
 
 import (
 	"github.com/spf13/cobra"
+
+	"github.com/nicklasfrahm/kontinuum/pkg/cli/config"
 )
 
 // NewRootCmd builds kontinuum's root command.
@@ -26,6 +28,7 @@ func NewRootCmd() *cobra.Command {
 
 	cmd.AddCommand(NewServeCmd())
 	cmd.AddCommand(NewVersionCmd())
+	cmd.AddCommand(config.NewCmd())
 
 	return cmd
 }
