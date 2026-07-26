@@ -106,7 +106,7 @@ type Router struct {
 
 // NewRouter creates a new UI router backed by namespacesFor and
 // kontinuumsFor. cfg is shown on the settings page and is expected to
-// already be redacted (see config.Redact) — Router does not redact it
+// already be redacted (see config.Config.Redact) — Router does not redact it
 // itself. authEnabled shows or hides the nav's logout link; pass true only
 // when a /app/logout route is actually registered (see pkg/auth), since
 // otherwise the link would 404. invalidateSession may be nil (see

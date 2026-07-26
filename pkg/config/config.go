@@ -20,35 +20,23 @@ const envPrefix = "KONTINUUM_"
 // Config holds all kontinuum configuration. Each leaf string field carries a
 // `default` struct tag; the env-var name is auto-derived from its path.
 //
-// Log and OIDC are v1alpha2's own KontinuumLogConfigStatus/
-// KontinuumOIDCConfigStatus types, not locally redefined ones: those types
-// are also what a Kontinuum's status.config reports on its per-instance
-// settings page (/app/kontinuums/{name}), so this is the one place their
-// shape (field names, `default` values) is declared — see
-// v1alpha2.KontinuumStatus.Config's doc for why Server isn't shared the
-// same way (Region/Zone belong on KontinuumSpec, and Storage here must stay
-// the raw, connectable value, never the redacted display copy status uses).
-type Config struct {
-	Server ServerConfig
-	Log    v1alpha2.KontinuumLogConfigStatus
-	OIDC   v1alpha2.KontinuumOIDCConfigStatus
-}
-
-// ServerConfig holds the API server listener and storage configuration.
-type ServerConfig struct {
-	// Addr is the listener address. Defaults to ":8080".
-	Addr string `default:":8080"`
-	// Storage is the connection string for the storage backend.
-	// See pkg/libkapi for supported schemes (sqlite, postgres, mysql, etcd, ...).
-	Storage string `default:"sqlite://kontinuum.db"`
-	// Region is the region this server manages. Leave unset, along with
-	// Zone, to run as the control-plane entrypoint — see registry.Role.
-	Region string `default:""`
-	// Zone is the availability zone this server manages. Leave unset,
-	// along with Region, to run as the control-plane entrypoint — see
-	// registry.Role.
-	Zone string `default:""`
-}
+// It is defined directly in terms of v1alpha2.KontinuumConfigStatus — the
+// very type a Kontinuum's status.config reports on its per-instance
+// settings page (/app/kontinuums/{name}) — rather than a separately
+// declared struct of the same shape, so there is exactly one definition to
+// maintain and a value read from status.config maps 1:1 onto the env vars
+// that produced it (see v1alpha2.KontinuumStatus.Config's doc for the one
+// accepted duplication, Region/Zone, that makes that mapping exact). It's a
+// distinct named type rather than a plain alias (`type Config =
+// v1alpha2.KontinuumConfigStatus`) only so Redact below can live here,
+// where the redaction logic belongs, rather than on an API schema type —
+// Go only allows attaching methods to a type from the package that defines
+// it, and a plain alias would still count as v1alpha2's own type for that
+// purpose. Converting between the two where they cross (see
+// pkg/cli/serve.go's displayConfig) is a plain type conversion: identical
+// underlying struct, so it can't fail or lose data. Server specifically
+// holds the raw, connectable Storage value here — see Redact.
+type Config v1alpha2.KontinuumConfigStatus
 
 // Load reads configuration from KONTINUUM_-prefixed environment variables,
 // falling back to the `default` struct tag when an env var is unset or empty.
@@ -70,22 +58,23 @@ func Defaults() *Config {
 	return cfg
 }
 
-// Redact returns a copy of cfg with sensitive fields stripped, safe to log
-// or display — currently, any username/password embedded in
-// Server.Storage (e.g. "postgres://user:pass@host/db").
-func Redact(cfg Config) Config {
-	redacted := cfg
-	redacted.Server.Storage = RedactStorage(cfg.Server.Storage)
+// Redact returns a copy of c with sensitive fields stripped, safe to log,
+// display, or copy onto a Kontinuum's broadly-readable status.config —
+// currently, any username/password embedded in Server.Storage (e.g.
+// "postgres://user:pass@host/db"). The unredacted original is what stays
+// confidential, in the Secret status.secretRef points to — see
+// pkg/domain/registry.Heartbeat.SecretData.
+func (c Config) Redact() Config {
+	redacted := c
+	redacted.Server.Storage = RedactStorage(c.Server.Storage)
 
 	return redacted
 }
 
 // RedactStorage strips an embedded username/password from a storage
 // connection string, leaving the scheme, host, path, and query intact.
-// Exported (not just used via Redact) so callers that only have the raw
-// connection string — not a whole Config — can still redact it; see
-// pkg/cli/serve.go, which uses this to populate
-// v1alpha2.KontinuumConfigStatus.StorageTarget.
+// Exported (not just used via Config.Redact) so callers that only have the
+// raw connection string — not a whole Config — can still redact it.
 func RedactStorage(raw string) string {
 	parsed, err := url.Parse(raw)
 	if err != nil {

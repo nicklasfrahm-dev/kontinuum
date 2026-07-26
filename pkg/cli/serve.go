@@ -204,7 +204,7 @@ func buildServer(
 
 	uiRouter := ui.NewRouter(
 		namespaceListerFactory(cfg.Server.Addr), kontinuumListerFactory(cfg.Server.Addr, scheme),
-		version, config.Redact(*cfg), oidcHandler != nil, invalidateSession)
+		version, cfg.Redact(), oidcHandler != nil, invalidateSession)
 
 	registryOpts, err := registryOptions(cfg, logger, scheme)
 	if err != nil {
@@ -281,26 +281,18 @@ func registryOptions(cfg *config.Config, logger *slog.Logger, scheme *runtime.Sc
 }
 
 // displayConfig builds the non-confidential configuration snapshot written
-// to status.config on every heartbeat — see v1alpha2.KontinuumConfigStatus.
-// cfg.Log and cfg.OIDC are already that same status type (see
-// pkg/config.Config's doc), so they're copied through as-is; only Server
-// needs translating — Addr copies straight across, Storage is redacted
-// (config.RedactStorage) rather than omitted, since the unredacted original
-// still goes into the Secret status.secretRef points to (see
-// registry.Config.Storage) — and OIDC.Enabled needs deriving, since
-// pkg/config.Load never sets it (see KontinuumOIDCConfigStatus's doc).
+// to status.config on every heartbeat. cfg.Redact() is Config itself with
+// Server.Storage's credentials stripped (the unredacted original still goes
+// into the Secret status.secretRef points to — see registry.Config.Storage)
+// — since Config is defined directly in terms of v1alpha2.KontinuumConfigStatus
+// (see pkg/config.Config's doc), the redacted copy converts straight across
+// with no field-by-field copying. Only OIDC.Enabled needs deriving first,
+// since pkg/config.Load never sets it (see KontinuumOIDCConfigStatus's doc).
 func displayConfig(cfg *config.Config) v1alpha2.KontinuumConfigStatus {
-	oidc := cfg.OIDC
-	oidc.Enabled = oidc.IssuerURL != ""
+	redacted := cfg.Redact()
+	redacted.OIDC.Enabled = redacted.OIDC.IssuerURL != ""
 
-	return v1alpha2.KontinuumConfigStatus{
-		Server: v1alpha2.KontinuumServerConfigStatus{
-			Addr:    cfg.Server.Addr,
-			Storage: config.RedactStorage(cfg.Server.Storage),
-		},
-		Log:  cfg.Log,
-		OIDC: oidc,
-	}
+	return v1alpha2.KontinuumConfigStatus(redacted)
 }
 
 // namespaceListerFactory builds a ui.NamespaceListerFactory that calls back

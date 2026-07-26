@@ -75,25 +75,24 @@ type KontinuumStatus struct {
 	// +optional
 	SecretRef KontinuumSecretReference `json:"secretRef"`
 	// Config is this process's own non-confidential configuration, shown on
-	// its per-instance settings page (/app/kontinuums/{name}). Its shape
-	// mirrors pkg/config.Config's own Server/Log/OIDC grouping exactly —
-	// pkg/config.Config.Log and .OIDC are in fact this same
-	// KontinuumLogConfigStatus/KontinuumOIDCConfigStatus type (see that
-	// package), so there is exactly one definition of each shape, not two
-	// that could drift apart. Server isn't shared the same way: Region/Zone
-	// (part of pkg/config.ServerConfig, needed to seed KontinuumSpec at
-	// startup) already live on KontinuumSpec, not here, and Storage here
-	// must always be the credential-stripped display copy — never the raw,
-	// connectable value pkg/config.ServerConfig.Storage holds — so keeping
-	// it a distinct type keeps that distinction from being type-checked
-	// away by accident.
+	// its per-instance settings page (/app/kontinuums/{name}). It is in fact
+	// pkg/config.Config itself: Server/Log/OIDC below are the very types
+	// pkg/config.Config's own fields are declared with (see that package),
+	// so there is exactly one definition of each shape, not two that could
+	// drift apart, and a value read here maps 1:1 onto the env vars that
+	// produced it. The one accepted duplication is Region/Zone, which also
+	// live on KontinuumSpec — harmless, and it's what keeps the mapping
+	// exact rather than Server needing an asterisk. Storage here is always
+	// the credential-stripped display copy (see pkg/config.RedactStorage) —
+	// never the raw, connectable value pkg/config.Config.Server.Storage
+	// holds before that redaction — see pkg/cli/serve.go's displayConfig,
+	// the one place that redaction happens.
 	// +optional
 	Config KontinuumConfigStatus `json:"config"`
 }
 
-// KontinuumConfigStatus is a Kontinuum's own non-confidential
-// configuration — see KontinuumStatus.Config's doc for why this mirrors,
-// but doesn't always literally share, pkg/config.Config's shape.
+// KontinuumConfigStatus is pkg/config.Config's own shape — see
+// KontinuumStatus.Config's doc.
 type KontinuumConfigStatus struct {
 	// +optional
 	Server KontinuumServerConfigStatus `json:"server"`
@@ -103,18 +102,26 @@ type KontinuumConfigStatus struct {
 	OIDC KontinuumOIDCConfigStatus `json:"oidc"`
 }
 
-// KontinuumServerConfigStatus mirrors pkg/config.ServerConfig's
-// non-confidential fields.
+// KontinuumServerConfigStatus is pkg/config.ServerConfig, referenced
+// directly by that package rather than redefined — see
+// pkg/config.Config.Server. Region/Zone duplicate KontinuumSpec's own
+// fields — see KontinuumStatus.Config's doc for why that's accepted.
 type KontinuumServerConfigStatus struct {
 	// Addr is the listener address this process is serving on.
 	// +optional
-	Addr string `json:"addr"`
+	Addr string `default:":8080" json:"addr"`
 	// Storage is the storage connection string with any embedded
 	// credentials stripped (see pkg/config.RedactStorage). The
 	// credential-bearing original lives in the Secret
 	// KontinuumStatus.SecretRef points to.
 	// +optional
-	Storage string `json:"storage"`
+	Storage string `default:"sqlite://kontinuum.db" json:"storage"`
+	// Region duplicates spec.region — see this type's own doc.
+	// +optional
+	Region string `default:"" json:"region"`
+	// Zone duplicates spec.zone — see this type's own doc.
+	// +optional
+	Zone string `default:"" json:"zone"`
 }
 
 // KontinuumLogConfigStatus is pkg/config.LogConfig, referenced directly by

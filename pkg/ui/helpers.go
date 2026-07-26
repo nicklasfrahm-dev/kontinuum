@@ -11,7 +11,7 @@ const hoursPerDay = 24
 // storageBackendName returns the friendly backend name for a storage
 // connection string's URL scheme (e.g. "postgres://..." -> "PostgreSQL"),
 // shown on the settings page. target is expected to already be redacted
-// (see config.Redact) — this only inspects the scheme.
+// (see config.Config.Redact) — this only inspects the scheme.
 func storageBackendName(target string) string {
 	parsed, err := url.Parse(target)
 	if err != nil {
