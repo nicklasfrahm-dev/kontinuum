@@ -96,9 +96,21 @@ func runServe(cmd *cobra.Command, addr string, storage string) error {
 		serveErr <- server.ListenAndServe(ctx)
 	}()
 
-	sig := <-sigChan
+	// A select, not a plain <-sigChan: ListenAndServe can fail before any
+	// signal ever arrives (e.g. the listener address is already in use),
+	// and that error only surfaces on serveErr. Blocking on sigChan alone
+	// would leave the process hanging forever on a startup failure instead
+	// of exiting with it.
+	select {
+	case err = <-serveErr:
+		if err != nil {
+			return fmt.Errorf("server exited with error: %w", err)
+		}
 
-	logger.Info("Received signal, shutting down", "signal", sig.String())
+		return nil
+	case sig := <-sigChan:
+		logger.Info("Received signal, shutting down", "signal", sig.String())
+	}
 
 	cancel()
 
