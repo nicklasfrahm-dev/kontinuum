@@ -11,65 +11,32 @@ import (
 	"reflect"
 	"strings"
 	"unicode"
+
+	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 )
 
 const envPrefix = "KONTINUUM_"
 
 // Config holds all kontinuum configuration. Each leaf string field carries a
 // `default` struct tag; the env-var name is auto-derived from its path.
-type Config struct {
-	Server ServerConfig
-	Log    LogConfig
-	OIDC   OIDCConfig
-}
-
-// ServerConfig holds the API server listener and storage configuration.
-type ServerConfig struct {
-	// Addr is the listener address. Defaults to ":8080".
-	Addr string `default:":8080"`
-	// Storage is the connection string for the storage backend.
-	// See pkg/libkapi for supported schemes (sqlite, postgres, mysql, etcd, ...).
-	Storage string `default:"sqlite://kontinuum.db"`
-	// Region is the region this server manages. Leave unset, along with
-	// Zone, to run as the control-plane entrypoint — see registry.Role.
-	Region string `default:""`
-	// Zone is the availability zone this server manages. Leave unset,
-	// along with Region, to run as the control-plane entrypoint — see
-	// registry.Role.
-	Zone string `default:""`
-}
-
-// LogConfig holds logging configuration. Level and Format are stored as
-// strings and parsed by pkg/logging, keeping this package dependency-free.
-type LogConfig struct {
-	// Level is one of: debug, info, warn, error. Defaults to "warn".
-	Level string `default:"warn"`
-	// Format is one of: console, text, json. Defaults to "json".
-	// console and text are equivalent (colorful, human-readable).
-	Format string `default:"json"`
-}
-
-// OIDCConfig configures OIDC authentication: bearer-token validation on the
-// Kubernetes-style API and the PKCE browser login flow for the /app UI. An
-// empty IssuerURL disables OIDC entirely, matching kontinuum's default of no
-// authentication.
-type OIDCConfig struct {
-	// IssuerURL is the OIDC issuer URL (e.g. Dex). The discovery document is
-	// fetched from {IssuerURL}/.well-known/openid-configuration at startup.
-	IssuerURL string `default:""`
-	// ClientID is the OAuth 2.0 public client ID registered with the issuer.
-	// No client secret is used — authentication relies entirely on PKCE.
-	ClientID string `default:"kontinuum"`
-	// RedirectURL is the browser login flow's callback URL. It must exactly
-	// match one of the redirect URIs registered with the issuer, and is
-	// reused as both the login-initiation and callback endpoint since the
-	// registered URI has no dedicated /callback path.
-	RedirectURL string `default:"http://localhost:8080/app"`
-	// AdminGroups is a comma-delimited list of OIDC groups granted full
-	// (system:masters-equivalent) access. Members of system:masters are
-	// always allowed; every other group has no access by default.
-	AdminGroups string `default:""`
-}
+//
+// It is defined directly in terms of v1alpha2.KontinuumConfigStatus — the
+// very type a Kontinuum's status.config reports on its per-instance
+// settings page (/app/kontinuums/{name}) — rather than a separately
+// declared struct of the same shape, so there is exactly one definition to
+// maintain and a value read from status.config maps 1:1 onto the env vars
+// that produced it (see v1alpha2.KontinuumStatus.Config's doc for the one
+// accepted duplication, Region/Zone, that makes that mapping exact). It's a
+// distinct named type rather than a plain alias (`type Config =
+// v1alpha2.KontinuumConfigStatus`) only so Redact below can live here,
+// where the redaction logic belongs, rather than on an API schema type —
+// Go only allows attaching methods to a type from the package that defines
+// it, and a plain alias would still count as v1alpha2's own type for that
+// purpose. Converting between the two where they cross (see
+// pkg/cli/serve.go's displayConfig) is a plain type conversion: identical
+// underlying struct, so it can't fail or lose data. Server specifically
+// holds the raw, connectable Storage value here — see Redact.
+type Config v1alpha2.KontinuumConfigStatus
 
 // Load reads configuration from KONTINUUM_-prefixed environment variables,
 // falling back to the `default` struct tag when an env var is unset or empty.
@@ -82,28 +49,35 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
-// Defaults returns a Config populated with only the `default` struct tag
-// values, ignoring environment variables. Useful for cobra flag defaults.
-func Defaults() *Config {
-	cfg := &Config{}
-	loadStruct(reflect.ValueOf(cfg).Elem(), nil, false)
-
-	return cfg
+// Defaults populates c with only the `default` struct tag values, ignoring
+// environment variables and discarding whatever c already held — useful for
+// cobra flag defaults. Load overlays environment variables on top of this
+// same set of defaults; call it on a fresh &Config{} for the same effect
+// Defaults gives standalone.
+func (c *Config) Defaults() {
+	loadStruct(reflect.ValueOf(c).Elem(), nil, false)
 }
 
-// Redact returns a copy of cfg with sensitive fields stripped, safe to log
-// or display — currently, any username/password embedded in
-// Server.Storage (e.g. "postgres://user:pass@host/db").
-func Redact(cfg Config) Config {
-	redacted := cfg
-	redacted.Server.Storage = redactStorage(cfg.Server.Storage)
+// Redact returns a copy of c with sensitive fields stripped, safe to log,
+// display, or copy onto a Kontinuum's broadly-readable status.config —
+// currently, any username/password embedded in Server.Storage (e.g.
+// "postgres://user:pass@host/db"). The unredacted original is what stays
+// confidential, in the Secret status.secretRef points to — see
+// pkg/domain/registry.Heartbeat.SecretData. Pointer receiver purely to
+// match Defaults below (which must take one to populate c in place) —
+// Redact itself never modifies c.
+func (c *Config) Redact() Config {
+	redacted := *c
+	redacted.Server.Storage = RedactStorage(c.Server.Storage)
 
 	return redacted
 }
 
-// redactStorage strips an embedded username/password from a storage
+// RedactStorage strips an embedded username/password from a storage
 // connection string, leaving the scheme, host, path, and query intact.
-func redactStorage(raw string) string {
+// Exported (not just used via Config.Redact) so callers that only have the
+// raw connection string — not a whole Config — can still redact it.
+func RedactStorage(raw string) string {
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return raw

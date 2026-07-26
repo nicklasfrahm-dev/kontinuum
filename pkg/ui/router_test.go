@@ -26,7 +26,7 @@ import (
 var errFactory = errors.New("factory failed")
 
 // errTestForbidden is the wrapped reason on a forbidden test fixture — see
-// TestHandleTopologyInvalidatesSessionOnForbidden.
+// TestHandleRegistryInvalidatesSessionOnForbidden.
 var errTestForbidden = errors.New("forbidden: user is not in admin group")
 
 // Shared OIDC test fixture values, reused across handleSettings tests.
@@ -49,7 +49,30 @@ func (s stubNamespaceLister) List(context.Context, metav1.ListOptions) (*corev1.
 type stubKontinuumLister struct {
 	items     []v1alpha2.Kontinuum
 	err       error
+	getErr    error
 	deleteErr error
+}
+
+// Get looks up a Kontinuum by name in items, matching a real client's
+// NotFound behavior when no item matches — see
+// TestHandleInstanceDetailReturnsNotFoundForUnknownInstance.
+func (s stubKontinuumLister) Get(
+	_ context.Context, key client.ObjectKey, obj client.Object, _ ...client.GetOption,
+) error {
+	if s.getErr != nil {
+		return s.getErr
+	}
+
+	for _, item := range s.items {
+		if item.Name == key.Name {
+			// obj is always *v1alpha2.Kontinuum in this package's tests.
+			*obj.(*v1alpha2.Kontinuum) = item //nolint:forcetypeassert // see comment above
+
+			return nil
+		}
+	}
+
+	return apierrors.NewNotFound(schema.GroupResource{Group: v1alpha2.GroupName, Resource: "kontinuums"}, key.Name)
 }
 
 func (s stubKontinuumLister) List(_ context.Context, list client.ObjectList, _ ...client.ListOption) error {
@@ -242,48 +265,159 @@ func TestHandleHomeShowsLogoutLinkOnlyWhenAuthEnabled(t *testing.T) {
 	}
 }
 
-func TestHandleSettingsShowsOIDCDetailsOnlyWhenAuthEnabled(t *testing.T) {
-	t.Parallel()
-
-	factory := func(context.Context) (ui.NamespaceLister, error) {
-		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
-	}
-
-	cfg := config.Config{}
-	cfg.OIDC.IssuerURL = testOIDCIssuerURL
-	cfg.OIDC.ClientID = testOIDCClientID
-	cfg.OIDC.AdminGroups = "platform-team"
-
-	for _, authEnabled := range []bool{true, false} {
-		kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
-			return stubKontinuumLister{}, nil
-		}
-
-		router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, authEnabled, nil)
-
-		mux := http.NewServeMux()
-		router.RegisterRoutes(mux, nil, nil)
-
-		recorder := httptest.NewRecorder()
-		mux.ServeHTTP(recorder, newTestRequest(t, "/app/settings"))
-
-		resp := recorder.Result()
-
-		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-		require.NoError(t, resp.Body.Close())
-
-		if authEnabled {
-			assert.Contains(t, string(body), testOIDCIssuerURL)
-			assert.Contains(t, string(body), "platform-team")
-		} else {
-			assert.NotContains(t, string(body), testOIDCIssuerURL)
-			assert.NotContains(t, string(body), "platform-team")
-		}
+// instanceWithConfig builds a Kontinuum fixture carrying the given
+// status.config — shared by the handleInstanceDetail tests below.
+func instanceWithConfig(name string, cfg v1alpha2.KontinuumConfigStatus) v1alpha2.Kontinuum {
+	return v1alpha2.Kontinuum{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Status: v1alpha2.KontinuumStatus{
+			Role:      v1alpha2.RoleWorker,
+			SecretRef: v1alpha2.KontinuumSecretReference{Name: name, Namespace: v1alpha2.DefaultSecretNamespace},
+			Config:    cfg,
+		},
 	}
 }
 
-func TestHandleSettingsShowsKubeconfigOnlyWhenAuthEnabled(t *testing.T) {
+func TestHandleInstanceDetailRendersInstanceSettings(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	item := instanceWithConfig("worker-1", v1alpha2.KontinuumConfigStatus{
+		Server: v1alpha2.KontinuumServerConfigStatus{Addr: ":8080", Storage: "postgres://db.internal:5432/kontinuum"},
+		Log:    v1alpha2.KontinuumLogConfigStatus{Level: "info", Format: "json"},
+		OIDC: v1alpha2.KontinuumOIDCConfigStatus{
+			Enabled: true, IssuerURL: testOIDCIssuerURL, ClientID: testOIDCClientID, AdminGroups: "platform-team",
+		},
+	})
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{items: []v1alpha2.Kontinuum{item}}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums/worker-1"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "worker-1")
+	assert.Contains(t, string(body), ":8080")
+	assert.Contains(t, string(body), "postgres://db.internal:5432/kontinuum")
+	assert.Contains(t, string(body), "kontinuum-system/worker-1")
+	assert.Contains(t, string(body), testOIDCIssuerURL)
+	assert.Contains(t, string(body), "platform-team")
+}
+
+func TestHandleInstanceDetailHidesOIDCDetailsWhenInstanceOIDCDisabled(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	item := instanceWithConfig("worker-1", v1alpha2.KontinuumConfigStatus{
+		OIDC: v1alpha2.KontinuumOIDCConfigStatus{Enabled: false, IssuerURL: testOIDCIssuerURL},
+	})
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{items: []v1alpha2.Kontinuum{item}}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums/worker-1"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.NotContains(t, string(body), testOIDCIssuerURL)
+}
+
+func TestHandleInstanceDetailReturnsNotFoundForUnknownInstance(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums/missing"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestHandleInstanceDetailReturnsServerErrorWhenFactoryFails(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return nil, errFactory
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums/worker-1"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+}
+
+func TestHandleInstanceDetailInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: "kontinuums"}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{getErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
+	}
+
+	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/kontinuums/worker-1"), kontinuumFactory)
+}
+
+func TestHandleSettingsShowsOIDCKubeconfigWhenAuthEnabled(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -294,49 +428,82 @@ func TestHandleSettingsShowsKubeconfigOnlyWhenAuthEnabled(t *testing.T) {
 	cfg.OIDC.IssuerURL = testOIDCIssuerURL
 	cfg.OIDC.ClientID = testOIDCClientID
 
-	for _, authEnabled := range []bool{true, false} {
-		kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
-			return stubKontinuumLister{}, nil
-		}
-
-		router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, authEnabled, nil)
-
-		mux := http.NewServeMux()
-		router.RegisterRoutes(mux, nil, nil)
-
-		recorder := httptest.NewRecorder()
-		mux.ServeHTTP(recorder, newTestRequest(t, "/app/settings"))
-
-		resp := recorder.Result()
-
-		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-		require.NoError(t, resp.Body.Close())
-
-		if authEnabled {
-			assert.Contains(t, string(body), "kubectl access")
-			assert.Contains(t, string(body), "server: http://example.com")
-			assert.NotContains(t, string(body), "insecure-skip-tls-verify")
-			assert.Contains(t, string(body), "name: kontinuum-example.com\n    cluster:")
-			assert.Contains(t, string(body), "cluster: kontinuum-example.com")
-			assert.Contains(t, string(body), "name: oidc@kontinuum-example.com")
-			assert.Contains(t, string(body), "current-context: oidc@kontinuum-example.com")
-			assert.Contains(t, string(body), "user: kontinuum-example.com")
-			assert.Contains(t, string(body), "name: kontinuum-example.com\n    user:")
-			assert.NotContains(t, string(body), "user: oidc\n")
-			assert.NotContains(t, string(body), "name: oidc\n")
-			assert.Contains(t, string(body), "--oidc-issuer-url="+testOIDCIssuerURL)
-			assert.Contains(t, string(body), "--oidc-client-id="+testOIDCClientID)
-			assert.Contains(t, string(body), "downloadKubeconfig()")
-			assert.Contains(t, string(body), "kontinuum config import")
-			assert.Contains(t, string(body), "copyImportSnippet(this)")
-			assert.Contains(t, string(body), "KUBECONFIG")
-		} else {
-			assert.NotContains(t, string(body), "kubectl access")
-			assert.NotContains(t, string(body), "oidc-login")
-			assert.NotContains(t, string(body), "kontinuum config import")
-		}
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{}, nil
 	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, true, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/settings"))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Contains(t, string(body), "kubectl access")
+	assert.Contains(t, string(body), "server: http://example.com")
+	assert.NotContains(t, string(body), "insecure-skip-tls-verify")
+	assert.Contains(t, string(body), "name: kontinuum-example.com\n    cluster:")
+	assert.Contains(t, string(body), "cluster: kontinuum-example.com")
+	assert.Contains(t, string(body), "name: oidc@kontinuum-example.com")
+	assert.Contains(t, string(body), "current-context: oidc@kontinuum-example.com")
+	assert.Contains(t, string(body), "user: kontinuum-example.com")
+	assert.Contains(t, string(body), "name: kontinuum-example.com\n    user:")
+	assert.NotContains(t, string(body), "user: oidc\n")
+	assert.NotContains(t, string(body), "name: oidc\n")
+	assert.Contains(t, string(body), "--oidc-issuer-url="+testOIDCIssuerURL)
+	assert.Contains(t, string(body), "--oidc-client-id="+testOIDCClientID)
+	assert.Contains(t, string(body), "downloadKubeconfig()")
+	assert.Contains(t, string(body), "kontinuum config import")
+	assert.Contains(t, string(body), "copyImportSnippet(this)")
+	assert.Contains(t, string(body), "KUBECONFIG")
+}
+
+func TestHandleSettingsShowsNoAuthKubeconfigWhenOIDCDisabled(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/settings"))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	// Kontinuum's default is no authentication at all, not no access — the
+	// kubectl access section (and a working kubeconfig) must still show.
+	assert.Contains(t, string(body), "kubectl access")
+	assert.Contains(t, string(body), "No authentication is required")
+	assert.Contains(t, string(body), "server: http://example.com")
+	assert.Contains(t, string(body), "name: kontinuum-example.com\n    cluster:")
+	assert.Contains(t, string(body), "cluster: kontinuum-example.com")
+	assert.Contains(t, string(body), "current-context: kontinuum-example.com")
+	assert.NotContains(t, string(body), "oidc-login")
+	assert.NotContains(t, string(body), "users:")
+	assert.Contains(t, string(body), "downloadKubeconfig()")
+	assert.Contains(t, string(body), "kontinuum config import")
+	assert.Contains(t, string(body), "copyImportSnippet(this)")
+	assert.Contains(t, string(body), "KUBECONFIG")
 }
 
 func TestHandleSettingsStripsPortFromKubeconfigClusterName(t *testing.T) {
@@ -380,7 +547,7 @@ func TestHandleSettingsStripsPortFromKubeconfigClusterName(t *testing.T) {
 	assert.NotContains(t, string(body), "oidc@example.com:8443")
 }
 
-func TestHandleSettingsSetsInsecureSkipTLSVerifyForLocalHosts(t *testing.T) {
+func TestHandleSettingsSetsInsecureSkipTLSVerifyForLocalHostsOverHTTPS(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -403,6 +570,9 @@ func TestHandleSettingsSetsInsecureSkipTLSVerifyForLocalHosts(t *testing.T) {
 
 		request := newTestRequest(t, "/app/settings")
 		request.Host = host
+		// A TLS-terminating reverse proxy is what would actually front a
+		// local deployment reached over https — see requestOrigin.
+		request.Header.Set("X-Forwarded-Proto", "https")
 
 		recorder := httptest.NewRecorder()
 		mux.ServeHTTP(recorder, request)
@@ -414,6 +584,46 @@ func TestHandleSettingsSetsInsecureSkipTLSVerifyForLocalHosts(t *testing.T) {
 		require.NoError(t, resp.Body.Close())
 
 		assert.Contains(t, string(body), "insecure-skip-tls-verify: true", "host %q", host)
+	}
+}
+
+func TestHandleSettingsOmitsInsecureSkipTLSVerifyForPlainHTTP(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	cfg := config.Config{}
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+	cfg.OIDC.ClientID = testOIDCClientID
+
+	// Plain http has no certificate to skip verifying at all, so even a
+	// local host that would otherwise look self-signed (see
+	// probablySelfSigned) must not get the line — see kubeconfig's doc.
+	for _, host := range []string{"localhost:8080", "127.0.0.1:8080", "[::1]:8080"} {
+		kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+			return stubKontinuumLister{}, nil
+		}
+
+		router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, true, nil)
+
+		mux := http.NewServeMux()
+		router.RegisterRoutes(mux, nil, nil)
+
+		request := newTestRequest(t, "/app/settings")
+		request.Host = host
+
+		recorder := httptest.NewRecorder()
+		mux.ServeHTTP(recorder, request)
+
+		resp := recorder.Result()
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+
+		assert.NotContains(t, string(body), "insecure-skip-tls-verify", "host %q", host)
 	}
 }
 
@@ -481,7 +691,7 @@ func TestRegisterRoutesDefaultsToUnconditionalAppRedirect(t *testing.T) {
 	assert.Equal(t, "/app/home", resp.Header.Get("Location"))
 }
 
-func TestHandleTopologyRendersInstances(t *testing.T) {
+func TestHandleRegistryRendersInstances(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -500,7 +710,7 @@ func TestHandleTopologyRendersInstances(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/topology"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums"))
 
 	resp := recorder.Result()
 
@@ -513,7 +723,7 @@ func TestHandleTopologyRendersInstances(t *testing.T) {
 	assert.Contains(t, string(body), "demo")
 }
 
-func TestHandleTopologyReturnsServerErrorWhenFactoryFails(t *testing.T) {
+func TestHandleRegistryReturnsServerErrorWhenFactoryFails(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -530,7 +740,7 @@ func TestHandleTopologyReturnsServerErrorWhenFactoryFails(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/topology"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums"))
 
 	resp := recorder.Result()
 
@@ -577,7 +787,7 @@ func assertForbiddenInvalidatesSession(
 	assert.NotEmpty(t, invalidatedWith)
 }
 
-func TestHandleTopologyInvalidatesSessionOnForbidden(t *testing.T) {
+func TestHandleRegistryInvalidatesSessionOnForbidden(t *testing.T) {
 	t.Parallel()
 
 	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: "kontinuums"}
@@ -586,10 +796,10 @@ func TestHandleTopologyInvalidatesSessionOnForbidden(t *testing.T) {
 		return stubKontinuumLister{err: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
 	}
 
-	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/topology"), kontinuumFactory)
+	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/kontinuums"), kontinuumFactory)
 }
 
-func TestHandleDeleteInstanceRemovesInstanceAndRerendersTopology(t *testing.T) {
+func TestHandleDeleteInstanceRemovesInstanceAndRerendersRegistry(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -606,7 +816,7 @@ func TestHandleDeleteInstanceRemovesInstanceAndRerendersTopology(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestDeleteRequest(t, "/app/topology/demo"))
+	mux.ServeHTTP(recorder, newTestDeleteRequest(t, "/app/kontinuums/demo"))
 
 	resp := recorder.Result()
 
@@ -636,7 +846,7 @@ func TestHandleDeleteInstanceReturnsBadGatewayOnFailure(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestDeleteRequest(t, "/app/topology/demo"))
+	mux.ServeHTTP(recorder, newTestDeleteRequest(t, "/app/kontinuums/demo"))
 
 	resp := recorder.Result()
 
@@ -654,5 +864,5 @@ func TestHandleDeleteInstanceInvalidatesSessionOnForbidden(t *testing.T) {
 		return stubKontinuumLister{deleteErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
 	}
 
-	assertForbiddenInvalidatesSession(t, newTestDeleteRequest(t, "/app/topology/demo"), kontinuumFactory)
+	assertForbiddenInvalidatesSession(t, newTestDeleteRequest(t, "/app/kontinuums/demo"), kontinuumFactory)
 }

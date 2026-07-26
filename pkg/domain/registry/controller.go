@@ -18,6 +18,16 @@ import (
 const (
 	defaultHeartbeatInterval = time.Minute
 	defaultStaleThreshold    = 5 * time.Minute
+
+	// storageSecretKey is the key Config.Storage is stored under in the
+	// Secret status.secretRef points to — matching pkg/config's
+	// KONTINUUM_SERVER_STORAGE env var name exactly, so the Secret can be
+	// mounted straight into a pod via envFrom with no translation layer.
+	// This is a key name, not a credential value — gosec's G101 flags it
+	// purely because "SECRET" appears in the string.
+	//
+	//nolint:gosec // false positive: an env var / secret key name, not a credential value
+	storageSecretKey = "KONTINUUM_SERVER_STORAGE"
 )
 
 // Config configures a Controller.
@@ -36,6 +46,18 @@ type Config struct {
 	// StaleThreshold is how long a Kontinuum may go without a heartbeat before
 	// the TTL reconciler deletes it. Defaults to five minutes when zero.
 	StaleThreshold time.Duration
+	// Version is this process's build version, written to status.version on
+	// every heartbeat.
+	Version string
+	// Storage is the storage backend connection string (e.g.
+	// "postgres://user:pass@host/db"). It can carry embedded credentials, so
+	// it's kept out of status and instead stored in a Secret status.secretRef
+	// points to — see Heartbeat.SecretData.
+	Storage string
+	// DisplayConfig is this process's own non-confidential configuration,
+	// written to status.config on every heartbeat — see
+	// v1alpha2.KontinuumConfigStatus.
+	DisplayConfig v1alpha2.KontinuumConfigStatus
 }
 
 // Controller wires kontinuum's server registry — the kontinuums.kontinuum.sh
@@ -83,12 +105,15 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 	}
 
 	heartbeat := &Heartbeat{
-		Client:   mgr.GetClient(),
-		Name:     InstanceName(os.Hostname()),
-		Role:     c.Config.Role,
-		Spec:     v1alpha2.KontinuumSpec{Region: c.Config.Region, Zone: c.Config.Zone},
-		Interval: c.Config.HeartbeatInterval,
-		Logger:   c.Config.Logger,
+		Client:     mgr.GetClient(),
+		Name:       InstanceName(os.Hostname()),
+		Role:       c.Config.Role,
+		Spec:       v1alpha2.KontinuumSpec{Region: c.Config.Region, Zone: c.Config.Zone},
+		Interval:   c.Config.HeartbeatInterval,
+		Logger:     c.Config.Logger,
+		Version:    c.Config.Version,
+		SecretData: map[string]string{storageSecretKey: c.Config.Storage},
+		Config:     c.Config.DisplayConfig,
 	}
 
 	combined := &CombinedReconciler{TTL: reconciler, Heartbeat: heartbeat}

@@ -12,7 +12,8 @@ import (
 func TestDefaults(t *testing.T) {
 	t.Parallel()
 
-	defaults := config.Defaults()
+	defaults := &config.Config{}
+	defaults.Defaults()
 
 	assert.Equal(t, ":8080", defaults.Server.Addr)
 	assert.Equal(t, "sqlite://kontinuum.db", defaults.Server.Storage)

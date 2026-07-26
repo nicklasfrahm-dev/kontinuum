@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -52,6 +53,11 @@ func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
 	scheme := runtime.NewScheme()
 
 	err := v1alpha2.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	// corev1 is needed too: Heartbeat.ensureSecret creates a Namespace and
+	// Secret alongside the Kontinuum object itself.
+	err = corev1.AddToScheme(scheme)
 	require.NoError(t, err)
 
 	return fake.NewClientBuilder().

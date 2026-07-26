@@ -12,6 +12,7 @@ import (
 	"github.com/kommodity-io/kommodity/pkg/libkapi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -195,6 +196,7 @@ func startTestServer(ctx context.Context, t *testing.T, withController bool) (ct
 	scheme := runtime.NewScheme()
 	require.NoError(t, v1alpha1.AddToScheme(scheme))
 	require.NoError(t, v1alpha2.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
 
 	caBundle, err := registry.EnsureConversionWebhookCert()
 	require.NoError(t, err)

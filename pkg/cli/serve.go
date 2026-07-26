@@ -15,6 +15,7 @@ import (
 
 	"github.com/kommodity-io/kommodity/pkg/libkapi"
 	"github.com/spf13/cobra"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -34,7 +35,8 @@ const shutdownTimeout = 10 * time.Second
 // NewServeCmd builds the serve command, which starts the Kubernetes-style
 // API server.
 func NewServeCmd() *cobra.Command {
-	defaults := config.Defaults()
+	defaults := &config.Config{}
+	defaults.Defaults()
 
 	var addr = defaults.Server.Addr
 
@@ -191,9 +193,19 @@ func buildServer(
 		return nil, fmt.Errorf("failed to register kontinuum.sh/v1alpha1 scheme: %w", err)
 	}
 
+	// core/v1 is needed too: mgr.GetClient() (built off this same scheme —
+	// see registryOptions/WithScheme) is what Heartbeat uses to create the
+	// Namespace and Secret backing status.secretRef, and a
+	// controller-runtime client can't handle a type its scheme doesn't
+	// recognize even though the server itself already serves core/v1.
+	err = corev1.AddToScheme(scheme)
+	if err != nil {
+		return nil, fmt.Errorf("failed to register core/v1 scheme: %w", err)
+	}
+
 	uiRouter := ui.NewRouter(
 		namespaceListerFactory(cfg.Server.Addr), kontinuumListerFactory(cfg.Server.Addr, scheme),
-		version, config.Redact(*cfg), oidcHandler != nil, invalidateSession)
+		version, cfg.Redact(), oidcHandler != nil, invalidateSession)
 
 	registryOpts, err := registryOptions(cfg, logger, scheme)
 	if err != nil {
@@ -248,10 +260,13 @@ func registryOptions(cfg *config.Config, logger *slog.Logger, scheme *runtime.Sc
 	registryLogger := logger.With("component", "registry")
 
 	controller := registry.NewController(registry.Config{
-		Role:   role,
-		Region: cfg.Server.Region,
-		Zone:   cfg.Server.Zone,
-		Logger: registryLogger,
+		Role:          role,
+		Region:        cfg.Server.Region,
+		Zone:          cfg.Server.Zone,
+		Logger:        registryLogger,
+		Version:       version,
+		Storage:       cfg.Server.Storage,
+		DisplayConfig: displayConfig(cfg),
 	})
 
 	ensureCRD := func(ctx context.Context, loopbackConfig *rest.Config) error {
@@ -264,6 +279,21 @@ func registryOptions(cfg *config.Config, logger *slog.Logger, scheme *runtime.Sc
 		libkapi.WithController(controller),
 		libkapi.WithWebhookServer(libkapi.WebhookConfig{Port: registry.ConversionWebhookPort}),
 	}, nil
+}
+
+// displayConfig builds the non-confidential configuration snapshot written
+// to status.config on every heartbeat. cfg.Redact() is Config itself with
+// Server.Storage's credentials stripped (the unredacted original still goes
+// into the Secret status.secretRef points to — see registry.Config.Storage)
+// — since Config is defined directly in terms of v1alpha2.KontinuumConfigStatus
+// (see pkg/config.Config's doc), the redacted copy converts straight across
+// with no field-by-field copying. Only OIDC.Enabled needs deriving first,
+// since pkg/config.Load never sets it (see KontinuumOIDCConfigStatus's doc).
+func displayConfig(cfg *config.Config) v1alpha2.KontinuumConfigStatus {
+	redacted := cfg.Redact()
+	redacted.OIDC.Enabled = redacted.OIDC.IssuerURL != ""
+
+	return v1alpha2.KontinuumConfigStatus(redacted)
 }
 
 // namespaceListerFactory builds a ui.NamespaceListerFactory that calls back
