@@ -246,11 +246,13 @@ func (r *Router) handleHome(writer http.ResponseWriter, request *http.Request) {
 
 // instance is a Kontinuum object rendered as a topology row in the UI.
 type instance struct {
-	Name   string
-	Role   string
-	Region string
-	Zone   string
-	Age    string
+	Name          string
+	Role          string
+	Region        string
+	Zone          string
+	LastHeartbeat string
+	Age           string
+	APIVersion    string
 }
 
 // handleDeleteInstance deletes the Kontinuum object named by the {name}
@@ -332,11 +334,13 @@ func (r *Router) renderTopology(writer http.ResponseWriter, request *http.Reques
 	instances := make([]instance, 0, len(list.Items))
 	for _, item := range list.Items {
 		instances = append(instances, instance{
-			Name:   item.Name,
-			Role:   item.Status.Role,
-			Region: item.Spec.Region,
-			Zone:   item.Spec.Zone,
-			Age:    formatAge(item.Status.LastHeartbeatTime.Time),
+			Name:          item.Name,
+			Role:          item.Status.Role,
+			Region:        item.Spec.Region,
+			Zone:          item.Spec.Zone,
+			LastHeartbeat: formatAge(item.Status.LastHeartbeatTime.Time),
+			Age:           formatAge(item.CreationTimestamp.Time),
+			APIVersion:    v1alpha2.GroupVersion().String(),
 		})
 	}
 
