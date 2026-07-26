@@ -46,7 +46,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 10
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -69,6 +69,8 @@ jobs:
     permissions:
       contents: write
       packages: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -145,6 +147,8 @@ jobs:
             ghcr.io/${{ github.repository }}:latest
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max' || '' }}
 
   release:
     name: Release
@@ -186,3 +190,20 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npx --min-release-age=15 -p semantic-release -p @semantic-release/exec -- semantic-release
+
+  deploy:
+    name: Deploy
+    needs: [containerize, release]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
+    steps:
+      - name: Deploy to production
+        uses: nicklasfrahm-dev/platform/actions/deploy@main
+        with:
+          service: kontinuum
+          environment: prd
+          tag: ${{ needs.containerize.outputs.version }}
+          github-ssh-key: ${{ secrets.GITOPS_SSH_PRIVATE_KEY }}
