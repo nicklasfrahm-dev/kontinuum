@@ -10,7 +10,6 @@
         </div>
     </div>
 
-    {{if .AuthEnabled}}
     <div class="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
         <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
             {{template "icon-terminal"}}
@@ -22,8 +21,12 @@
                 <a href="https://kubernetes.io/docs/reference/kubectl/" class="text-accent hover:underline">kubectl</a>
                 or
                 <a href="https://k9scli.io/" class="text-accent hover:underline">k9s</a>.
+                {{if .AuthEnabled}}
                 Authentication is done via
                 <a href="https://github.com/int128/kubelogin" class="text-accent hover:underline">oidc-login</a>.
+                {{else}}
+                No authentication is required.
+                {{end}}
             </p>
             <p class="text-sm text-neutral-500 mb-2">
                 Merge the kubeconfig below into your existing one with the kontinuum CLI:
@@ -161,7 +164,6 @@
             URL.revokeObjectURL(url);
         }
     </script>
-    {{end}}
 </div>
 {{end}}
 

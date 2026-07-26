@@ -433,15 +433,16 @@ func (r *Router) handleInstanceDetail(writer http.ResponseWriter, request *http.
 }
 
 func (r *Router) handleSettings(writer http.ResponseWriter, request *http.Request) {
+	// kubeconfig itself branches on whether OIDC is configured (see its own
+	// doc) — kontinuum's default is no authentication at all, not "no
+	// access," so there's always a working kubeconfig to show here, not
+	// just when OIDC happens to be enabled.
 	data := map[string]any{
 		"Title":       "Settings",
 		"ActiveMenu":  "settings",
 		"Version":     r.version,
 		"AuthEnabled": r.authEnabled,
-	}
-
-	if r.authEnabled {
-		data["Kubeconfig"] = kubeconfig(requestOrigin(request), request.Host, r.cfg.OIDC.IssuerURL, r.cfg.OIDC.ClientID)
+		"Kubeconfig":  kubeconfig(requestOrigin(request), request.Host, r.cfg.OIDC.IssuerURL, r.cfg.OIDC.ClientID),
 	}
 
 	r.render(writer, pageSettings, data)

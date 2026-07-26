@@ -417,7 +417,7 @@ func TestHandleInstanceDetailInvalidatesSessionOnForbidden(t *testing.T) {
 	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/kontinuums/worker-1"), kontinuumFactory)
 }
 
-func TestHandleSettingsShowsKubeconfigOnlyWhenAuthEnabled(t *testing.T) {
+func TestHandleSettingsShowsOIDCKubeconfigWhenAuthEnabled(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -428,49 +428,82 @@ func TestHandleSettingsShowsKubeconfigOnlyWhenAuthEnabled(t *testing.T) {
 	cfg.OIDC.IssuerURL = testOIDCIssuerURL
 	cfg.OIDC.ClientID = testOIDCClientID
 
-	for _, authEnabled := range []bool{true, false} {
-		kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
-			return stubKontinuumLister{}, nil
-		}
-
-		router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, authEnabled, nil)
-
-		mux := http.NewServeMux()
-		router.RegisterRoutes(mux, nil, nil)
-
-		recorder := httptest.NewRecorder()
-		mux.ServeHTTP(recorder, newTestRequest(t, "/app/settings"))
-
-		resp := recorder.Result()
-
-		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-		require.NoError(t, resp.Body.Close())
-
-		if authEnabled {
-			assert.Contains(t, string(body), "kubectl access")
-			assert.Contains(t, string(body), "server: http://example.com")
-			assert.NotContains(t, string(body), "insecure-skip-tls-verify")
-			assert.Contains(t, string(body), "name: kontinuum-example.com\n    cluster:")
-			assert.Contains(t, string(body), "cluster: kontinuum-example.com")
-			assert.Contains(t, string(body), "name: oidc@kontinuum-example.com")
-			assert.Contains(t, string(body), "current-context: oidc@kontinuum-example.com")
-			assert.Contains(t, string(body), "user: kontinuum-example.com")
-			assert.Contains(t, string(body), "name: kontinuum-example.com\n    user:")
-			assert.NotContains(t, string(body), "user: oidc\n")
-			assert.NotContains(t, string(body), "name: oidc\n")
-			assert.Contains(t, string(body), "--oidc-issuer-url="+testOIDCIssuerURL)
-			assert.Contains(t, string(body), "--oidc-client-id="+testOIDCClientID)
-			assert.Contains(t, string(body), "downloadKubeconfig()")
-			assert.Contains(t, string(body), "kontinuum config import")
-			assert.Contains(t, string(body), "copyImportSnippet(this)")
-			assert.Contains(t, string(body), "KUBECONFIG")
-		} else {
-			assert.NotContains(t, string(body), "kubectl access")
-			assert.NotContains(t, string(body), "oidc-login")
-			assert.NotContains(t, string(body), "kontinuum config import")
-		}
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{}, nil
 	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, true, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/settings"))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Contains(t, string(body), "kubectl access")
+	assert.Contains(t, string(body), "server: http://example.com")
+	assert.NotContains(t, string(body), "insecure-skip-tls-verify")
+	assert.Contains(t, string(body), "name: kontinuum-example.com\n    cluster:")
+	assert.Contains(t, string(body), "cluster: kontinuum-example.com")
+	assert.Contains(t, string(body), "name: oidc@kontinuum-example.com")
+	assert.Contains(t, string(body), "current-context: oidc@kontinuum-example.com")
+	assert.Contains(t, string(body), "user: kontinuum-example.com")
+	assert.Contains(t, string(body), "name: kontinuum-example.com\n    user:")
+	assert.NotContains(t, string(body), "user: oidc\n")
+	assert.NotContains(t, string(body), "name: oidc\n")
+	assert.Contains(t, string(body), "--oidc-issuer-url="+testOIDCIssuerURL)
+	assert.Contains(t, string(body), "--oidc-client-id="+testOIDCClientID)
+	assert.Contains(t, string(body), "downloadKubeconfig()")
+	assert.Contains(t, string(body), "kontinuum config import")
+	assert.Contains(t, string(body), "copyImportSnippet(this)")
+	assert.Contains(t, string(body), "KUBECONFIG")
+}
+
+func TestHandleSettingsShowsNoAuthKubeconfigWhenOIDCDisabled(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/settings"))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	// Kontinuum's default is no authentication at all, not no access — the
+	// kubectl access section (and a working kubeconfig) must still show.
+	assert.Contains(t, string(body), "kubectl access")
+	assert.Contains(t, string(body), "No authentication is required")
+	assert.Contains(t, string(body), "server: http://example.com")
+	assert.Contains(t, string(body), "name: kontinuum-example.com\n    cluster:")
+	assert.Contains(t, string(body), "cluster: kontinuum-example.com")
+	assert.Contains(t, string(body), "current-context: kontinuum-example.com")
+	assert.NotContains(t, string(body), "oidc-login")
+	assert.NotContains(t, string(body), "users:")
+	assert.Contains(t, string(body), "downloadKubeconfig()")
+	assert.Contains(t, string(body), "kontinuum config import")
+	assert.Contains(t, string(body), "copyImportSnippet(this)")
+	assert.Contains(t, string(body), "KUBECONFIG")
 }
 
 func TestHandleSettingsStripsPortFromKubeconfigClusterName(t *testing.T) {

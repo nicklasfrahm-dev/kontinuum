@@ -46,29 +46,64 @@ users:
         interactiveMode: Never
 `
 
-// kubeconfig renders a kubectl-oidc-login-based kubeconfig pointed at
-// origin (see requestOrigin), authenticating against issuerURL/clientID.
-// The cluster and user are both named "kontinuum-<host>", with any port
-// stripped from host (e.g. "kontinuum-kontinuum.example.com") — so
-// importing kubeconfigs from multiple kontinuum instances never collides
-// on a shared "oidc" user entry. The same cluster name is used for the
-// context's cluster reference, and the same user name for its user
-// reference, so all three always match. The context itself is named
-// "oidc@kontinuum-<host>". When host looks local (see probablySelfSigned),
-// insecure-skip-tls-verify is set on the cluster entry: kubectl otherwise
-// refuses to send oidc-login's bearer token over a connection whose
-// certificate it can't verify against a trusted CA — which a local
-// deployment's self-signed certificate (e.g. compose.yaml's "proxy"
-// service) never is.
+// kubeconfigTemplateNoAuth is kubeconfigTemplate's counterpart for a
+// deployment with no OIDC configured — kontinuum's default (see
+// pkg/config.OIDCConfig's doc). There's no users entry at all: a context
+// with no user reference is exactly how kubectl represents "send no
+// credentials," which matches the server's own unauthenticated default.
+// %s placeholders are, in order: the cluster name, the API server origin,
+// the insecure-skip-tls-verify line (see kubeconfigTemplate), the context
+// name, the cluster name again (the context's cluster reference), and the
+// context name again (current-context).
+const kubeconfigTemplateNoAuth = `apiVersion: v1
+kind: Config
+clusters:
+  - name: %s
+    cluster:
+      server: %s
+%scontexts:
+  - name: %s
+    context:
+      cluster: %s
+current-context: %s
+`
+
+// kubeconfig renders a kubeconfig pointed at origin (see requestOrigin).
+// When issuerURL is empty — OIDC isn't configured, kontinuum's default —
+// it renders kubeconfigTemplateNoAuth instead: kontinuum's own default is
+// no authentication at all, so there's no credential to configure. The
+// cluster (and, when OIDC is enabled, user) are named "kontinuum-<host>",
+// with any port stripped from host (e.g. "kontinuum-kontinuum.example.com")
+// — so importing kubeconfigs from multiple kontinuum instances never
+// collides on a shared "oidc" user entry. The same cluster name is used for
+// the context's cluster reference, and the same user name (when present)
+// for its user reference, so all three always match. The context itself is
+// named "oidc@kontinuum-<host>" when OIDC is enabled, or just
+// "kontinuum-<host>" otherwise. When host looks local (see
+// probablySelfSigned), insecure-skip-tls-verify is set on the cluster
+// entry: kubectl otherwise refuses to send oidc-login's bearer token over a
+// connection whose certificate it can't verify against a trusted CA —
+// which a local deployment's self-signed certificate (e.g. compose.yaml's
+// "proxy" service) never is. That protection is only relevant for OIDC's
+// bearer token, but the line is harmless (and one less thing to explain)
+// when included for a no-auth deployment too, so it's set the same way in
+// both templates.
 func kubeconfig(origin, host, issuerURL, clientID string) string {
 	clusterName := "kontinuum-" + stripPort(host)
-	userName := clusterName
-	contextName := "oidc@" + clusterName
 
 	insecureLine := ""
 	if probablySelfSigned(host) {
 		insecureLine = "      insecure-skip-tls-verify: true\n"
 	}
+
+	if issuerURL == "" {
+		contextName := clusterName
+
+		return fmt.Sprintf(kubeconfigTemplateNoAuth, clusterName, origin, insecureLine, contextName, clusterName, contextName)
+	}
+
+	userName := clusterName
+	contextName := "oidc@" + clusterName
 
 	return fmt.Sprintf(kubeconfigTemplate,
 		clusterName, origin, insecureLine, contextName, clusterName, userName, contextName, userName, issuerURL, clientID)
