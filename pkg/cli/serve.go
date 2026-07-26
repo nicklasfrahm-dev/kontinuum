@@ -35,7 +35,8 @@ const shutdownTimeout = 10 * time.Second
 // NewServeCmd builds the serve command, which starts the Kubernetes-style
 // API server.
 func NewServeCmd() *cobra.Command {
-	defaults := config.Defaults()
+	defaults := &config.Config{}
+	defaults.Defaults()
 
 	var addr = defaults.Server.Addr
 

@@ -49,13 +49,13 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
-// Defaults returns a Config populated with only the `default` struct tag
-// values, ignoring environment variables. Useful for cobra flag defaults.
-func Defaults() *Config {
-	cfg := &Config{}
-	loadStruct(reflect.ValueOf(cfg).Elem(), nil, false)
-
-	return cfg
+// Defaults populates c with only the `default` struct tag values, ignoring
+// environment variables and discarding whatever c already held — useful for
+// cobra flag defaults. Load overlays environment variables on top of this
+// same set of defaults; call it on a fresh &Config{} for the same effect
+// Defaults gives standalone.
+func (c *Config) Defaults() {
+	loadStruct(reflect.ValueOf(c).Elem(), nil, false)
 }
 
 // Redact returns a copy of c with sensitive fields stripped, safe to log,
@@ -63,9 +63,11 @@ func Defaults() *Config {
 // currently, any username/password embedded in Server.Storage (e.g.
 // "postgres://user:pass@host/db"). The unredacted original is what stays
 // confidential, in the Secret status.secretRef points to — see
-// pkg/domain/registry.Heartbeat.SecretData.
-func (c Config) Redact() Config {
-	redacted := c
+// pkg/domain/registry.Heartbeat.SecretData. Pointer receiver purely to
+// match Defaults below (which must take one to populate c in place) —
+// Redact itself never modifies c.
+func (c *Config) Redact() Config {
+	redacted := *c
 	redacted.Server.Storage = RedactStorage(c.Server.Storage)
 
 	return redacted
