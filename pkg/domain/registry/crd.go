@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"reflect"
 	"time"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
+	apiextensionsv1client "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/typed/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -195,13 +197,16 @@ func waitForDiscoverable(ctx context.Context, loopbackConfig *restclient.Config,
 }
 
 // ensureCRD creates the kontinuums.kontinuum.sh CRD if it doesn't already
-// exist, then waits for it to become Established. The Create call is inside
-// the same retry loop as the Established check — not just a single
-// unretried attempt — since a transient failure here (the apiserver still
-// finishing its own startup, another kontinuum replica creating the same
-// CRD concurrently) isn't fatal, only crdEstablishTimeout running out is.
-// Retries use crdBackoff (exponential, capped at crdMaxPollInterval); each
-// retry logs a warning.
+// exist — or updates it in place to match the current
+// CustomResourceDefinition() spec if it does, since a stale definition left
+// over from a previous run (e.g. one that still only serves a since-removed
+// API version) would otherwise never converge — then waits for it to become
+// Established. The create-or-update call is inside the same retry loop as
+// the Established check — not just a single unretried attempt — since a
+// transient failure here (the apiserver still finishing its own startup,
+// another kontinuum replica reconciling the same CRD concurrently) isn't
+// fatal, only crdEstablishTimeout running out is. Retries use crdBackoff
+// (exponential, capped at crdMaxPollInterval); each retry logs a warning.
 func ensureCRD(ctx context.Context, client apiextensionsclientset.Interface, logger *slog.Logger) error {
 	crds := client.ApiextensionsV1().CustomResourceDefinitions()
 
@@ -210,9 +215,9 @@ func ensureCRD(ctx context.Context, client apiextensionsclientset.Interface, log
 
 	err := wait.ExponentialBackoffWithContext(timeoutCtx, crdBackoff(),
 		func(ctx context.Context) (bool, error) {
-			_, err := crds.Create(ctx, CustomResourceDefinition(), metav1.CreateOptions{})
-			if err != nil && !apierrors.IsAlreadyExists(err) {
-				logger.Warn("Failed to create kontinuums.kontinuum.sh crd, retrying", "error", err)
+			err := applyCRD(ctx, crds)
+			if err != nil {
+				logger.Warn("Failed to create or update kontinuums.kontinuum.sh crd, retrying", "error", err)
 
 				return false, nil
 			}
@@ -232,6 +237,45 @@ func ensureCRD(ctx context.Context, client apiextensionsclientset.Interface, log
 		})
 	if err != nil {
 		return fmt.Errorf("%s crd was never created and established: %w", crdName(), err)
+	}
+
+	return nil
+}
+
+// applyCRD creates the kontinuums.kontinuum.sh CRD, or — if it already
+// exists — updates its spec to match CustomResourceDefinition()'s current
+// definition whenever the two differ. Without this, an already-registered
+// CRD from a previous run (e.g. one still listing a since-removed
+// spec.versions entry like v1alpha1) would keep serving the stale
+// definition forever, since Create alone is a no-op once the object exists.
+// A no-op Update when the spec already matches is avoided so this doesn't
+// churn the CRD's resourceVersion on every retry once it's converged.
+func applyCRD(ctx context.Context, crds apiextensionsv1client.CustomResourceDefinitionInterface) error {
+	desired := CustomResourceDefinition()
+
+	_, err := crds.Create(ctx, desired, metav1.CreateOptions{})
+	if err == nil {
+		return nil
+	}
+
+	if !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("failed to create %s crd: %w", crdName(), err)
+	}
+
+	existing, err := crds.Get(ctx, crdName(), metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to fetch existing %s crd: %w", crdName(), err)
+	}
+
+	if reflect.DeepEqual(existing.Spec, desired.Spec) {
+		return nil
+	}
+
+	existing.Spec = desired.Spec
+
+	_, err = crds.Update(ctx, existing, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update existing %s crd: %w", crdName(), err)
 	}
 
 	return nil
