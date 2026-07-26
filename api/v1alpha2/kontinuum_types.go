@@ -12,14 +12,18 @@ const (
 	RoleWorker = "worker"
 )
 
-// This marker's rule is a simplified has()-only check, not the fuller
-// (absent-or-empty) one registry.CustomResourceDefinition actually
-// enforces (see regionZoneValidationRules) — the marker comment can't wrap
-// across lines, and the fuller expression doesn't fit within this repo's
-// line-length limit. config/crd's generated manifest is a reference
-// artifact only (see api/v1alpha2/doc.go); the real, authoritative CRD
-// built in Go carries the stricter rule.
-// +kubebuilder:validation:XValidation:rule="has(self.region) == has(self.zone)",message="region/zone: both or neither"
+// This marker is the CRD's actual, authoritative region/zone invariant —
+// see registry.CustomResourceDefinition, which applies config/crd's
+// generated manifest (see api/v1alpha2/doc.go) rather than hand-building
+// the schema. The rule mirrors registry.Role's own check exactly, and the
+// message matches registry.ErrRegionZoneRequired, so a rejection at the
+// apiserver reads the same as one from this process's own startup config.
+// The line exceeds this repo's normal length limit, but splitting a
+// kubebuilder marker across lines isn't supported, so it's exempted rather
+// than shortened.
+//
+//nolint:lll
+// +kubebuilder:validation:XValidation:rule="(!has(self.region) || self.region == '') == (!has(self.zone) || self.zone == '')",message="region and zone must both be set, or both be empty"
 
 // KontinuumSpec describes a single running kontinuum process.
 type KontinuumSpec struct {
@@ -32,14 +36,24 @@ type KontinuumSpec struct {
 	Zone string `json:"zone,omitempty"`
 }
 
-// KontinuumStatus reports the last time a Kontinuum reported in.
+// KontinuumStatus reports the last time a Kontinuum reported in. Both
+// fields are +optional despite lacking omitempty: with the status
+// subresource enabled (see the +kubebuilder:subresource:status marker
+// below), the apiserver always strips whatever status the main resource
+// endpoint's Create/Update payload carries before validating it — status
+// is only ever populated afterward, via the status subresource. Requiring
+// these fields would make every Create fail structural-schema validation
+// against that always-empty status.
 type KontinuumStatus struct {
 	// Role is either RoleControlPlane or RoleWorker, derived from
 	// spec.region and spec.zone — see registry.Role.
+	// +optional
+	// +kubebuilder:validation:Enum=controlplane;worker
 	Role string `json:"role"`
 	// LastHeartbeatTime is when this process last reported in. The server
 	// registry deletes a Kontinuum whose LastHeartbeatTime is older than
 	// its configured stale threshold (5 minutes by default).
+	// +optional
 	LastHeartbeatTime metav1.Time `json:"lastHeartbeatTime"`
 }
 
@@ -57,7 +71,8 @@ type Kontinuum struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata"`
 
-	Spec   KontinuumSpec   `json:"spec"`
+	Spec KontinuumSpec `json:"spec"`
+	// +optional
 	Status KontinuumStatus `json:"status"`
 }
 

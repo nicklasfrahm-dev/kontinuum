@@ -22,6 +22,28 @@ func testCABundle() []byte {
 	return []byte("test-ca-bundle")
 }
 
+// findVersion returns the CustomResourceDefinitionVersion named name from
+// versions. Tests look versions up by name, not index, because their order
+// in spec.versions is controller-gen's own (currently alphabetical, see
+// config/crd's generated manifest) — an implementation detail of the
+// generator, not something registry.CustomResourceDefinition's callers
+// should depend on.
+func findVersion(
+	t *testing.T, versions []apiextensionsv1.CustomResourceDefinitionVersion, name string,
+) apiextensionsv1.CustomResourceDefinitionVersion {
+	t.Helper()
+
+	for _, version := range versions {
+		if version.Name == name {
+			return version
+		}
+	}
+
+	t.Fatalf("version %q not found in %#v", name, versions)
+
+	return apiextensionsv1.CustomResourceDefinitionVersion{}
+}
+
 func TestCustomResourceDefinition(t *testing.T) {
 	t.Parallel()
 
@@ -37,7 +59,7 @@ func TestCustomResourceDefinition(t *testing.T) {
 
 	require.Len(t, crd.Spec.Versions, 2)
 
-	version := crd.Spec.Versions[0]
+	version := findVersion(t, crd.Spec.Versions, v1alpha2.APIVersion)
 
 	assert.Equal(t, v1alpha2.APIVersion, version.Name)
 	assert.True(t, version.Served)
@@ -95,7 +117,7 @@ func TestCustomResourceDefinitionLegacyVersion(t *testing.T) {
 
 	require.Len(t, crd.Spec.Versions, 2)
 
-	legacy := crd.Spec.Versions[1]
+	legacy := findVersion(t, crd.Spec.Versions, v1alpha1.APIVersion)
 
 	assert.Equal(t, v1alpha1.APIVersion, legacy.Name)
 	assert.True(t, legacy.Served, "v1alpha1 stays served — the conversion webhook makes it fully usable again")

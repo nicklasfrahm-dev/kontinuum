@@ -38,6 +38,38 @@ jobs:
         with:
           version: ${{ steps.golangci-lint-version.outputs.version }}
 
+  validate-code-generation:
+    name: Validate code generation
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # Scoped to ./api/... — the only go:generate directives that matter
+      # here are controller-gen's (deepcopy methods and config/crd
+      # manifests, see api/v1alpha1/doc.go and api/v1alpha2/doc.go).
+      # pkg/ui/assets.go's directive fetches vendored web assets from a CDN
+      # and is gitignored (see .gitignore), so it has nothing to validate
+      # here and would only add network flakiness.
+      - name: Run code generators
+        run: GOOS= GOARCH= go generate ./api/...
+
+      - name: Fail if generated code is out of date
+        run: |
+          git add -A api/ config/crd/
+          if ! git diff --cached --exit-code -- api/ config/crd/; then
+            echo "::error::Generated code (deepcopy methods, config/crd manifests) is out of date. Run 'make generate' and commit the result."
+            exit 1
+          fi
+
   test:
     name: Test
     if: github.event_name == 'pull_request'
