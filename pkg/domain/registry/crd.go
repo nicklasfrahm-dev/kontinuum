@@ -215,7 +215,7 @@ func ensureCRD(ctx context.Context, client apiextensionsclientset.Interface, log
 
 	err := wait.ExponentialBackoffWithContext(timeoutCtx, crdBackoff(),
 		func(ctx context.Context) (bool, error) {
-			err := applyCRD(ctx, crds)
+			err := ApplyCRD(ctx, crds)
 			if err != nil {
 				logger.Warn("Failed to create or update kontinuums.kontinuum.sh crd, retrying", "error", err)
 
@@ -242,7 +242,7 @@ func ensureCRD(ctx context.Context, client apiextensionsclientset.Interface, log
 	return nil
 }
 
-// applyCRD creates the kontinuums.kontinuum.sh CRD, or — if it already
+// ApplyCRD creates the kontinuums.kontinuum.sh CRD, or — if it already
 // exists — updates its spec to match CustomResourceDefinition()'s current
 // definition whenever the two differ. Without this, an already-registered
 // CRD from a previous run (e.g. one still listing a since-removed
@@ -250,7 +250,7 @@ func ensureCRD(ctx context.Context, client apiextensionsclientset.Interface, log
 // definition forever, since Create alone is a no-op once the object exists.
 // A no-op Update when the spec already matches is avoided so this doesn't
 // churn the CRD's resourceVersion on every retry once it's converged.
-func applyCRD(ctx context.Context, crds apiextensionsv1client.CustomResourceDefinitionInterface) error {
+func ApplyCRD(ctx context.Context, crds apiextensionsv1client.CustomResourceDefinitionInterface) error {
 	desired := CustomResourceDefinition()
 
 	_, err := crds.Create(ctx, desired, metav1.CreateOptions{})
