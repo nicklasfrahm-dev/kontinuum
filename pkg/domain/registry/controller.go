@@ -150,12 +150,19 @@ func (r *CombinedReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 // called here so this stays a pure, easily testable function. hostname is
 // lowercased to satisfy Kubernetes' object-name rules (a real-world
 // hostname is otherwise already a valid DNS subdomain). Falls back to a
-// random UUID if hostname is empty or err is non-nil (os.Hostname can fail
-// in a restrictive sandbox) — matching the previous, always-random naming,
-// rather than leaving the registry without a name.
+// random UUID if hostname is empty, err is non-nil (os.Hostname can fail in
+// a restrictive sandbox), or hostname is "localhost" — GCP Cloud Run's
+// sandboxed container runtime doesn't set a real per-instance hostname, so
+// os.Hostname() there succeeds but returns "localhost" for every instance,
+// which would otherwise make them all collide under the same object name.
 func InstanceName(hostname string, err error) string {
-	if err != nil || hostname == "" {
-		return uuid.NewString()
+	if err != nil || hostname == "" || strings.EqualFold(hostname, "localhost") {
+		instanceID, idErr := uuid.NewV7()
+		if idErr != nil {
+			return uuid.NewString()
+		}
+
+		return instanceID.String()
 	}
 
 	return strings.ToLower(hostname)

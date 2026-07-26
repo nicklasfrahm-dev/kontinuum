@@ -57,12 +57,27 @@ func TestInstanceNameFallsBackToUUIDWhenHostnameUnavailable(t *testing.T) {
 	t.Parallel()
 
 	name := registry.InstanceName("", errTestHostnameUnavailable)
-	_, err := uuid.Parse(name)
+	instanceID, err := uuid.Parse(name)
 	require.NoError(t, err, "expected a UUID fallback when hostname lookup fails")
+	assert.Equal(t, uuid.Version(7), instanceID.Version(), "expected a UUIDv7 fallback")
 
 	name = registry.InstanceName("", nil)
-	_, err = uuid.Parse(name)
+	instanceID, err = uuid.Parse(name)
 	require.NoError(t, err, "expected a UUID fallback when hostname is empty")
+	assert.Equal(t, uuid.Version(7), instanceID.Version(), "expected a UUIDv7 fallback")
+}
+
+func TestInstanceNameFallsBackToUUIDWhenHostnameIsLocalhost(t *testing.T) {
+	t.Parallel()
+
+	name := registry.InstanceName("localhost", nil)
+	instanceID, err := uuid.Parse(name)
+	require.NoError(t, err, "expected a UUID fallback when hostname is localhost")
+	assert.Equal(t, uuid.Version(7), instanceID.Version(), "expected a UUIDv7 fallback")
+
+	name = registry.InstanceName("LOCALHOST", nil)
+	_, err = uuid.Parse(name)
+	require.NoError(t, err, "expected a UUID fallback when hostname is localhost, regardless of case")
 }
 
 func TestCombinedReconcilerDeletesStaleOtherInstanceWithoutTouchingHeartbeat(t *testing.T) {
