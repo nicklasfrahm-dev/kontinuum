@@ -547,7 +547,7 @@ func TestHandleSettingsStripsPortFromKubeconfigClusterName(t *testing.T) {
 	assert.NotContains(t, string(body), "oidc@example.com:8443")
 }
 
-func TestHandleSettingsSetsInsecureSkipTLSVerifyForLocalHosts(t *testing.T) {
+func TestHandleSettingsSetsInsecureSkipTLSVerifyForLocalHostsOverHTTPS(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -570,6 +570,9 @@ func TestHandleSettingsSetsInsecureSkipTLSVerifyForLocalHosts(t *testing.T) {
 
 		request := newTestRequest(t, "/app/settings")
 		request.Host = host
+		// A TLS-terminating reverse proxy is what would actually front a
+		// local deployment reached over https — see requestOrigin.
+		request.Header.Set("X-Forwarded-Proto", "https")
 
 		recorder := httptest.NewRecorder()
 		mux.ServeHTTP(recorder, request)
@@ -581,6 +584,46 @@ func TestHandleSettingsSetsInsecureSkipTLSVerifyForLocalHosts(t *testing.T) {
 		require.NoError(t, resp.Body.Close())
 
 		assert.Contains(t, string(body), "insecure-skip-tls-verify: true", "host %q", host)
+	}
+}
+
+func TestHandleSettingsOmitsInsecureSkipTLSVerifyForPlainHTTP(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	cfg := config.Config{}
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+	cfg.OIDC.ClientID = testOIDCClientID
+
+	// Plain http has no certificate to skip verifying at all, so even a
+	// local host that would otherwise look self-signed (see
+	// probablySelfSigned) must not get the line — see kubeconfig's doc.
+	for _, host := range []string{"localhost:8080", "127.0.0.1:8080", "[::1]:8080"} {
+		kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+			return stubKontinuumLister{}, nil
+		}
+
+		router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, true, nil)
+
+		mux := http.NewServeMux()
+		router.RegisterRoutes(mux, nil, nil)
+
+		request := newTestRequest(t, "/app/settings")
+		request.Host = host
+
+		recorder := httptest.NewRecorder()
+		mux.ServeHTTP(recorder, request)
+
+		resp := recorder.Result()
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+
+		assert.NotContains(t, string(body), "insecure-skip-tls-verify", "host %q", host)
 	}
 }
 

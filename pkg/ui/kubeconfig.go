@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 )
 
 // kubeconfigTemplate is a kubectl kubeconfig that authenticates via
@@ -13,8 +14,8 @@ import (
 // needed to resolve group membership for kontinuum's admin-group
 // authorization (see libkapi.WithAdminAuthorizer). %s placeholders are, in
 // order: the cluster name, the API server origin, the cluster's
-// insecure-skip-tls-verify line (empty unless host looks local — see
-// probablySelfSigned), the context name, the cluster name again (the
+// insecure-skip-tls-verify line (empty unless origin is https and host
+// looks local — see kubeconfig), the context name, the cluster name again (the
 // context's cluster reference), the user name (the context's user
 // reference), the context name again (current-context), the user name
 // again (the users entry), and the OIDC issuer URL and client ID.
@@ -79,20 +80,21 @@ current-context: %s
 // the context's cluster reference, and the same user name (when present)
 // for its user reference, so all three always match. The context itself is
 // named "oidc@kontinuum-<host>" when OIDC is enabled, or just
-// "kontinuum-<host>" otherwise. When host looks local (see
-// probablySelfSigned), insecure-skip-tls-verify is set on the cluster
+// "kontinuum-<host>" otherwise. When origin is https and host looks local
+// (see probablySelfSigned), insecure-skip-tls-verify is set on the cluster
 // entry: kubectl otherwise refuses to send oidc-login's bearer token over a
-// connection whose certificate it can't verify against a trusted CA —
-// which a local deployment's self-signed certificate (e.g. compose.yaml's
-// "proxy" service) never is. That protection is only relevant for OIDC's
-// bearer token, but the line is harmless (and one less thing to explain)
-// when included for a no-auth deployment too, so it's set the same way in
-// both templates.
+// connection whose certificate it can't verify against a trusted CA — which
+// a local deployment's self-signed certificate (e.g. compose.yaml's "proxy"
+// service) never is. Plain http has no certificate to skip verifying at
+// all, so the line is omitted there regardless of host — kontinuum itself
+// never terminates TLS (see README), so a real deployment reaching it over
+// http is exactly as far from needing this as one reaching it over https
+// through a properly CA-signed proxy.
 func kubeconfig(origin, host, issuerURL, clientID string) string {
 	clusterName := "kontinuum-" + stripPort(host)
 
 	insecureLine := ""
-	if probablySelfSigned(host) {
+	if strings.HasPrefix(origin, "https://") && probablySelfSigned(host) {
 		insecureLine = "      insecure-skip-tls-verify: true\n"
 	}
 
