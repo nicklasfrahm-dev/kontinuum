@@ -1,4 +1,4 @@
-package cli
+package config
 
 import (
 	"bytes"
@@ -77,12 +77,12 @@ func (HuhPrompter) Text(title string) (string, error) {
 	return value, nil
 }
 
-// NewConfigImportCmd builds the "config import" command. It merges a
-// kubeconfig — read from path, or pasted interactively when path is omitted —
-// into the kubeconfig resolved from $KUBECONFIG (or ~/.kube/config when
-// unset). Clusters, users, and contexts that already exist under the same
-// name are only overwritten after the user confirms.
-func NewConfigImportCmd() *cobra.Command {
+// NewImportCmd builds the "config import" command. It merges a kubeconfig —
+// read from path, or pasted interactively when path is omitted — into the
+// kubeconfig resolved from $KUBECONFIG (or ~/.kube/config when unset).
+// Clusters, users, and contexts that already exist under the same name are
+// only overwritten after the user confirms.
+func NewImportCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "import [path]",
 		Short: "Merge a kubeconfig into the existing kubeconfig",

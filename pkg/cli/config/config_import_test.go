@@ -1,4 +1,4 @@
-package cli_test
+package config_test
 
 import (
 	"bytes"
@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
-	"github.com/nicklasfrahm/kontinuum/pkg/cli"
+	"github.com/nicklasfrahm/kontinuum/pkg/cli/config"
 )
 
 // Shared test fixture names, reused across MergeKubeconfig test cases.
@@ -84,7 +84,7 @@ func TestMergeKubeconfigAddsNewEntriesWithoutPrompting(t *testing.T) {
 
 	prompt := &stubPrompter{t: t}
 
-	merged, err := cli.MergeKubeconfig(existing, imported, prompt)
+	merged, err := config.MergeKubeconfig(existing, imported, prompt)
 	require.NoError(t, err)
 
 	assert.Equal(t, "https://demo.example.com", merged.Clusters[testClusterName].Server)
@@ -108,7 +108,7 @@ func TestMergeKubeconfigSkipsPromptWhenEntryIsIdentical(t *testing.T) {
 	// byte-identical cluster (LocationOfOrigin aside).
 	prompt := &stubPrompter{t: t}
 
-	merged, err := cli.MergeKubeconfig(existing, imported, prompt)
+	merged, err := config.MergeKubeconfig(existing, imported, prompt)
 	require.NoError(t, err)
 	assert.Equal(t, "https://demo.example.com", merged.Clusters[testClusterName].Server)
 }
@@ -124,7 +124,7 @@ func TestMergeKubeconfigPromptsOnConflictAndOverwrites(t *testing.T) {
 
 	prompt := &stubPrompter{t: t, confirms: []bool{true}}
 
-	merged, err := cli.MergeKubeconfig(existing, imported, prompt)
+	merged, err := config.MergeKubeconfig(existing, imported, prompt)
 	require.NoError(t, err)
 	assert.Equal(t, "https://new.example.com", merged.Clusters[testClusterName].Server)
 }
@@ -140,7 +140,7 @@ func TestMergeKubeconfigPromptsOnConflictAndKeepsExisting(t *testing.T) {
 
 	prompt := &stubPrompter{t: t, confirms: []bool{false}}
 
-	merged, err := cli.MergeKubeconfig(existing, imported, prompt)
+	merged, err := config.MergeKubeconfig(existing, imported, prompt)
 	require.NoError(t, err)
 	assert.Equal(t, "https://old.example.com", merged.Clusters[testClusterName].Server)
 }
@@ -157,7 +157,7 @@ func TestMergeKubeconfigLeavesUnrelatedExistingEntriesUntouched(t *testing.T) {
 
 	prompt := &stubPrompter{t: t}
 
-	merged, err := cli.MergeKubeconfig(existing, imported, prompt)
+	merged, err := config.MergeKubeconfig(existing, imported, prompt)
 	require.NoError(t, err)
 	assert.Equal(t, "https://keep.example.com", merged.Clusters[testKeepName].Server)
 	assert.Equal(t, "https://demo.example.com", merged.Clusters[testClusterName].Server)
@@ -176,7 +176,7 @@ func TestMergeKubeconfigCurrentContextAdoptedWithoutPromptWhenNoneSetYet(t *test
 	// kubeconfig must not prompt.
 	prompt := &stubPrompter{t: t}
 
-	merged, err := cli.MergeKubeconfig(existing, imported, prompt)
+	merged, err := config.MergeKubeconfig(existing, imported, prompt)
 	require.NoError(t, err)
 	assert.Equal(t, testClusterName, merged.CurrentContext)
 }
@@ -192,7 +192,7 @@ func TestMergeKubeconfigCurrentContextKeepsExistingWhenDeclined(t *testing.T) {
 
 	prompt := &stubPrompter{t: t, confirms: []bool{false}}
 
-	merged, err := cli.MergeKubeconfig(existing, imported, prompt)
+	merged, err := config.MergeKubeconfig(existing, imported, prompt)
 	require.NoError(t, err)
 	assert.Equal(t, testKeepName, merged.CurrentContext)
 }
@@ -208,25 +208,25 @@ func TestMergeKubeconfigCurrentContextUnchangedWhenImportedEmpty(t *testing.T) {
 	// No confirms queued: an empty imported.CurrentContext must not prompt.
 	prompt := &stubPrompter{t: t}
 
-	merged, err := cli.MergeKubeconfig(existing, imported, prompt)
+	merged, err := config.MergeKubeconfig(existing, imported, prompt)
 	require.NoError(t, err)
 	assert.Equal(t, testKeepName, merged.CurrentContext)
 }
 
-func TestNewConfigCmdRegistersImportSubcommand(t *testing.T) {
+func TestNewCmdRegistersImportSubcommand(t *testing.T) {
 	t.Parallel()
 
-	cmd := cli.NewConfigCmd()
+	cmd := config.NewCmd()
 
 	importCmd, _, err := cmd.Find([]string{"import"})
 	require.NoError(t, err)
 	assert.Equal(t, "import [path]", importCmd.Use)
 }
 
-func TestNewConfigImportCmdRejectsExtraArgs(t *testing.T) {
+func TestNewImportCmdRejectsExtraArgs(t *testing.T) {
 	t.Parallel()
 
-	cmd := cli.NewConfigImportCmd()
+	cmd := config.NewImportCmd()
 	cmd.SetArgs([]string{"one", "two"})
 	cmd.SilenceErrors = true
 
@@ -234,7 +234,7 @@ func TestNewConfigImportCmdRejectsExtraArgs(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestNewConfigImportCmdReadsKubeconfigFromPath(t *testing.T) {
+func TestNewImportCmdReadsKubeconfigFromPath(t *testing.T) {
 	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "config"))
 
 	kubeconfigPath := filepath.Join(t.TempDir(), "imported.yaml")
@@ -256,7 +256,7 @@ users:
       token: demo-token
 `)
 
-	cmd := cli.NewConfigImportCmd()
+	cmd := config.NewImportCmd()
 	cmd.SetArgs([]string{kubeconfigPath})
 
 	err := cmd.Execute()
@@ -266,13 +266,13 @@ users:
 func TestRunConfigImportPrintsPlainNoticeWhenPromptAborted(t *testing.T) {
 	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "config"))
 
-	cmd := cli.NewConfigImportCmd()
+	cmd := config.NewImportCmd()
 
 	var stderr bytes.Buffer
 
 	cmd.SetErr(&stderr)
 
-	err := cli.RunConfigImport(cmd, nil, abortingPrompter{})
+	err := config.RunConfigImport(cmd, nil, abortingPrompter{})
 
 	require.Error(t, err)
 	require.ErrorIs(t, err, huh.ErrUserAborted)
