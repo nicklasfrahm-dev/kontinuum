@@ -15,7 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	"github.com/nicklasfrahm/kontinuum/api/v1alpha1"
+	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/registry"
 )
 
@@ -68,10 +68,10 @@ func TestInstanceNameFallsBackToUUIDWhenHostnameUnavailable(t *testing.T) {
 func TestCombinedReconcilerDeletesStaleOtherInstanceWithoutTouchingHeartbeat(t *testing.T) {
 	t.Parallel()
 
-	fakeClient := newFakeClient(t, &v1alpha1.Kontinuum{
+	fakeClient := newFakeClient(t, &v1alpha2.Kontinuum{
 		ObjectMeta: metav1.ObjectMeta{Name: "other-instance"},
-		Spec:       v1alpha1.KontinuumSpec{Role: v1alpha1.RoleWorker},
-		Status: v1alpha1.KontinuumStatus{
+		Status: v1alpha2.KontinuumStatus{
+			Role:              v1alpha2.RoleWorker,
 			LastHeartbeatTime: metav1.NewTime(time.Now().Add(-time.Hour)),
 		},
 	})
@@ -94,7 +94,7 @@ func TestCombinedReconcilerDeletesStaleOtherInstanceWithoutTouchingHeartbeat(t *
 	_, err := combined.Reconcile(context.Background(), req)
 	require.NoError(t, err)
 
-	var server v1alpha1.Kontinuum
+	var server v1alpha2.Kontinuum
 
 	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "other-instance"}, &server)
 	assert.True(t, apierrors.IsNotFound(err), "stale instance belonging to someone else should still be deleted")
@@ -117,7 +117,7 @@ func TestCombinedReconcilerReregistersOwnDeletedInstance(t *testing.T) {
 		Heartbeat: &registry.Heartbeat{
 			Client: fakeClient,
 			Name:   "self-instance",
-			Spec:   v1alpha1.KontinuumSpec{Role: v1alpha1.RoleControlPlane},
+			Role:   v1alpha2.RoleControlPlane,
 			Logger: slog.Default(),
 		},
 	}
@@ -127,20 +127,19 @@ func TestCombinedReconcilerReregistersOwnDeletedInstance(t *testing.T) {
 	_, err := combined.Reconcile(context.Background(), req)
 	require.NoError(t, err)
 
-	var server v1alpha1.Kontinuum
+	var server v1alpha2.Kontinuum
 
 	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "self-instance"}, &server))
-	assert.Equal(t, v1alpha1.RoleControlPlane, server.Spec.Role)
+	assert.Equal(t, v1alpha2.RoleControlPlane, server.Status.Role)
 	assert.False(t, server.Status.LastHeartbeatTime.IsZero())
 }
 
 func TestCombinedReconcilerPreservesTTLRequeueForOwnFreshInstance(t *testing.T) {
 	t.Parallel()
 
-	fakeClient := newFakeClient(t, &v1alpha1.Kontinuum{
+	fakeClient := newFakeClient(t, &v1alpha2.Kontinuum{
 		ObjectMeta: metav1.ObjectMeta{Name: "self-instance"},
-		Spec:       v1alpha1.KontinuumSpec{Role: v1alpha1.RoleControlPlane},
-		Status:     v1alpha1.KontinuumStatus{LastHeartbeatTime: metav1.Now()},
+		Status:     v1alpha2.KontinuumStatus{Role: v1alpha2.RoleControlPlane, LastHeartbeatTime: metav1.Now()},
 	})
 
 	combined := &registry.CombinedReconciler{
@@ -152,7 +151,7 @@ func TestCombinedReconcilerPreservesTTLRequeueForOwnFreshInstance(t *testing.T) 
 		Heartbeat: &registry.Heartbeat{
 			Client: fakeClient,
 			Name:   "self-instance",
-			Spec:   v1alpha1.KontinuumSpec{Role: v1alpha1.RoleControlPlane},
+			Role:   v1alpha2.RoleControlPlane,
 			Logger: slog.Default(),
 		},
 	}

@@ -1,4 +1,4 @@
-package v1alpha1_test
+package v1alpha2_test
 
 import (
 	"testing"
@@ -8,16 +8,16 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	"github.com/nicklasfrahm/kontinuum/api/v1alpha1"
+	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 )
 
 func TestGroupVersion(t *testing.T) {
 	t.Parallel()
 
-	gv := v1alpha1.GroupVersion()
+	gv := v1alpha2.GroupVersion()
 
 	assert.Equal(t, "kontinuum.sh", gv.Group)
-	assert.Equal(t, "v1alpha1", gv.Version)
+	assert.Equal(t, "v1alpha2", gv.Version)
 }
 
 func TestAddToScheme(t *testing.T) {
@@ -25,20 +25,20 @@ func TestAddToScheme(t *testing.T) {
 
 	scheme := runtime.NewScheme()
 
-	err := v1alpha1.AddToScheme(scheme)
+	err := v1alpha2.AddToScheme(scheme)
 	require.NoError(t, err)
 
-	assert.True(t, scheme.Recognizes(v1alpha1.GroupVersion().WithKind("Kontinuum")))
-	assert.True(t, scheme.Recognizes(v1alpha1.GroupVersion().WithKind("KontinuumList")))
+	assert.True(t, scheme.Recognizes(v1alpha2.GroupVersion().WithKind("Kontinuum")))
+	assert.True(t, scheme.Recognizes(v1alpha2.GroupVersion().WithKind("KontinuumList")))
 }
 
 func TestKontinuumDeepCopyIsIndependent(t *testing.T) {
 	t.Parallel()
 
-	original := &v1alpha1.Kontinuum{
+	original := &v1alpha2.Kontinuum{
 		ObjectMeta: metav1.ObjectMeta{Name: "test"},
-		Spec:       v1alpha1.KontinuumSpec{Role: v1alpha1.RoleWorker, Region: "eu", Zone: "eu-1a"},
-		Status:     v1alpha1.KontinuumStatus{LastHeartbeatTime: metav1.Now()},
+		Spec:       v1alpha2.KontinuumSpec{Region: "eu", Zone: "eu-1a"},
+		Status:     v1alpha2.KontinuumStatus{Role: v1alpha2.RoleWorker, LastHeartbeatTime: metav1.Now()},
 	}
 
 	copied := original.DeepCopy()
@@ -56,8 +56,8 @@ func TestKontinuumDeepCopyIsIndependent(t *testing.T) {
 func TestKontinuumListDeepCopyIsIndependent(t *testing.T) {
 	t.Parallel()
 
-	original := &v1alpha1.KontinuumList{
-		Items: []v1alpha1.Kontinuum{
+	original := &v1alpha2.KontinuumList{
+		Items: []v1alpha2.Kontinuum{
 			{ObjectMeta: metav1.ObjectMeta{Name: "a"}},
 			{ObjectMeta: metav1.ObjectMeta{Name: "b"}},
 		},

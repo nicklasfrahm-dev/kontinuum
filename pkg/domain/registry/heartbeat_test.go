@@ -13,7 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	"github.com/nicklasfrahm/kontinuum/api/v1alpha1"
+	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/registry"
 )
 
@@ -27,7 +27,8 @@ func TestHeartbeatRegistersAndUpdatesStatus(t *testing.T) {
 	heartbeat := &registry.Heartbeat{
 		Client:   fakeClient,
 		Name:     "test-server",
-		Spec:     v1alpha1.KontinuumSpec{Role: v1alpha1.RoleWorker, Region: "eu", Zone: "eu-1a"},
+		Role:     v1alpha2.RoleWorker,
+		Spec:     v1alpha2.KontinuumSpec{Region: "eu", Zone: "eu-1a"},
 		Interval: testHeartbeatInterval,
 		Logger:   slog.Default(),
 	}
@@ -40,7 +41,7 @@ func TestHeartbeatRegistersAndUpdatesStatus(t *testing.T) {
 		done <- heartbeat.Start(ctx)
 	}()
 
-	var server v1alpha1.Kontinuum
+	var server v1alpha2.Kontinuum
 
 	require.Eventually(t, func() bool {
 		err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-server"}, &server)
@@ -48,7 +49,7 @@ func TestHeartbeatRegistersAndUpdatesStatus(t *testing.T) {
 		return err == nil && !server.Status.LastHeartbeatTime.IsZero()
 	}, time.Second, time.Millisecond, "server was never created with a heartbeat")
 
-	assert.Equal(t, v1alpha1.RoleWorker, server.Spec.Role)
+	assert.Equal(t, v1alpha2.RoleWorker, server.Status.Role)
 	assert.Equal(t, "eu", server.Spec.Region)
 	assert.Equal(t, "eu-1a", server.Spec.Zone)
 
@@ -80,15 +81,17 @@ func TestHeartbeatStartAdoptsPreexistingRegistration(t *testing.T) {
 	// (same hostname-derived name) is still around, either because its
 	// graceful deregistration lost the race with the new process starting,
 	// or the TTL reconciler hasn't expired it yet.
-	fakeClient := newFakeClient(t, &v1alpha1.Kontinuum{
+	fakeClient := newFakeClient(t, &v1alpha2.Kontinuum{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-server"},
-		Spec:       v1alpha1.KontinuumSpec{Role: v1alpha1.RoleWorker, Region: "eu", Zone: "eu-1a"},
+		Spec:       v1alpha2.KontinuumSpec{Region: "eu", Zone: "eu-1a"},
+		Status:     v1alpha2.KontinuumStatus{Role: v1alpha2.RoleWorker},
 	})
 
 	heartbeat := &registry.Heartbeat{
 		Client:   fakeClient,
 		Name:     "test-server",
-		Spec:     v1alpha1.KontinuumSpec{Role: v1alpha1.RoleWorker, Region: "eu", Zone: "eu-1a"},
+		Role:     v1alpha2.RoleWorker,
+		Spec:     v1alpha2.KontinuumSpec{Region: "eu", Zone: "eu-1a"},
 		Interval: testHeartbeatInterval,
 		Logger:   slog.Default(),
 	}
@@ -101,7 +104,7 @@ func TestHeartbeatStartAdoptsPreexistingRegistration(t *testing.T) {
 		done <- heartbeat.Start(ctx)
 	}()
 
-	var server v1alpha1.Kontinuum
+	var server v1alpha2.Kontinuum
 
 	require.Eventually(t, func() bool {
 		err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-server"}, &server)
@@ -127,7 +130,8 @@ func TestHeartbeatReregistersIfDeletedExternally(t *testing.T) {
 	heartbeat := &registry.Heartbeat{
 		Client:   fakeClient,
 		Name:     "test-server",
-		Spec:     v1alpha1.KontinuumSpec{Role: v1alpha1.RoleWorker, Region: "eu", Zone: "eu-1a"},
+		Role:     v1alpha2.RoleWorker,
+		Spec:     v1alpha2.KontinuumSpec{Region: "eu", Zone: "eu-1a"},
 		Interval: testHeartbeatInterval,
 		Logger:   slog.Default(),
 	}
@@ -140,7 +144,7 @@ func TestHeartbeatReregistersIfDeletedExternally(t *testing.T) {
 		done <- heartbeat.Start(ctx)
 	}()
 
-	var server v1alpha1.Kontinuum
+	var server v1alpha2.Kontinuum
 
 	require.Eventually(t, func() bool {
 		err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-server"}, &server)
@@ -153,17 +157,17 @@ func TestHeartbeatReregistersIfDeletedExternally(t *testing.T) {
 	require.NoError(t, fakeClient.Delete(context.Background(), &server))
 
 	require.Eventually(t, func() bool {
-		var recreated v1alpha1.Kontinuum
+		var recreated v1alpha2.Kontinuum
 
 		err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-server"}, &recreated)
 
 		return err == nil && !recreated.Status.LastHeartbeatTime.IsZero()
 	}, time.Second, time.Millisecond, "server was never re-registered after external deletion")
 
-	var recreated v1alpha1.Kontinuum
+	var recreated v1alpha2.Kontinuum
 
 	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-server"}, &recreated))
-	assert.Equal(t, v1alpha1.RoleWorker, recreated.Spec.Role)
+	assert.Equal(t, v1alpha2.RoleWorker, recreated.Status.Role)
 	assert.Equal(t, "eu", recreated.Spec.Region)
 	assert.Equal(t, "eu-1a", recreated.Spec.Zone)
 }
@@ -176,7 +180,7 @@ func TestHeartbeatReconcileReregistersOnDelete(t *testing.T) {
 	heartbeat := &registry.Heartbeat{
 		Client: fakeClient,
 		Name:   "test-server",
-		Spec:   v1alpha1.KontinuumSpec{Role: v1alpha1.RoleControlPlane},
+		Role:   v1alpha2.RoleControlPlane,
 		Logger: slog.Default(),
 	}
 
@@ -185,19 +189,19 @@ func TestHeartbeatReconcileReregistersOnDelete(t *testing.T) {
 	_, err := heartbeat.Reconcile(context.Background(), req)
 	require.NoError(t, err)
 
-	var server v1alpha1.Kontinuum
+	var server v1alpha2.Kontinuum
 
 	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-server"}, &server))
-	assert.Equal(t, v1alpha1.RoleControlPlane, server.Spec.Role)
+	assert.Equal(t, v1alpha2.RoleControlPlane, server.Status.Role)
 	assert.False(t, server.Status.LastHeartbeatTime.IsZero())
 }
 
 func TestHeartbeatReconcileNoOpsWhenServerExists(t *testing.T) {
 	t.Parallel()
 
-	fakeClient := newFakeClient(t, &v1alpha1.Kontinuum{
+	fakeClient := newFakeClient(t, &v1alpha2.Kontinuum{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-server"},
-		Spec:       v1alpha1.KontinuumSpec{Role: v1alpha1.RoleWorker},
+		Status:     v1alpha2.KontinuumStatus{Role: v1alpha2.RoleWorker},
 	})
 
 	heartbeat := &registry.Heartbeat{

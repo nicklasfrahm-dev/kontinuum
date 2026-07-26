@@ -16,7 +16,7 @@ import (
 	restclient "k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 
-	"github.com/nicklasfrahm/kontinuum/api/v1alpha1"
+	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 )
 
 const (
@@ -50,18 +50,18 @@ func crdBackoff() wait.Backoff {
 
 // crdName is the kontinuums.kontinuum.sh CustomResourceDefinition's name.
 func crdName() string {
-	return crdPlural + "." + v1alpha1.GroupName
+	return crdPlural + "." + v1alpha2.GroupName
 }
 
 // CustomResourceDefinition builds the kontinuums.kontinuum.sh CRD:
-// cluster-scoped, v1alpha1, with a structural schema and a status
+// cluster-scoped, v1alpha2, with a structural schema and a status
 // subresource so the heartbeat runnable can update status.lastHeartbeatTime
-// independently of spec.
+// and status.role independently of spec.
 func CustomResourceDefinition() *apiextensionsv1.CustomResourceDefinition {
 	return &apiextensionsv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{Name: crdName()},
 		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
-			Group: v1alpha1.GroupName,
+			Group: v1alpha2.GroupName,
 			Names: apiextensionsv1.CustomResourceDefinitionNames{
 				Plural:   crdPlural,
 				Singular: crdSingular,
@@ -71,7 +71,7 @@ func CustomResourceDefinition() *apiextensionsv1.CustomResourceDefinition {
 			Scope: apiextensionsv1.ClusterScoped,
 			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
 				{
-					Name:    v1alpha1.APIVersion,
+					Name:    v1alpha2.APIVersion,
 					Served:  true,
 					Storage: true,
 					Subresources: &apiextensionsv1.CustomResourceSubresources{
@@ -81,9 +81,9 @@ func CustomResourceDefinition() *apiextensionsv1.CustomResourceDefinition {
 						OpenAPIV3Schema: kontinuumSchema(),
 					},
 					// Keep in sync with the +kubebuilder:printcolumn markers
-					// on v1alpha1.Kontinuum (see make generate).
+					// on v1alpha2.Kontinuum (see make generate).
 					AdditionalPrinterColumns: []apiextensionsv1.CustomResourceColumnDefinition{
-						{Name: "Role", Type: "string", JSONPath: ".spec.role"},
+						{Name: "Role", Type: "string", JSONPath: ".status.role"},
 						{Name: "Region", Type: "string", JSONPath: ".spec.region"},
 						{Name: "Zone", Type: "string", JSONPath: ".spec.zone"},
 					},
@@ -96,18 +96,16 @@ func CustomResourceDefinition() *apiextensionsv1.CustomResourceDefinition {
 // kontinuumSchema is the structural OpenAPIV3 schema for a Kontinuum object.
 func kontinuumSchema() *apiextensionsv1.JSONSchemaProps {
 	roleEnum := []apiextensionsv1.JSON{
-		{Raw: []byte(`"` + v1alpha1.RoleControlPlane + `"`)},
-		{Raw: []byte(`"` + v1alpha1.RoleWorker + `"`)},
+		{Raw: []byte(`"` + v1alpha2.RoleControlPlane + `"`)},
+		{Raw: []byte(`"` + v1alpha2.RoleWorker + `"`)},
 	}
 
 	return &apiextensionsv1.JSONSchemaProps{
 		Type: "object",
 		Properties: map[string]apiextensionsv1.JSONSchemaProps{
 			"spec": {
-				Type:     "object",
-				Required: []string{"role"},
+				Type: "object",
 				Properties: map[string]apiextensionsv1.JSONSchemaProps{
-					"role":   {Type: "string", Enum: roleEnum},
 					"region": {Type: "string"},
 					"zone":   {Type: "string"},
 				},
@@ -115,6 +113,7 @@ func kontinuumSchema() *apiextensionsv1.JSONSchemaProps {
 			"status": {
 				Type: "object",
 				Properties: map[string]apiextensionsv1.JSONSchemaProps{
+					"role":              {Type: "string", Enum: roleEnum},
 					"lastHeartbeatTime": {Type: "string", Format: "date-time"},
 				},
 			},
@@ -168,7 +167,7 @@ func waitForDiscoverable(ctx context.Context, loopbackConfig *restclient.Config,
 		return fmt.Errorf("failed to build rest mapper: %w", err)
 	}
 
-	gvk := v1alpha1.GroupVersion().WithKind(crdKind)
+	gvk := v1alpha2.GroupVersion().WithKind(crdKind)
 
 	timeoutCtx, cancel := context.WithTimeout(ctx, crdEstablishTimeout)
 	defer cancel()

@@ -41,16 +41,14 @@ help: ## Display this help
 ##@ Development
 
 .PHONY: generate
-# GOOS/GOARCH forced empty (native) for every command here, regardless of
-# what's exported in the calling environment: `go tool`/`go run` (the
-# latter backs the go:generate directive in pkg/ui/assets.go) both build
-# their tool and immediately execute it, so if a cross-compiling caller
-# (see build's GOOS/GOARCH, set for the Containerfile's multi-arch image
-# build) left those exported, either would try to run a
+# GOOS/GOARCH forced empty (native), regardless of what's exported in the
+# calling environment: every go:generate directive here (see
+# api/v1alpha2/doc.go and pkg/ui/assets.go) shells out to `go tool`/`go run`,
+# which both build their tool and immediately execute it, so if a
+# cross-compiling caller (see build's GOOS/GOARCH, set for the Containerfile's
+# multi-arch image build) left those exported, either would try to run a
 # foreign-architecture binary and fail with "exec format error".
 generate: ## Regenerate deepcopy methods, CRDs, and vendored web assets
-	GOOS= GOARCH= go tool controller-gen object paths="./api/..."
-	GOOS= GOARCH= go tool controller-gen crd paths="./api/..." output:crd:artifacts:config=config/crd
 	GOOS= GOARCH= go generate ./...
 
 .PHONY: build

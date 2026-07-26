@@ -11,7 +11,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/nicklasfrahm/kontinuum/api/v1alpha1"
+	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 )
 
 // deregisterTimeout bounds the final Delete call Heartbeat.Start makes
@@ -26,9 +26,12 @@ const deregisterTimeout = 5 * time.Second
 // and reconcile.Reconciler (Reconcile, invoked for its own object by the
 // combinedReconciler both this and TTLReconciler are registered through).
 type Heartbeat struct {
-	Client   client.Client
-	Name     string
-	Spec     v1alpha1.KontinuumSpec
+	Client client.Client
+	Name   string
+	// Role is written to status.role on every heartbeat — see registry.Role,
+	// which derives it from Spec.Region and Spec.Zone.
+	Role     string
+	Spec     v1alpha2.KontinuumSpec
 	Interval time.Duration
 	Logger   *slog.Logger
 }
@@ -41,7 +44,7 @@ type Heartbeat struct {
 // state (the object exists, or a transient fetch error) needs no action:
 // Start's own ticker owns keeping it fresh.
 func (h *Heartbeat) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var server v1alpha1.Kontinuum
+	var server v1alpha2.Kontinuum
 
 	err := h.Client.Get(ctx, req.NamespacedName, &server)
 	if apierrors.IsNotFound(err) {
@@ -66,7 +69,7 @@ func (h *Heartbeat) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resul
 // succeeds and beat proceeds straight to updating it) uniformly, with
 // nothing left over to special-case here.
 func (h *Heartbeat) Start(ctx context.Context) error {
-	server := &v1alpha1.Kontinuum{
+	server := &v1alpha2.Kontinuum{
 		ObjectMeta: metav1.ObjectMeta{Name: h.Name},
 		Spec:       h.Spec,
 	}
@@ -101,7 +104,7 @@ func (h *Heartbeat) Start(ctx context.Context) error {
 // recreating it (see reregister) rather than leaving this instance
 // permanently deregistered until the process restarts. Any other failure
 // is logged, not fatal — the next tick tries again.
-func (h *Heartbeat) beat(ctx context.Context, server *v1alpha1.Kontinuum) {
+func (h *Heartbeat) beat(ctx context.Context, server *v1alpha2.Kontinuum) {
 	err := h.Client.Get(ctx, client.ObjectKeyFromObject(server), server)
 	if apierrors.IsNotFound(err) {
 		h.Logger.Warn("Server object missing, re-registering", "name", h.Name)
@@ -116,6 +119,7 @@ func (h *Heartbeat) beat(ctx context.Context, server *v1alpha1.Kontinuum) {
 		return
 	}
 
+	server.Status.Role = h.Role
 	server.Status.LastHeartbeatTime = metav1.Now()
 
 	err = h.Client.Status().Update(ctx, server)
@@ -131,8 +135,8 @@ func (h *Heartbeat) beat(ctx context.Context, server *v1alpha1.Kontinuum) {
 // own next tick) can both reach here for the same deletion; if Create loses
 // that race with AlreadyExists, that's not a failure — it just fetches
 // whatever the other path already recreated instead.
-func (h *Heartbeat) reregister(ctx context.Context, server *v1alpha1.Kontinuum) {
-	*server = v1alpha1.Kontinuum{
+func (h *Heartbeat) reregister(ctx context.Context, server *v1alpha2.Kontinuum) {
+	*server = v1alpha2.Kontinuum{
 		ObjectMeta: metav1.ObjectMeta{Name: h.Name},
 		Spec:       h.Spec,
 	}
@@ -148,6 +152,7 @@ func (h *Heartbeat) reregister(ctx context.Context, server *v1alpha1.Kontinuum) 
 		return
 	}
 
+	server.Status.Role = h.Role
 	server.Status.LastHeartbeatTime = metav1.Now()
 
 	err = h.Client.Status().Update(ctx, server)
@@ -161,7 +166,7 @@ func (h *Heartbeat) reregister(ctx context.Context, server *v1alpha1.Kontinuum) 
 // stripped and replaced with a fresh, bounded timeout — any request-scoped
 // values on ctx are kept. This is what makes graceful shutdown delete the
 // Kontinuum object instead of waiting for the TTL reconciler.
-func (h *Heartbeat) deregister(ctx context.Context, server *v1alpha1.Kontinuum) {
+func (h *Heartbeat) deregister(ctx context.Context, server *v1alpha2.Kontinuum) {
 	deregisterCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deregisterTimeout)
 	defer cancel()
 

@@ -1,7 +1,7 @@
 // +groupName=kontinuum.sh
 // +kubebuilder:object:generate=true
 
-package v1alpha1
+package v1alpha2
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -13,7 +13,7 @@ const (
 	// GroupName is the API group Kontinuum and KontinuumList belong to.
 	GroupName = "kontinuum.sh"
 	// APIVersion is the API version Kontinuum and KontinuumList belong to.
-	APIVersion = "v1alpha1"
+	APIVersion = "v1alpha2"
 )
 
 // GroupVersion is the API group and version Kontinuum and KontinuumList belong to.
