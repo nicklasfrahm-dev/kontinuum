@@ -18,7 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/nicklasfrahm/kontinuum/api/v1alpha1"
+	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/auth"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
 )
@@ -275,7 +275,7 @@ func (r *Router) handleDeleteInstance(writer http.ResponseWriter, request *http.
 		return
 	}
 
-	target := &v1alpha1.Kontinuum{ObjectMeta: metav1.ObjectMeta{Name: request.PathValue("name")}}
+	target := &v1alpha2.Kontinuum{ObjectMeta: metav1.ObjectMeta{Name: request.PathValue("name")}}
 
 	err = kontinuums.Delete(request.Context(), target)
 	if err != nil && !apierrors.IsNotFound(err) {
@@ -310,7 +310,7 @@ func (r *Router) renderTopology(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 
-	var list v1alpha1.KontinuumList
+	var list v1alpha2.KontinuumList
 
 	err = kontinuums.List(request.Context(), &list)
 	if err != nil {
@@ -333,7 +333,7 @@ func (r *Router) renderTopology(writer http.ResponseWriter, request *http.Reques
 	for _, item := range list.Items {
 		instances = append(instances, instance{
 			Name:   item.Name,
-			Role:   item.Spec.Role,
+			Role:   item.Status.Role,
 			Region: item.Spec.Region,
 			Zone:   item.Spec.Zone,
 			Age:    formatAge(item.Status.LastHeartbeatTime.Time),

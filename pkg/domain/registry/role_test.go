@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/nicklasfrahm/kontinuum/api/v1alpha1"
+	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/registry"
 )
 
@@ -23,12 +23,12 @@ func TestRole(t *testing.T) {
 		"both empty is controlplane": {
 			region:   "",
 			zone:     "",
-			wantRole: v1alpha1.RoleControlPlane,
+			wantRole: v1alpha2.RoleControlPlane,
 		},
 		"both set is worker": {
 			region:   "eu",
 			zone:     "eu-1a",
-			wantRole: v1alpha1.RoleWorker,
+			wantRole: v1alpha2.RoleWorker,
 		},
 		"only region set is an error": {
 			region:      "eu",

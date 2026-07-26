@@ -11,7 +11,7 @@ import (
 	"github.com/google/uuid"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	"github.com/nicklasfrahm/kontinuum/api/v1alpha1"
+	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 )
 
 const (
@@ -23,9 +23,9 @@ const (
 type Config struct {
 	// Role is this server's registry role — see Role.
 	Role string
-	// Region is the region this server manages. Empty when Role is v1alpha1.RoleControlPlane.
+	// Region is the region this server manages. Empty when Role is v1alpha2.RoleControlPlane.
 	Region string
-	// Zone is the zone this server manages. Empty when Role is v1alpha1.RoleControlPlane.
+	// Zone is the zone this server manages. Empty when Role is v1alpha2.RoleControlPlane.
 	Zone string
 	// Logger receives the controller's log output.
 	Logger *slog.Logger
@@ -68,7 +68,7 @@ func NewController(cfg Config) *Controller {
 //
 // TTLReconciler and Heartbeat both watch Kontinuum, but controller-runtime
 // requires controller names to be unique (for metrics), and
-// ctrl.NewControllerManagedBy(mgr).For(&v1alpha1.Kontinuum{}) derives the
+// ctrl.NewControllerManagedBy(mgr).For(&v1alpha2.Kontinuum{}) derives the
 // same default name from the GVK regardless of which reconciler it wraps —
 // registering each separately collides ("controller with name kontinuum
 // already exists"). combinedReconciler merges them onto the one Controller
@@ -83,14 +83,15 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 	heartbeat := &Heartbeat{
 		Client:   mgr.GetClient(),
 		Name:     InstanceName(os.Hostname()),
-		Spec:     v1alpha1.KontinuumSpec{Role: c.Config.Role, Region: c.Config.Region, Zone: c.Config.Zone},
+		Role:     c.Config.Role,
+		Spec:     v1alpha2.KontinuumSpec{Region: c.Config.Region, Zone: c.Config.Zone},
 		Interval: c.Config.HeartbeatInterval,
 		Logger:   c.Config.Logger,
 	}
 
 	combined := &CombinedReconciler{TTL: reconciler, Heartbeat: heartbeat}
 
-	err := ctrl.NewControllerManagedBy(mgr).For(&v1alpha1.Kontinuum{}).Complete(combined)
+	err := ctrl.NewControllerManagedBy(mgr).For(&v1alpha2.Kontinuum{}).Complete(combined)
 	if err != nil {
 		return fmt.Errorf("failed to register server controller: %w", err)
 	}

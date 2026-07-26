@@ -16,7 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/nicklasfrahm/kontinuum/api/v1alpha1"
+	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/registry"
 )
 
@@ -51,12 +51,12 @@ func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
 
 	scheme := runtime.NewScheme()
 
-	err := v1alpha1.AddToScheme(scheme)
+	err := v1alpha2.AddToScheme(scheme)
 	require.NoError(t, err)
 
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.Kontinuum{}).
+		WithStatusSubresource(&v1alpha2.Kontinuum{}).
 		WithObjects(objects...).
 		Build()
 }
@@ -64,10 +64,12 @@ func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
 func TestTTLReconcilerDeletesStaleServer(t *testing.T) {
 	t.Parallel()
 
-	server := &v1alpha1.Kontinuum{
+	server := &v1alpha2.Kontinuum{
 		ObjectMeta: metav1.ObjectMeta{Name: "stale-server"},
-		Spec:       v1alpha1.KontinuumSpec{Role: v1alpha1.RoleControlPlane},
-		Status:     v1alpha1.KontinuumStatus{LastHeartbeatTime: metav1.NewTime(time.Now().Add(-10 * time.Minute))},
+		Status: v1alpha2.KontinuumStatus{
+			Role:              v1alpha2.RoleControlPlane,
+			LastHeartbeatTime: metav1.NewTime(time.Now().Add(-10 * time.Minute)),
+		},
 	}
 
 	fakeClient := newFakeClient(t, server)
@@ -84,17 +86,19 @@ func TestTTLReconcilerDeletesStaleServer(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, result)
 
-	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "stale-server"}, &v1alpha1.Kontinuum{})
+	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "stale-server"}, &v1alpha2.Kontinuum{})
 	assert.True(t, apierrors.IsNotFound(err))
 }
 
 func TestTTLReconcilerRequeuesFreshServer(t *testing.T) {
 	t.Parallel()
 
-	server := &v1alpha1.Kontinuum{
+	server := &v1alpha2.Kontinuum{
 		ObjectMeta: metav1.ObjectMeta{Name: "fresh-server"},
-		Spec:       v1alpha1.KontinuumSpec{Role: v1alpha1.RoleControlPlane},
-		Status:     v1alpha1.KontinuumStatus{LastHeartbeatTime: metav1.NewTime(time.Now().Add(-time.Minute))},
+		Status: v1alpha2.KontinuumStatus{
+			Role:              v1alpha2.RoleControlPlane,
+			LastHeartbeatTime: metav1.NewTime(time.Now().Add(-time.Minute)),
+		},
 	}
 
 	fakeClient := newFakeClient(t, server)
@@ -111,7 +115,7 @@ func TestTTLReconcilerRequeuesFreshServer(t *testing.T) {
 	require.NoError(t, err)
 	assert.Positive(t, result.RequeueAfter)
 
-	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "fresh-server"}, &v1alpha1.Kontinuum{})
+	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "fresh-server"}, &v1alpha2.Kontinuum{})
 	assert.NoError(t, err)
 }
 

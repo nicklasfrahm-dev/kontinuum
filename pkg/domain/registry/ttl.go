@@ -10,7 +10,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/nicklasfrahm/kontinuum/api/v1alpha1"
+	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 )
 
 // TTLReconciler deletes a Kontinuum object once it has gone longer than
@@ -26,7 +26,7 @@ type TTLReconciler struct {
 
 // Reconcile implements reconcile.Reconciler.
 func (r *TTLReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var server v1alpha1.Kontinuum
+	var server v1alpha2.Kontinuum
 
 	err := r.Client.Get(ctx, req.NamespacedName, &server)
 	if apierrors.IsNotFound(err) {
@@ -51,7 +51,7 @@ func (r *TTLReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 }
 
 // deleteStale deletes server, which was last seen at lastHeartbeat.
-func (r *TTLReconciler) deleteStale(ctx context.Context, server *v1alpha1.Kontinuum, lastHeartbeat time.Time) error {
+func (r *TTLReconciler) deleteStale(ctx context.Context, server *v1alpha2.Kontinuum, lastHeartbeat time.Time) error {
 	err := r.Client.Delete(ctx, server)
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("failed to delete stale server %q: %w", server.Name, err)

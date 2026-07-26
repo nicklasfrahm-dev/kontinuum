@@ -1,4 +1,4 @@
-package v1alpha1
+package v1alpha2
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -14,16 +14,20 @@ const (
 
 // KontinuumSpec describes a single running kontinuum process.
 type KontinuumSpec struct {
-	// Role is either RoleControlPlane or RoleWorker.
-	Role string `json:"role"`
-	// Region is the region this process manages. Empty when Role is RoleControlPlane.
+	// Region is the region this process manages. Empty when both Region and
+	// Zone are empty, in which case the process is the control-plane entrypoint.
 	Region string `json:"region,omitempty"`
-	// Zone is the availability zone this process manages. Empty when Role is RoleControlPlane.
+	// Zone is the availability zone this process manages. Empty when both
+	// Region and Zone are empty, in which case the process is the
+	// control-plane entrypoint.
 	Zone string `json:"zone,omitempty"`
 }
 
 // KontinuumStatus reports the last time a Kontinuum reported in.
 type KontinuumStatus struct {
+	// Role is either RoleControlPlane or RoleWorker, derived from
+	// spec.region and spec.zone — see registry.Role.
+	Role string `json:"role"`
 	// LastHeartbeatTime is when this process last reported in. The server
 	// registry deletes a Kontinuum whose LastHeartbeatTime is older than
 	// its configured stale threshold (5 minutes by default).
@@ -33,7 +37,7 @@ type KontinuumStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
-// +kubebuilder:printcolumn:name="Role",type="string",JSONPath=".spec.role"
+// +kubebuilder:printcolumn:name="Role",type="string",JSONPath=".status.role"
 // +kubebuilder:printcolumn:name="Region",type="string",JSONPath=".spec.region"
 // +kubebuilder:printcolumn:name="Zone",type="string",JSONPath=".spec.zone"
 

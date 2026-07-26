@@ -16,7 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/nicklasfrahm/kontinuum/api/v1alpha1"
+	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
 	"github.com/nicklasfrahm/kontinuum/pkg/ui"
 )
@@ -47,7 +47,7 @@ func (s stubNamespaceLister) List(context.Context, metav1.ListOptions) (*corev1.
 
 // stubKontinuumLister is a fixed-response ui.KontinuumClient for tests.
 type stubKontinuumLister struct {
-	items     []v1alpha1.Kontinuum
+	items     []v1alpha2.Kontinuum
 	err       error
 	deleteErr error
 }
@@ -57,7 +57,7 @@ func (s stubKontinuumLister) List(_ context.Context, list client.ObjectList, _ .
 		return s.err
 	}
 
-	if kontinuumList, ok := list.(*v1alpha1.KontinuumList); ok {
+	if kontinuumList, ok := list.(*v1alpha2.KontinuumList); ok {
 		kontinuumList.Items = s.items
 	}
 
@@ -489,8 +489,8 @@ func TestHandleTopologyRendersInstances(t *testing.T) {
 	}
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
-		return stubKontinuumLister{items: []v1alpha1.Kontinuum{
-			{ObjectMeta: metav1.ObjectMeta{Name: "demo"}, Spec: v1alpha1.KontinuumSpec{Role: v1alpha1.RoleControlPlane}},
+		return stubKontinuumLister{items: []v1alpha2.Kontinuum{
+			{ObjectMeta: metav1.ObjectMeta{Name: "demo"}, Status: v1alpha2.KontinuumStatus{Role: v1alpha2.RoleControlPlane}},
 		}}, nil
 	}
 
@@ -580,7 +580,7 @@ func assertForbiddenInvalidatesSession(
 func TestHandleTopologyInvalidatesSessionOnForbidden(t *testing.T) {
 	t.Parallel()
 
-	forbiddenReason := schema.GroupResource{Group: v1alpha1.GroupName, Resource: "kontinuums"}
+	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: "kontinuums"}
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
 		return stubKontinuumLister{err: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
@@ -648,7 +648,7 @@ func TestHandleDeleteInstanceReturnsBadGatewayOnFailure(t *testing.T) {
 func TestHandleDeleteInstanceInvalidatesSessionOnForbidden(t *testing.T) {
 	t.Parallel()
 
-	forbiddenReason := schema.GroupResource{Group: v1alpha1.GroupName, Resource: "kontinuums"}
+	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: "kontinuums"}
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
 		return stubKontinuumLister{deleteErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil

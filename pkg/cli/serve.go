@@ -20,7 +20,7 @@ import (
 	"k8s.io/client-go/rest"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/nicklasfrahm/kontinuum/api/v1alpha1"
+	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/auth"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/registry"
@@ -164,9 +164,9 @@ func buildServer(
 
 	scheme := runtime.NewScheme()
 
-	err := v1alpha1.AddToScheme(scheme)
+	err := v1alpha2.AddToScheme(scheme)
 	if err != nil {
-		return nil, fmt.Errorf("failed to register kontinuum.sh/v1alpha1 scheme: %w", err)
+		return nil, fmt.Errorf("failed to register kontinuum.sh/v1alpha2 scheme: %w", err)
 	}
 
 	uiRouter := ui.NewRouter(
@@ -257,8 +257,8 @@ func namespaceListerFactory(addr string) ui.NamespaceListerFactory {
 // kontinuumListerFactory builds a ui.KontinuumClientFactory that calls back
 // into this same server over loopback HTTP, authenticated as whatever
 // identity ctx carries — see namespaceListerFactory, which this mirrors.
-// scheme must already have kontinuum.sh/v1alpha1 registered (see
-// v1alpha1.AddToScheme) so the controller-runtime client can resolve
+// scheme must already have kontinuum.sh/v1alpha2 registered (see
+// v1alpha2.AddToScheme) so the controller-runtime client can resolve
 // Kontinuum's GVK.
 func kontinuumListerFactory(addr string, scheme *runtime.Scheme) ui.KontinuumClientFactory {
 	return func(ctx context.Context) (ui.KontinuumClient, error) {
