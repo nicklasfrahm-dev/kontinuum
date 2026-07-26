@@ -57,6 +57,9 @@ spec:
                 type: string
               role:
                 description: Role is either RoleControlPlane or RoleWorker.
+                enum:
+                - controlplane
+                - worker
                 type: string
               zone:
                 description: Zone is the availability zone this process manages. Empty
@@ -66,11 +69,19 @@ spec:
             - role
             type: object
             x-kubernetes-validations:
-            - message: 'region/zone: both or neither'
-              rule: has(self.region) == has(self.zone)
+            - message: region and zone must both be set, or both be empty
+              rule: (!has(self.region) || self.region == '') == (!has(self.zone) ||
+                self.zone == '')
           status:
-            description: KontinuumStatus reports the last time a Kontinuum reported
-              in.
+            description: |-
+              KontinuumStatus reports the last time a Kontinuum reported in.
+              LastHeartbeatTime is +optional despite lacking omitempty: with the
+              status subresource enabled (see the +kubebuilder:subresource:status
+              marker below), the apiserver always strips whatever status the main
+              resource endpoint's Create/Update payload carries before validating it —
+              status is only ever populated afterward, via the status subresource.
+              Requiring this field would make every Create fail structural-schema
+              validation against that always-empty status.
             properties:
               lastHeartbeatTime:
                 description: |-
@@ -79,13 +90,10 @@ spec:
                   its configured stale threshold (5 minutes by default).
                 format: date-time
                 type: string
-            required:
-            - lastHeartbeatTime
             type: object
         required:
         - metadata
         - spec
-        - status
         type: object
     served: true
     storage: false
@@ -141,11 +149,19 @@ spec:
                 type: string
             type: object
             x-kubernetes-validations:
-            - message: 'region/zone: both or neither'
-              rule: has(self.region) == has(self.zone)
+            - message: region and zone must both be set, or both be empty
+              rule: (!has(self.region) || self.region == '') == (!has(self.zone) ||
+                self.zone == '')
           status:
-            description: KontinuumStatus reports the last time a Kontinuum reported
-              in.
+            description: |-
+              KontinuumStatus reports the last time a Kontinuum reported in. Both
+              fields are +optional despite lacking omitempty: with the status
+              subresource enabled (see the +kubebuilder:subresource:status marker
+              below), the apiserver always strips whatever status the main resource
+              endpoint's Create/Update payload carries before validating it — status
+              is only ever populated afterward, via the status subresource. Requiring
+              these fields would make every Create fail structural-schema validation
+              against that always-empty status.
             properties:
               lastHeartbeatTime:
                 description: |-
@@ -158,15 +174,14 @@ spec:
                 description: |-
                   Role is either RoleControlPlane or RoleWorker, derived from
                   spec.region and spec.zone — see registry.Role.
+                enum:
+                - controlplane
+                - worker
                 type: string
-            required:
-            - lastHeartbeatTime
-            - role
             type: object
         required:
         - metadata
         - spec
-        - status
         type: object
     served: true
     storage: true

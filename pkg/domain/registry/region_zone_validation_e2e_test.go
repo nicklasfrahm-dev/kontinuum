@@ -12,10 +12,12 @@ import (
 
 // TestRegionZoneValidationRejectsInconsistentValues is the regression test
 // for the CEL rule registry.CustomResourceDefinition's schema attaches to
-// spec (see regionZoneValidationRules, unexported): only a real apiserver
-// evaluates x-kubernetes-validations — the fake clientset used by this
-// package's other CRD tests never runs any admission validation, CEL
-// included — so, like TestConversionWebhookBridgesLegacyRegistration, this
+// spec (see the +kubebuilder:validation:XValidation marker on
+// v1alpha2.KontinuumSpec, which config/crd's generated manifest carries):
+// only a real apiserver evaluates x-kubernetes-validations — the fake
+// clientset used by this package's other CRD tests never runs any
+// admission validation, CEL included — so, like
+// TestConversionWebhookBridgesLegacyRegistration, this
 // needs a real server. Unlike that test, it passes withController=false:
 // this test only ever touches v1alpha2 objects directly, so it needs
 // neither the conversion webhook nor the heartbeat/TTL reconciler — and

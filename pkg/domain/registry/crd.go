@@ -20,16 +20,19 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	restclient "k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
+	"sigs.k8s.io/yaml"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha1"
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
+	crdconfig "github.com/nicklasfrahm/kontinuum/config/crd"
 )
 
 const (
-	crdPlural           = "kontinuums"
-	crdSingular         = "kontinuum"
-	crdKind             = "Kontinuum"
-	crdListKind         = "KontinuumList"
+	crdPlural = "kontinuums"
+	crdKind   = "Kontinuum"
+	// crdManifestFile is kontinuums' generated manifest's name within
+	// crdconfig.Files — see CustomResourceDefinition.
+	crdManifestFile     = "kontinuum.sh_kontinuums.yaml"
 	crdEstablishTimeout = 10 * time.Second
 	crdPollInterval     = 100 * time.Millisecond
 	// crdMaxPollInterval caps how large crdBackoff's exponential interval is
@@ -76,165 +79,49 @@ func crdName() string {
 // for every convertible CRD in the process.
 const conversionWebhookPath = "/convert"
 
-// CustomResourceDefinition builds the kontinuums.kontinuum.sh CRD:
-// cluster-scoped, with a structural schema and a status subresource so the
-// heartbeat runnable can update status.lastHeartbeatTime and status.role
-// independently of spec. Lists two versions — v1alpha2 (served, storage)
-// and v1alpha1 (served, but no longer storage) — converted between by a
-// webhook, since Role moved from spec (v1alpha1) into status (v1alpha2): a
-// structural change "None" conversion can't handle (it assumes every
-// version is byte-compatible), and in fact apiextensions rejects "None"
-// outright once the schemas genuinely diverge like this. caBundle is
-// EnsureConversionWebhookCert's result — see its doc for why the cert has
-// to exist and be embedded here before the webhook server that will
-// actually present it is even built.
+// CustomResourceDefinition builds the kontinuums.kontinuum.sh CRD by
+// reading crdManifestFile out of crdconfig.Files — the config/crd manifests
+// controller-gen generates from api/v1alpha1 and api/v1alpha2's kubebuilder
+// markers — and patching in the one piece that manifest can't contain: the
+// conversion webhook's clientConfig. controller-gen has no marker for a
+// webhook's URL or CABundle, and CABundle in particular is only known at
+// runtime — EnsureConversionWebhookCert's result — so it can't be baked
+// into a generated file at all. Region/zone's CEL rule, the role enum,
+// printer columns, and which version is storage are all controller-gen's
+// responsibility now (see api/v1alpha2/doc.go); this function no longer
+// hand-builds any of that, so schema and markers can't drift apart the way
+// they already had once. A missing or malformed manifest can only mean a
+// build-time bug (a corrupt `make generate` run), not a condition callers
+// could meaningfully recover from — hence the panic instead of a returned
+// error, the same contract this function has always had.
 func CustomResourceDefinition(caBundle []byte) *apiextensionsv1.CustomResourceDefinition {
+	manifest, err := crdconfig.Files.ReadFile(crdManifestFile)
+	if err != nil {
+		panic(fmt.Sprintf("failed to read embedded %s manifest: %v", crdName(), err))
+	}
+
+	var crd apiextensionsv1.CustomResourceDefinition
+
+	err = yaml.Unmarshal(manifest, &crd)
+	if err != nil {
+		panic(fmt.Sprintf("failed to parse embedded %s manifest: %v", crdName(), err))
+	}
+
 	conversionHostPort := net.JoinHostPort(conversionWebhookDNSName, strconv.Itoa(ConversionWebhookPort))
 	conversionURL := "https://" + conversionHostPort + conversionWebhookPath
 
-	return &apiextensionsv1.CustomResourceDefinition{
-		ObjectMeta: metav1.ObjectMeta{Name: crdName()},
-		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
-			Group: v1alpha2.GroupName,
-			Names: apiextensionsv1.CustomResourceDefinitionNames{
-				Plural:   crdPlural,
-				Singular: crdSingular,
-				Kind:     crdKind,
-				ListKind: crdListKind,
+	crd.Spec.Conversion = &apiextensionsv1.CustomResourceConversion{
+		Strategy: apiextensionsv1.WebhookConverter,
+		Webhook: &apiextensionsv1.WebhookConversion{
+			ClientConfig: &apiextensionsv1.WebhookClientConfig{
+				URL:      &conversionURL,
+				CABundle: caBundle,
 			},
-			Scope: apiextensionsv1.ClusterScoped,
-			Conversion: &apiextensionsv1.CustomResourceConversion{
-				Strategy: apiextensionsv1.WebhookConverter,
-				Webhook: &apiextensionsv1.WebhookConversion{
-					ClientConfig: &apiextensionsv1.WebhookClientConfig{
-						URL:      &conversionURL,
-						CABundle: caBundle,
-					},
-					ConversionReviewVersions: []string{"v1"},
-				},
-			},
-			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
-				{
-					Name:    v1alpha2.APIVersion,
-					Served:  true,
-					Storage: true,
-					Subresources: &apiextensionsv1.CustomResourceSubresources{
-						Status: &apiextensionsv1.CustomResourceSubresourceStatus{},
-					},
-					Schema: &apiextensionsv1.CustomResourceValidation{
-						OpenAPIV3Schema: kontinuumSchema(),
-					},
-					// Keep in sync with the +kubebuilder:printcolumn markers
-					// on v1alpha2.Kontinuum (see make generate).
-					AdditionalPrinterColumns: []apiextensionsv1.CustomResourceColumnDefinition{
-						{Name: "Role", Type: "string", JSONPath: ".status.role"},
-						{Name: "Region", Type: "string", JSONPath: ".spec.region"},
-						{Name: "Zone", Type: "string", JSONPath: ".spec.zone"},
-					},
-				},
-				{
-					Name:    v1alpha1.APIVersion,
-					Served:  true,
-					Storage: false,
-					Subresources: &apiextensionsv1.CustomResourceSubresources{
-						Status: &apiextensionsv1.CustomResourceSubresourceStatus{},
-					},
-					Schema: &apiextensionsv1.CustomResourceValidation{
-						OpenAPIV3Schema: kontinuumSchemaV1Alpha1(),
-					},
-					// Keep in sync with the +kubebuilder:printcolumn markers
-					// on v1alpha1.Kontinuum.
-					AdditionalPrinterColumns: []apiextensionsv1.CustomResourceColumnDefinition{
-						{Name: "Role", Type: "string", JSONPath: ".spec.role"},
-						{Name: "Region", Type: "string", JSONPath: ".spec.region"},
-						{Name: "Zone", Type: "string", JSONPath: ".spec.zone"},
-					},
-				},
-			},
+			ConversionReviewVersions: []string{"v1"},
 		},
 	}
-}
 
-// kontinuumSchema is the structural OpenAPIV3 schema for a v1alpha2
-// Kontinuum object.
-func kontinuumSchema() *apiextensionsv1.JSONSchemaProps {
-	roleEnum := []apiextensionsv1.JSON{
-		{Raw: []byte(`"` + v1alpha2.RoleControlPlane + `"`)},
-		{Raw: []byte(`"` + v1alpha2.RoleWorker + `"`)},
-	}
-
-	return &apiextensionsv1.JSONSchemaProps{
-		Type: "object",
-		Properties: map[string]apiextensionsv1.JSONSchemaProps{
-			"spec": {
-				Type: "object",
-				Properties: map[string]apiextensionsv1.JSONSchemaProps{
-					"region": {Type: "string"},
-					"zone":   {Type: "string"},
-				},
-				XValidations: regionZoneValidationRules(),
-			},
-			"status": {
-				Type: "object",
-				Properties: map[string]apiextensionsv1.JSONSchemaProps{
-					"role":              {Type: "string", Enum: roleEnum},
-					"lastHeartbeatTime": {Type: "string", Format: "date-time"},
-				},
-			},
-		},
-	}
-}
-
-// regionZoneValidationRules enforces, at admission time, the same
-// invariant registry.Role enforces in Go: region and zone must both be set
-// or both be empty. Declared once and shared by both spec schemas below so
-// they can't drift apart. Without this, the invariant was only ever
-// checked in registry.Role, called from a process's own startup config —
-// nothing stopped an external client (kubectl, a bug, an old client) from
-// writing an inconsistent object directly. has() guards against the
-// region/zone fields being entirely absent (the common case, thanks to
-// their omitempty json tags) as well as present-but-empty, so both forms
-// are treated identically.
-func regionZoneValidationRules() apiextensionsv1.ValidationRules {
-	return apiextensionsv1.ValidationRules{
-		{
-			Rule:    "(!has(self.region) || self.region == '') == (!has(self.zone) || self.zone == '')",
-			Message: ErrRegionZoneRequired.Error(),
-		},
-	}
-}
-
-// kontinuumSchemaV1Alpha1 is the structural OpenAPIV3 schema the removed
-// v1alpha1 API version used, before Role moved from spec into status — see
-// api/v1alpha1's doc for why the version entry using this still exists at
-// all.
-func kontinuumSchemaV1Alpha1() *apiextensionsv1.JSONSchemaProps {
-	roleEnum := []apiextensionsv1.JSON{
-		{Raw: []byte(`"` + v1alpha1.RoleControlPlane + `"`)},
-		{Raw: []byte(`"` + v1alpha1.RoleWorker + `"`)},
-	}
-
-	return &apiextensionsv1.JSONSchemaProps{
-		Type: "object",
-		Properties: map[string]apiextensionsv1.JSONSchemaProps{
-			"spec": {
-				Type:     "object",
-				Required: []string{"role"},
-				Properties: map[string]apiextensionsv1.JSONSchemaProps{
-					"role":   {Type: "string", Enum: roleEnum},
-					"region": {Type: "string"},
-					"zone":   {Type: "string"},
-				},
-				XValidations: regionZoneValidationRules(),
-			},
-			"status": {
-				Type: "object",
-				Properties: map[string]apiextensionsv1.JSONSchemaProps{
-					"lastHeartbeatTime": {Type: "string", Format: "date-time"},
-				},
-			},
-		},
-	}
+	return &crd
 }
 
 // EnsureCRD is a libkapi.PostStartHookFunc — see its registration in
