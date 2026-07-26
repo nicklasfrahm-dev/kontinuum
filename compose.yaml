@@ -40,7 +40,40 @@ services:
       postgres:
         condition: service_healthy
 
+  # Self-signed TLS termination in front of kontinuum-dev. kubectl (via
+  # client-go) refuses to send the bearer token that the oidc-login exec
+  # plugin produces (see pkg/ui/kubeconfig.go) over a plaintext connection,
+  # so authenticated kubectl access needs an HTTPS endpoint even in local
+  # development.
+  proxy:
+    profiles: ["dev"]
+    image: caddy:2-alpine
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
+    volumes:
+      - caddy_data:/data
+    ports:
+      - "8443:8443"
+    depends_on:
+      - kontinuum-dev
+
 volumes:
   postgres_data:
   go_mod_cache:
   go_build_cache:
+  caddy_data:
+
+configs:
+  caddyfile:
+    # A bare "localhost:8443 { ... }" address (rather than ":8443") is load-
+    # bearing: it makes Caddy obtain the self-signed certificate up front at
+    # startup, which is a well-exercised code path. A hostless ":8443" only
+    # tries to obtain one on-demand on the first handshake, which reliably
+    # fails with a generic "internal error" TLS alert in this environment.
+    content: |
+      localhost:8443 {
+      	tls internal
+
+      	reverse_proxy kontinuum-dev:8080
+      }
