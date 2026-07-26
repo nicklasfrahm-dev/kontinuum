@@ -15,6 +15,7 @@ import (
 
 	"github.com/kommodity-io/kommodity/pkg/libkapi"
 	"github.com/spf13/cobra"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -191,6 +192,16 @@ func buildServer(
 		return nil, fmt.Errorf("failed to register kontinuum.sh/v1alpha1 scheme: %w", err)
 	}
 
+	// core/v1 is needed too: mgr.GetClient() (built off this same scheme —
+	// see registryOptions/WithScheme) is what Heartbeat uses to create the
+	// Namespace and Secret backing status.secretRef, and a
+	// controller-runtime client can't handle a type its scheme doesn't
+	// recognize even though the server itself already serves core/v1.
+	err = corev1.AddToScheme(scheme)
+	if err != nil {
+		return nil, fmt.Errorf("failed to register core/v1 scheme: %w", err)
+	}
+
 	uiRouter := ui.NewRouter(
 		namespaceListerFactory(cfg.Server.Addr), kontinuumListerFactory(cfg.Server.Addr, scheme),
 		version, config.Redact(*cfg), oidcHandler != nil, invalidateSession)
@@ -248,10 +259,12 @@ func registryOptions(cfg *config.Config, logger *slog.Logger, scheme *runtime.Sc
 	registryLogger := logger.With("component", "registry")
 
 	controller := registry.NewController(registry.Config{
-		Role:   role,
-		Region: cfg.Server.Region,
-		Zone:   cfg.Server.Zone,
-		Logger: registryLogger,
+		Role:    role,
+		Region:  cfg.Server.Region,
+		Zone:    cfg.Server.Zone,
+		Logger:  registryLogger,
+		Version: version,
+		Storage: cfg.Server.Storage,
 	})
 
 	ensureCRD := func(ctx context.Context, loopbackConfig *rest.Config) error {

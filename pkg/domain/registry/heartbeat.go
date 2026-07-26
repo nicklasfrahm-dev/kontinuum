@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -19,12 +20,13 @@ import (
 const deregisterTimeout = 5 * time.Second
 
 // Heartbeat registers this process as a Kontinuum object, keeps its
-// status.lastHeartbeatTime fresh on an interval, deletes it when ctx is
-// canceled, and re-registers it immediately if it's deleted out from under
-// this process by anything else. It implements both manager.Runnable (the
-// heartbeat ticker, added via mgr.Add — see Controller.SetupWithManager)
-// and reconcile.Reconciler (Reconcile, invoked for its own object by the
-// combinedReconciler both this and TTLReconciler are registered through).
+// status.lastHeartbeatTime (and status.version, status.secretRef) fresh on
+// an interval, deletes it when ctx is canceled, and re-registers it
+// immediately if it's deleted out from under this process by anything
+// else. It implements both manager.Runnable (the heartbeat ticker, added
+// via mgr.Add — see Controller.SetupWithManager) and reconcile.Reconciler
+// (Reconcile, invoked for its own object by the combinedReconciler both
+// this and TTLReconciler are registered through).
 type Heartbeat struct {
 	Client client.Client
 	Name   string
@@ -34,6 +36,15 @@ type Heartbeat struct {
 	Spec     v1alpha2.KontinuumSpec
 	Interval time.Duration
 	Logger   *slog.Logger
+	// Version is this process's build version, written to status.version on
+	// every heartbeat.
+	Version string
+	// SecretData is this process's confidential configuration —
+	// KONTINUUM_-prefixed keys matching pkg/config's env var names (e.g.
+	// KONTINUUM_SERVER_STORAGE) — kept out of status itself (see
+	// KontinuumStatus.SecretRef's doc) and instead upserted into a Secret on
+	// every heartbeat via ensureSecret.
+	SecretData map[string]string
 }
 
 // Reconcile implements reconcile.Reconciler, reacting to its own object's
@@ -119,13 +130,75 @@ func (h *Heartbeat) beat(ctx context.Context, server *v1alpha2.Kontinuum) {
 		return
 	}
 
+	secretRef, err := h.ensureSecret(ctx)
+	if err != nil {
+		h.Logger.Error("Failed to ensure server config secret", "name", h.Name, "error", err)
+
+		return
+	}
+
 	server.Status.Role = h.Role
 	server.Status.LastHeartbeatTime = metav1.Now()
+	server.Status.Version = h.Version
+	server.Status.SecretRef = secretRef
 
 	err = h.Client.Status().Update(ctx, server)
 	if err != nil {
 		h.Logger.Error("Failed to send server heartbeat", "name", h.Name, "error", err)
 	}
+}
+
+// secretRef is where ensureSecret upserts h.SecretData: a Secret named
+// after this instance, in v1alpha2.DefaultSecretNamespace — Kontinuum is
+// cluster-scoped, so there's no namespace of its own for the Secret to
+// default into.
+func (h *Heartbeat) secretRef() v1alpha2.KontinuumSecretReference {
+	return v1alpha2.KontinuumSecretReference{
+		Name:      h.Name,
+		Namespace: v1alpha2.DefaultSecretNamespace,
+	}
+}
+
+// ensureSecret upserts the Secret h.secretRef points to with h.SecretData,
+// creating its namespace first if it doesn't already exist. It runs on
+// every beat/reregister, not just once at startup, so it's self-healing the
+// same way the rest of this file is: if the namespace or Secret is deleted
+// out from under a running process — manually, or by anything else with
+// access — the next tick recreates them rather than leaving
+// status.secretRef pointing at nothing.
+func (h *Heartbeat) ensureSecret(ctx context.Context) (v1alpha2.KontinuumSecretReference, error) {
+	ref := h.secretRef()
+
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ref.Namespace}}
+
+	err := h.Client.Create(ctx, namespace)
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return ref, fmt.Errorf("failed to ensure %q namespace: %w", ref.Namespace, err)
+	}
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: ref.Name, Namespace: ref.Namespace},
+		StringData: h.SecretData,
+	}
+
+	err = h.Client.Create(ctx, secret)
+	if apierrors.IsAlreadyExists(err) {
+		var existing corev1.Secret
+
+		err = h.Client.Get(ctx, client.ObjectKeyFromObject(secret), &existing)
+		if err != nil {
+			return ref, fmt.Errorf("failed to fetch existing %q secret: %w", ref.Name, err)
+		}
+
+		existing.StringData = h.SecretData
+		err = h.Client.Update(ctx, &existing)
+	}
+
+	if err != nil {
+		return ref, fmt.Errorf("failed to ensure %q secret: %w", ref.Name, err)
+	}
+
+	return ref, nil
 }
 
 // reregister resets server to a fresh object — clearing any resourceVersion
@@ -152,8 +225,17 @@ func (h *Heartbeat) reregister(ctx context.Context, server *v1alpha2.Kontinuum) 
 		return
 	}
 
+	secretRef, err := h.ensureSecret(ctx)
+	if err != nil {
+		h.Logger.Error("Failed to ensure server config secret after re-registering", "name", h.Name, "error", err)
+
+		return
+	}
+
 	server.Status.Role = h.Role
 	server.Status.LastHeartbeatTime = metav1.Now()
+	server.Status.Version = h.Version
+	server.Status.SecretRef = secretRef
 
 	err = h.Client.Status().Update(ctx, server)
 	if err != nil {

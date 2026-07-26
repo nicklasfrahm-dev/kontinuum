@@ -109,6 +109,9 @@ spec:
     - jsonPath: .spec.zone
       name: Zone
       type: string
+    - jsonPath: .status.version
+      name: Version
+      type: string
     name: v1alpha2
     schema:
       openAPIV3Schema:
@@ -154,14 +157,14 @@ spec:
                 self.zone == '')
           status:
             description: |-
-              KontinuumStatus reports the last time a Kontinuum reported in. Both
-              fields are +optional despite lacking omitempty: with the status
-              subresource enabled (see the +kubebuilder:subresource:status marker
-              below), the apiserver always strips whatever status the main resource
-              endpoint's Create/Update payload carries before validating it — status
-              is only ever populated afterward, via the status subresource. Requiring
-              these fields would make every Create fail structural-schema validation
-              against that always-empty status.
+              KontinuumStatus reports the last time a Kontinuum reported in. Every
+              field is +optional despite lacking omitempty: with the status subresource
+              enabled (see the +kubebuilder:subresource:status marker below), the
+              apiserver always strips whatever status the main resource endpoint's
+              Create/Update payload carries before validating it — status is only ever
+              populated afterward, via the status subresource. Requiring these fields
+              would make every Create fail structural-schema validation against that
+              always-empty status.
             properties:
               lastHeartbeatTime:
                 description: |-
@@ -177,6 +180,26 @@ spec:
                 enum:
                 - controlplane
                 - worker
+                type: string
+              secretRef:
+                description: |-
+                  SecretRef points to the Secret holding this process's confidential
+                  configuration (storage connection string and any other credentials) —
+                  see KontinuumSecretReference. It is never inlined into status
+                  directly: unlike spec/status, a Secret's RBAC can be restricted
+                  independently of who can read this broadly-visible Kontinuum object.
+                properties:
+                  name:
+                    description: Name is the Secret's name.
+                    type: string
+                  namespace:
+                    description: |-
+                      Namespace is the Secret's namespace. Defaults to
+                      DefaultSecretNamespace.
+                    type: string
+                type: object
+              version:
+                description: Version is this process's build version.
                 type: string
             type: object
         required:

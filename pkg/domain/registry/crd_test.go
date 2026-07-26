@@ -79,11 +79,14 @@ func TestCustomResourceDefinition(t *testing.T) {
 	require.True(t, hasStatus)
 	assert.Contains(t, statusSchema.Properties, "role")
 	assert.Contains(t, statusSchema.Properties, "lastHeartbeatTime")
+	assert.Contains(t, statusSchema.Properties, "version")
+	assert.Contains(t, statusSchema.Properties, "secretRef")
 
 	wantColumns := []apiextensionsv1.CustomResourceColumnDefinition{
 		{Name: "Role", Type: "string", JSONPath: ".status.role"},
 		{Name: "Region", Type: "string", JSONPath: ".spec.region"},
 		{Name: "Zone", Type: "string", JSONPath: ".spec.zone"},
+		{Name: "Version", Type: "string", JSONPath: ".status.version"},
 	}
 	assert.Equal(t, wantColumns, version.AdditionalPrinterColumns)
 }
