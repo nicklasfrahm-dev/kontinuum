@@ -44,10 +44,11 @@
                 <!--
                     Box styling (background, radius, padding) lives on these
                     wrapper divs, not on the pre/code Prism touches inside —
-                    Prism's own theme sets its own background/font/radius on
-                    pre[class*="language-"]/code[class*="language-"], and
-                    those would otherwise fight our Tailwind utility classes
-                    for the same properties on the same element.
+                    layout.html's own pre[class*="language-"]/
+                    code[class*="language-"] rule sets background/font
+                    there, and those would otherwise fight our Tailwind
+                    utility classes for the same properties on the same
+                    element.
 
                     Each panel below carries its own copy of the
                     "kubeconfig-actions" buttons (rather than one shared,

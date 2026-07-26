@@ -162,6 +162,7 @@ func (r *Router) RegisterRoutes(
 		protect = func(next http.HandlerFunc) http.HandlerFunc { return next }
 	}
 
+	mux.Handle("GET "+vendorURLPrefix, vendorHandler())
 	mux.HandleFunc("GET /{$}", handleRoot)
 	mux.HandleFunc("GET /app", appRoot)
 	mux.HandleFunc("GET /app/home", protect(r.handleHome))

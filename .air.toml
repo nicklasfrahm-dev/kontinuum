@@ -4,19 +4,35 @@ root = "."
 tmp_dir = "/tmp/kontinuum-air"
 
 [build]
-  # Built to /tmp (outside the bind-mounted repo root) rather than ./bin, so
-  # air's build output never leaves permission-mismatched files behind in
-  # bin/ on the host (see Makefile's build target, which does write there).
-  # args_bin (rather than appending "serve" onto entrypoint/full_bin as one
-  # string) is load-bearing: air only shell-splits full_bin, not entrypoint,
-  # and an absolute entrypoint path with an appended arg fails with a
-  # confusing "not found" since it's run as a single, unsplit argv[0].
-  entrypoint = "/tmp/kontinuum-air/kontinuum"
+  # `make build` (rather than a raw go build) so every hot-reload rebuild
+  # also runs the `generate` prerequisite that vendors Tailwind/HTMX/Prism
+  # into pkg/ui/assets/vendor (see Makefile and pkg/ui/assets.go) — those
+  # assets are gitignored, so without this the embedded UI would 404 on a
+  # fresh checkout. args_bin (rather than appending "serve" onto
+  # entrypoint/full_bin as one string) is load-bearing: air only
+  # shell-splits full_bin, not entrypoint, and an absolute entrypoint path
+  # with an appended arg fails with a confusing "not found" since it's run
+  # as a single, unsplit argv[0].
+  entrypoint = "/app/bin/kontinuum"
   args_bin = ["serve"]
-  cmd = "go build -buildvcs=false -o /tmp/kontinuum-air/kontinuum ./cmd/kontinuum"
+  # GOFLAGS=-buildvcs=false (read by every `go` subcommand make build runs —
+  # go tool, go generate's go run, and the final go build) since the
+  # bind-mounted .git here is owned by the host UID, not this container's,
+  # and go's VCS stamping refuses to read a repo it doesn't trust the
+  # ownership of ("dubious ownership"). Scoped to air only, via the
+  # environment rather than the Makefile, since a plain host checkout (or
+  # the Containerfile's fresh COPY) doesn't hit this and loses nothing by
+  # skipping it.
+  cmd = "GOFLAGS=-buildvcs=false make build"
   delay = 1000
-  exclude_dir = ["bin", "vendor"]
-  exclude_regex = ["_test.go"]
+  # config/crd, pkg/ui/assets/vendor, and zz_generated.deepcopy.go are build
+  # *output*, not input — `generate` (a `build` prerequisite, see above)
+  # rewrites all of them on every single rebuild regardless of whether
+  # their content actually changed. Without these excludes, such a rewrite
+  # touching a watched file would make air pick it up as a new change and
+  # rebuild again, rewriting them again, forever.
+  exclude_dir = ["bin", "vendor", "config/crd", "pkg/ui/assets/vendor"]
+  exclude_regex = ["_test.go", "zz_generated"]
   exclude_unchanged = false
   follow_symlink = false
   include_dir = ["."]

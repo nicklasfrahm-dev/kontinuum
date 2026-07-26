@@ -4,15 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{.Title}} - Kontinuum</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-okaidia.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
+    <link rel="stylesheet" href="/static/vendor/jetbrains-mono.css">
+    <script src="/static/vendor/tailwindcss.js"></script>
+    <script src="/static/vendor/htmx.min.js"></script>
+    <script src="/static/vendor/prism-core.min.js"></script>
+    <script src="/static/vendor/prism-yaml.min.js"></script>
+    <script src="/static/vendor/prism-bash.min.js"></script>
     <script>
         tailwind.config = {
             darkMode: 'class',
@@ -73,29 +70,68 @@
             background-color: #525252;
         }
 
-        /* Neutralize Prism's own theme styling — background, shadow, font
-           metrics, spacing — so it never competes with our own styling.
-           !important because the imported theme stylesheet's own rules
-           may be more specific than this one; we intend to fully own the
-           box model and typography here and only take Prism's token
-           colors, so overriding it unconditionally is the point, not a
-           workaround. Safe to reset broadly since (see
-           settings_content.html) nothing else gives its own pre/code
-           elements a "language-*" class or Tailwind box styling to fight
-           with. */
+        /* Prism ships no theme of its own here — only prism-core plus the
+           yaml/bash grammars are vendored (see pkg/ui/assets.go), which
+           just assign "token" classes with no styling attached. This block
+           is the only source of syntax-highlighting color/layout in the
+           app; there's no upstream theme stylesheet to fight with, so
+           nothing here needs !important. */
         pre[class*="language-"],
         code[class*="language-"] {
-            background: transparent !important;
-            text-shadow: none !important;
-            font-family: inherit !important;
+            background: transparent;
+            font-family: inherit;
             /* Pinned to Tailwind's text-xs value directly, rather than
-               "inherit" — the theme stylesheet sets font-size on more than
-               one selector, and relying on inheritance meant whichever one
-               ends up governing was one specificity fight too many. */
-            font-size: 0.75rem !important;
-            line-height: 1rem !important;
-            margin: 0 !important;
-            padding: 0 !important;
+               relying on inheritance, so it stays fixed regardless of
+               where a code block is nested. */
+            font-size: 0.75rem;
+            line-height: 1rem;
+            margin: 0;
+            padding: 0;
+            color: #f5f5f5;
+        }
+
+        pre[class*="language-"] ::selection,
+        code[class*="language-"] ::selection {
+            background: rgb(224 146 79 / 35%);
+        }
+
+        /* Structural/muted tokens (comments, punctuation) — dimmed to
+           neutral-500, the same muted color the rest of the UI uses for
+           secondary text (e.g. the descriptions under each page
+           heading). */
+        .token.comment,
+        .token.prolog,
+        .token.doctype,
+        .token.cdata,
+        .token.punctuation {
+            color: #737373;
+        }
+
+        /* "Value" tokens (strings, numbers, keywords, ...) — colored with
+           the site's accent (see tailwind.config's `accent` above) so
+           emphasized code ties back to the same brand color used for CTAs
+           elsewhere. Everything else (plain text, property/function/tag
+           names, ...) is intentionally left unstyled: with no competing
+           theme rule, it just inherits the base neutral-100 above. */
+        .token.tag,
+        .token.operator,
+        .token.number,
+        .token.boolean,
+        .token.string,
+        .token.entity,
+        .token.url,
+        .token.attr-value,
+        .token.keyword,
+        .token.control,
+        .token.directive,
+        .token.unit,
+        .token.statement,
+        .token.regex,
+        .token.atrule,
+        .token.placeholder,
+        .token.variable,
+        .token.important {
+            color: #E0924F;
         }
     </style>
 </head>

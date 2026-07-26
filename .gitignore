@@ -2,6 +2,13 @@
 bin/
 release/
 
+# Vendored web assets (Tailwind CSS, HTMX, PrismJS) — fetched and pinned by
+# cmd/vendor-web-assets via `go generate ./...` (see pkg/ui/assets.go and
+# `make generate`), not committed. What ships air-gapped is the built
+# container image, which already has these embedded; the source tree
+# doesn't need to.
+pkg/ui/assets/vendor/
+
 # Local databases (sqlite storage)
 *.db
 *.db-*
