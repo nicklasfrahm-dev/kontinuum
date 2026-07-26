@@ -20,23 +20,24 @@
                 Authentication is done via
                 <a href="https://github.com/int128/kubelogin" class="text-accent hover:underline">oidc-login</a>.
             </p>
-            <div class="flex items-center justify-end gap-2 mb-3">
-                <button type="button" onclick="toggleKubeconfig(this)"
-                        class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white hover:bg-neutral-700 transition-colors">
-                    <span data-icon-show>{{template "icon-eye"}}</span>
-                    <span data-icon-hide class="hidden">{{template "icon-eye-off"}}</span>
-                    <span data-label>Reveal</span>
-                </button>
-                <button type="button" onclick="copyKubeconfig(this)"
-                        class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white hover:bg-neutral-700 transition-colors">
+            <p class="text-sm text-neutral-500 mb-2">
+                Merge the kubeconfig below into your existing one with the kontinuum CLI:
+            </p>
+            <div class="flex items-center justify-between gap-3 bg-neutral-950 rounded-lg p-4 overflow-x-auto mb-4">
+                <pre class="m-0 text-xs"><span class="text-neutral-600 select-none">$ </span><code id="config-import-snippet" class="language-bash">kontinuum config import</code></pre>
+                <button type="button" onclick="copyImportSnippet(this)" title="Copy to clipboard"
+                        class="shrink-0 inline-flex items-center gap-1.5 px-2 py-1.5 text-xs font-medium rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white hover:bg-neutral-700 transition-colors">
                     <span data-icon-copy>{{template "icon-copy"}}</span>
                     <span data-icon-copied class="hidden text-emerald-400">{{template "icon-check"}}</span>
-                    <span data-label>Copy</span>
                 </button>
-                <button type="button" onclick="downloadKubeconfig()"
-                        class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white hover:bg-neutral-700 transition-colors">
-                    {{template "icon-download"}}
-                    Download
+            </div>
+            <div class="flex items-center justify-between gap-2 mb-3">
+                <span class="text-xs font-bold text-neutral-400 uppercase tracking-wider leading-none">KUBECONFIG</span>
+                <button type="button" onclick="toggleKubeconfig(this)"
+                        class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium leading-none rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white hover:bg-neutral-700 transition-colors">
+                    <span data-icon-show>{{template "icon-eye"}}</span>
+                    <span data-icon-hide class="hidden">{{template "icon-eye-off"}}</span>
+                    <span data-label class="leading-none">Reveal</span>
                 </button>
             </div>
             <div id="kubeconfig-wrapper" class="overflow-hidden transition-[height] duration-200 ease-out">
@@ -47,12 +48,21 @@
                     pre[class*="language-"]/code[class*="language-"], and
                     those would otherwise fight our Tailwind utility classes
                     for the same properties on the same element.
+
+                    Each panel below carries its own copy of the
+                    "kubeconfig-actions" buttons (rather than one shared,
+                    absolutely-positioned copy) so they lay out naturally
+                    against that panel's own content: centered next to the
+                    masked view's single line, pinned to the top of the
+                    revealed view's many.
                 -->
-                <div id="kubeconfig-masked" class="bg-neutral-950 rounded-lg p-4 overflow-x-auto">
+                <div id="kubeconfig-masked" class="flex items-center justify-between gap-3 bg-neutral-950 rounded-lg p-4 overflow-x-auto">
                     <pre class="m-0 text-xs text-neutral-500">********************************</pre>
+                    {{template "kubeconfig-actions"}}
                 </div>
-                <div id="kubeconfig-content" class="hidden bg-neutral-950 rounded-lg p-4 overflow-x-auto">
-                    <pre class="m-0 text-xs"><code class="language-yaml">{{.Kubeconfig}}</code></pre>
+                <div id="kubeconfig-content" class="hidden flex items-start justify-between gap-3 bg-neutral-950 rounded-lg p-4">
+                    <pre class="flex-1 min-w-0 m-0 text-xs overflow-x-auto"><code class="language-yaml">{{.Kubeconfig}}</code></pre>
+                    {{template "kubeconfig-actions"}}
                 </div>
             </div>
         </div>
@@ -60,6 +70,7 @@
 
     <script>
         Prism.highlightElement(document.querySelector('#kubeconfig-content code'));
+        Prism.highlightElement(document.getElementById('config-import-snippet'));
 
         var kubeconfigResetTimer = null;
 
@@ -98,25 +109,36 @@
             button.querySelector('[data-label]').textContent = revealing ? 'Hide' : 'Reveal';
         }
 
+        // flashCopied briefly swaps button's copy icon (and, if present, its
+        // text label) for a checkmark/"Copied" — shared by every copy-to-
+        // clipboard button on this page.
+        function flashCopied(button) {
+            var iconCopy = button.querySelector('[data-icon-copy]');
+            var iconCopied = button.querySelector('[data-icon-copied]');
+            var label = button.querySelector('[data-label]');
+            var originalLabel = label ? label.textContent : null;
+
+            iconCopy.classList.add('hidden');
+            iconCopied.classList.remove('hidden');
+            if (label) label.textContent = 'Copied';
+
+            setTimeout(function () {
+                iconCopy.classList.remove('hidden');
+                iconCopied.classList.add('hidden');
+                if (label) label.textContent = originalLabel;
+            }, 1500);
+        }
+
         function copyKubeconfig(button) {
-            var content = document.getElementById('kubeconfig-content').textContent;
+            var content = document.getElementById('kubeconfig-content').textContent.trim();
 
-            navigator.clipboard.writeText(content).then(function () {
-                var iconCopy = button.querySelector('[data-icon-copy]');
-                var iconCopied = button.querySelector('[data-icon-copied]');
-                var label = button.querySelector('[data-label]');
-                var originalLabel = label.textContent;
+            navigator.clipboard.writeText(content).then(function () { flashCopied(button); });
+        }
 
-                iconCopy.classList.add('hidden');
-                iconCopied.classList.remove('hidden');
-                label.textContent = 'Copied';
+        function copyImportSnippet(button) {
+            var content = document.getElementById('config-import-snippet').textContent.trim();
 
-                setTimeout(function () {
-                    iconCopy.classList.remove('hidden');
-                    iconCopied.classList.add('hidden');
-                    label.textContent = originalLabel;
-                }, 1500);
-            });
+            navigator.clipboard.writeText(content).then(function () { flashCopied(button); });
         }
 
         function downloadKubeconfig() {
@@ -200,5 +222,24 @@
             {{end}}
         </dl>
     </div>
+</div>
+{{end}}
+
+{{/*
+    kubeconfig-actions is the Download/Copy button pair shown next to both
+    the masked and revealed kubeconfig panels above — factored out since
+    each panel needs its own copy (see the comment above those panels).
+*/}}
+{{define "kubeconfig-actions"}}
+<div class="shrink-0 flex items-center gap-1.5">
+    <button type="button" onclick="downloadKubeconfig()" title="Download"
+            class="inline-flex items-center gap-1.5 px-2 py-1.5 text-xs font-medium rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white hover:bg-neutral-700 transition-colors">
+        {{template "icon-download"}}
+    </button>
+    <button type="button" onclick="copyKubeconfig(this)" title="Copy to clipboard"
+            class="inline-flex items-center gap-1.5 px-2 py-1.5 text-xs font-medium rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white hover:bg-neutral-700 transition-colors">
+        <span data-icon-copy>{{template "icon-copy"}}</span>
+        <span data-icon-copied class="hidden text-emerald-400">{{template "icon-check"}}</span>
+    </button>
 </div>
 {{end}}
