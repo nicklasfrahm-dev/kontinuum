@@ -176,6 +176,38 @@ func TestRegisterRoutesUsesCustomAppRootAndProtect(t *testing.T) {
 	assert.Equal(t, 2, protectCalls)
 }
 
+func TestRegisterRoutesServesVendoredStaticAssets(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	for _, asset := range []string{
+		"tailwindcss.js", "htmx.min.js",
+		"prism-core.min.js", "prism-yaml.min.js", "prism-bash.min.js",
+		"jetbrains-mono.css", "jetbrains-mono-latin.woff2",
+	} {
+		recorder := httptest.NewRecorder()
+		mux.ServeHTTP(recorder, newTestRequest(t, "/static/vendor/"+asset))
+
+		resp := recorder.Result()
+
+		defer func() { _ = resp.Body.Close() }()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode, "expected %s to be served", asset)
+	}
+}
+
 func TestHandleHomeShowsLogoutLinkOnlyWhenAuthEnabled(t *testing.T) {
 	t.Parallel()
 

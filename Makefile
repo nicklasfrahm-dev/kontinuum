@@ -13,11 +13,15 @@ INSTALLDIR ?= $(HOME)/.local/bin
 
 # Version, derived from git. Falls back to "dev" outside a git repo.
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS := -ldflags "-X github.com/nicklasfrahm/kontinuum/pkg/cli.version=$(VERSION)"
+LDFLAGS := -ldflags "-s -w -X github.com/nicklasfrahm/kontinuum/pkg/cli.version=$(VERSION)"
 
 # Go commands
 GOCMD := go
-GOBUILD := $(GOCMD) build $(LDFLAGS)
+# -trimpath and the linker's -s -w (stripped symbol table/DWARF) apply to
+# every build target — local, air, and the Containerfile, which all now
+# build through this same target — for a smaller binary that doesn't embed
+# this machine's absolute source paths.
+GOBUILD := $(GOCMD) build -trimpath $(LDFLAGS)
 GOTEST := $(GOCMD) test
 GOMOD := $(GOCMD) mod
 
@@ -37,12 +41,20 @@ help: ## Display this help
 ##@ Development
 
 .PHONY: generate
-generate: ## Regenerate deepcopy methods and CRDs for api/... via controller-gen
-	go tool controller-gen object paths="./api/..."
-	go tool controller-gen crd paths="./api/..." output:crd:artifacts:config=config/crd
+# GOOS/GOARCH forced empty (native) for every command here, regardless of
+# what's exported in the calling environment: `go tool`/`go run` (the
+# latter backs the go:generate directive in pkg/ui/assets.go) both build
+# their tool and immediately execute it, so if a cross-compiling caller
+# (see build's GOOS/GOARCH, set for the Containerfile's multi-arch image
+# build) left those exported, either would try to run a
+# foreign-architecture binary and fail with "exec format error".
+generate: ## Regenerate deepcopy methods, CRDs, and vendored web assets
+	GOOS= GOARCH= go tool controller-gen object paths="./api/..."
+	GOOS= GOARCH= go tool controller-gen crd paths="./api/..." output:crd:artifacts:config=config/crd
+	GOOS= GOARCH= go generate ./...
 
 .PHONY: build
-build: ## Build the binary
+build: generate ## Build the binary
 	@mkdir -p $(BINDIR)
 	$(GOBUILD) -o $(BINARY) ./cmd/kontinuum
 
@@ -76,19 +88,19 @@ image: ## Build the container image
 ##@ Quality
 
 .PHONY: test
-test: ## Run tests
+test: generate ## Run tests
 	$(GOTEST) -v ./...
 
 .PHONY: vet
-vet: ## Run go vet
+vet: generate ## Run go vet
 	$(GOCMD) vet ./...
 
 .PHONY: lint
-lint: ## Run golangci-lint
+lint: generate ## Run golangci-lint
 	go tool golangci-lint run
 
 .PHONY: lint-fix
-lint-fix: ## Run golangci-lint and fix issues
+lint-fix: generate ## Run golangci-lint and fix issues
 	go tool golangci-lint run --fix
 
 .PHONY: tidy
@@ -100,5 +112,5 @@ tidy: ## Download and tidy dependencies
 
 .PHONY: clean
 clean: ## Remove build artifacts
-	rm -rf $(BINDIR)
+	rm -rf $(BINDIR) pkg/ui/assets/vendor
 	$(GOCMD) clean
