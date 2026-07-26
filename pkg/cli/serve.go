@@ -20,6 +20,7 @@ import (
 	"k8s.io/client-go/rest"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/nicklasfrahm/kontinuum/api/v1alpha1"
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/auth"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
@@ -181,6 +182,15 @@ func buildServer(
 		return nil, fmt.Errorf("failed to register kontinuum.sh/v1alpha2 scheme: %w", err)
 	}
 
+	// v1alpha1 must be in the same scheme too — not because anything here
+	// constructs v1alpha1 objects, but because the conversion webhook
+	// handler (registered by registry.Controller.SetupWithManager) resolves
+	// both GVKs against this scheme to convert between them.
+	err = v1alpha1.AddToScheme(scheme)
+	if err != nil {
+		return nil, fmt.Errorf("failed to register kontinuum.sh/v1alpha1 scheme: %w", err)
+	}
+
 	uiRouter := ui.NewRouter(
 		namespaceListerFactory(cfg.Server.Addr), kontinuumListerFactory(cfg.Server.Addr, scheme),
 		version, config.Redact(*cfg), oidcHandler != nil, invalidateSession)
@@ -213,14 +223,26 @@ func buildServer(
 // Kontinuum's GVK so the registry controller's watches (and EnsureCRD's own
 // client) resolve; WithPostStartHook ensures the kontinuums.kontinuum.sh CRD
 // exists as soon as the listener is up, before the controller manager
-// starts — see registry.EnsureCRD's doc for why that timing matters; and
-// WithController hands the TTL reconciler and heartbeat runnable off to
-// libkapi's own Manager lifecycle, started once the server is serving,
-// stopped before the HTTP listener closes on Shutdown.
+// starts — see registry.EnsureCRD's doc for why that timing matters;
+// WithWebhookServer provisions the TLS-serving webhook the CRD's
+// v1alpha1<->v1alpha2 conversion (registered by Controller.SetupWithManager)
+// answers on; and WithController hands the TTL reconciler and heartbeat
+// runnable off to libkapi's own Manager lifecycle, started once the server
+// is serving, stopped before the HTTP listener closes on Shutdown.
 func registryOptions(cfg *config.Config, logger *slog.Logger, scheme *runtime.Scheme) ([]libkapi.Option, error) {
 	role, err := registry.Role(cfg.Server.Region, cfg.Server.Zone)
 	if err != nil {
 		return nil, fmt.Errorf("failed to determine server registry role: %w", err)
+	}
+
+	// Provisioned here, before ListenAndServe, rather than left to
+	// libkapi's own (later, internal) webhook cert generation — see
+	// registry.EnsureConversionWebhookCert's doc for why the ordering
+	// matters: the CRD's conversion webhook clientConfig needs this cert's
+	// bytes on its very first apply.
+	caBundle, err := registry.EnsureConversionWebhookCert()
+	if err != nil {
+		return nil, fmt.Errorf("failed to provision conversion webhook certificate: %w", err)
 	}
 
 	registryLogger := logger.With("component", "registry")
@@ -233,13 +255,14 @@ func registryOptions(cfg *config.Config, logger *slog.Logger, scheme *runtime.Sc
 	})
 
 	ensureCRD := func(ctx context.Context, loopbackConfig *rest.Config) error {
-		return registry.EnsureCRD(ctx, loopbackConfig, registryLogger)
+		return registry.EnsureCRD(ctx, loopbackConfig, caBundle, registryLogger)
 	}
 
 	return []libkapi.Option{
 		libkapi.WithScheme(scheme),
 		libkapi.WithPostStartHook(ensureCRD),
 		libkapi.WithController(controller),
+		libkapi.WithWebhookServer(libkapi.WebhookConfig{Port: registry.ConversionWebhookPort}),
 	}, nil
 }
 

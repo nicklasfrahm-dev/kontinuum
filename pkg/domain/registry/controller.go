@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	ctrl "sigs.k8s.io/controller-runtime"
+	conversionwebhook "sigs.k8s.io/controller-runtime/pkg/webhook/conversion"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 )
@@ -59,12 +60,13 @@ func NewController(cfg Config) *Controller {
 	return &Controller{Config: cfg}
 }
 
-// SetupWithManager registers the TTL reconciler and the heartbeat on mgr.
-// The kontinuums.kontinuum.sh CRD itself is ensured separately, via
-// EnsureCRD registered as a libkapi.WithPostStartHook (see pkg/cli/serve.go)
-// — not here, and not from the heartbeat, since SetupWithManager runs
-// before the listener is bound and a Runnable has no ordering guarantee
-// relative to any other registered Runnable.
+// SetupWithManager registers the TTL reconciler, the heartbeat, and the
+// v1alpha1<->v1alpha2 conversion webhook handler on mgr. The
+// kontinuums.kontinuum.sh CRD itself is ensured separately, via EnsureCRD
+// registered as a libkapi.WithPostStartHook (see pkg/cli/serve.go) — not
+// here, and not from the heartbeat, since SetupWithManager runs before the
+// listener is bound and a Runnable has no ordering guarantee relative to
+// any other registered Runnable.
 //
 // TTLReconciler and Heartbeat both watch Kontinuum, but controller-runtime
 // requires controller names to be unique (for metrics), and
@@ -100,6 +102,12 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 	if err != nil {
 		return fmt.Errorf("failed to register server heartbeat runnable: %w", err)
 	}
+
+	// Answers the CRD's spec.conversion.webhook (see CustomResourceDefinition)
+	// — mgr.GetScheme() must already have both api/v1alpha1 and api/v1alpha2
+	// registered (see pkg/cli/serve.go's buildServer) for the generic
+	// handler to resolve either GVK.
+	mgr.GetWebhookServer().Register(conversionWebhookPath, conversionwebhook.NewWebhookHandler(mgr.GetScheme()))
 
 	return nil
 }

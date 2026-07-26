@@ -2,12 +2,12 @@ package registry
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math"
+	"net"
 	"reflect"
-	"strings"
+	"strconv"
 	"time"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -16,12 +16,12 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	restclient "k8s.io/client-go/rest"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 
+	"github.com/nicklasfrahm/kontinuum/api/v1alpha1"
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 )
 
@@ -59,11 +59,39 @@ func crdName() string {
 	return crdPlural + "." + v1alpha2.GroupName
 }
 
+// conversionWebhookPath is where Controller.SetupWithManager registers the
+// conversion webhook handler on the manager's webhook server, and where
+// CustomResourceDefinition's conversion webhook clientConfig URL points.
+//
+// This one handler — conversion.NewWebhookHandler(mgr.GetScheme()) — already
+// generalizes to any number of resource kinds and versions: it dispatches
+// purely by the apiVersion/kind embedded in each ConversionReview request,
+// not by path, so a future CRD only needs its own types to implement
+// conversion.Convertible/Hub and be registered in the same shared scheme
+// (see pkg/cli/serve.go's buildServer) to be served here too — no new path
+// or handler required. The one real constraint is that
+// webhook.Server.Register panics if the same path is registered twice, so
+// if kontinuum ever grows a second Controller, that Controller must NOT
+// also call Register on this path — this is the one, shared registration
+// for every convertible CRD in the process.
+const conversionWebhookPath = "/convert"
+
 // CustomResourceDefinition builds the kontinuums.kontinuum.sh CRD:
-// cluster-scoped, v1alpha2, with a structural schema and a status
-// subresource so the heartbeat runnable can update status.lastHeartbeatTime
-// and status.role independently of spec.
-func CustomResourceDefinition() *apiextensionsv1.CustomResourceDefinition {
+// cluster-scoped, with a structural schema and a status subresource so the
+// heartbeat runnable can update status.lastHeartbeatTime and status.role
+// independently of spec. Lists two versions — v1alpha2 (served, storage)
+// and v1alpha1 (served, but no longer storage) — converted between by a
+// webhook, since Role moved from spec (v1alpha1) into status (v1alpha2): a
+// structural change "None" conversion can't handle (it assumes every
+// version is byte-compatible), and in fact apiextensions rejects "None"
+// outright once the schemas genuinely diverge like this. caBundle is
+// EnsureConversionWebhookCert's result — see its doc for why the cert has
+// to exist and be embedded here before the webhook server that will
+// actually present it is even built.
+func CustomResourceDefinition(caBundle []byte) *apiextensionsv1.CustomResourceDefinition {
+	conversionHostPort := net.JoinHostPort(conversionWebhookDNSName, strconv.Itoa(ConversionWebhookPort))
+	conversionURL := "https://" + conversionHostPort + conversionWebhookPath
+
 	return &apiextensionsv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{Name: crdName()},
 		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
@@ -75,6 +103,16 @@ func CustomResourceDefinition() *apiextensionsv1.CustomResourceDefinition {
 				ListKind: crdListKind,
 			},
 			Scope: apiextensionsv1.ClusterScoped,
+			Conversion: &apiextensionsv1.CustomResourceConversion{
+				Strategy: apiextensionsv1.WebhookConverter,
+				Webhook: &apiextensionsv1.WebhookConversion{
+					ClientConfig: &apiextensionsv1.WebhookClientConfig{
+						URL:      &conversionURL,
+						CABundle: caBundle,
+					},
+					ConversionReviewVersions: []string{"v1"},
+				},
+			},
 			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
 				{
 					Name:    v1alpha2.APIVersion,
@@ -94,12 +132,31 @@ func CustomResourceDefinition() *apiextensionsv1.CustomResourceDefinition {
 						{Name: "Zone", Type: "string", JSONPath: ".spec.zone"},
 					},
 				},
+				{
+					Name:    v1alpha1.APIVersion,
+					Served:  true,
+					Storage: false,
+					Subresources: &apiextensionsv1.CustomResourceSubresources{
+						Status: &apiextensionsv1.CustomResourceSubresourceStatus{},
+					},
+					Schema: &apiextensionsv1.CustomResourceValidation{
+						OpenAPIV3Schema: kontinuumSchemaV1Alpha1(),
+					},
+					// Keep in sync with the +kubebuilder:printcolumn markers
+					// on v1alpha1.Kontinuum.
+					AdditionalPrinterColumns: []apiextensionsv1.CustomResourceColumnDefinition{
+						{Name: "Role", Type: "string", JSONPath: ".spec.role"},
+						{Name: "Region", Type: "string", JSONPath: ".spec.region"},
+						{Name: "Zone", Type: "string", JSONPath: ".spec.zone"},
+					},
+				},
 			},
 		},
 	}
 }
 
-// kontinuumSchema is the structural OpenAPIV3 schema for a Kontinuum object.
+// kontinuumSchema is the structural OpenAPIV3 schema for a v1alpha2
+// Kontinuum object.
 func kontinuumSchema() *apiextensionsv1.JSONSchemaProps {
 	roleEnum := []apiextensionsv1.JSON{
 		{Raw: []byte(`"` + v1alpha2.RoleControlPlane + `"`)},
@@ -127,41 +184,61 @@ func kontinuumSchema() *apiextensionsv1.JSONSchemaProps {
 	}
 }
 
+// kontinuumSchemaV1Alpha1 is the structural OpenAPIV3 schema the removed
+// v1alpha1 API version used, before Role moved from spec into status — see
+// api/v1alpha1's doc for why the version entry using this still exists at
+// all.
+func kontinuumSchemaV1Alpha1() *apiextensionsv1.JSONSchemaProps {
+	roleEnum := []apiextensionsv1.JSON{
+		{Raw: []byte(`"` + v1alpha1.RoleControlPlane + `"`)},
+		{Raw: []byte(`"` + v1alpha1.RoleWorker + `"`)},
+	}
+
+	return &apiextensionsv1.JSONSchemaProps{
+		Type: "object",
+		Properties: map[string]apiextensionsv1.JSONSchemaProps{
+			"spec": {
+				Type:     "object",
+				Required: []string{"role"},
+				Properties: map[string]apiextensionsv1.JSONSchemaProps{
+					"role":   {Type: "string", Enum: roleEnum},
+					"region": {Type: "string"},
+					"zone":   {Type: "string"},
+				},
+			},
+			"status": {
+				Type: "object",
+				Properties: map[string]apiextensionsv1.JSONSchemaProps{
+					"lastHeartbeatTime": {Type: "string", Format: "date-time"},
+				},
+			},
+		},
+	}
+}
+
 // EnsureCRD is a libkapi.PostStartHookFunc — see its registration in
 // pkg/cli/serve.go via libkapi.WithPostStartHook. It builds an
-// apiextensions client and a Kontinuum client (the latter only needed to
-// delete stale objects if ApplyCRD hits a stale-stored-version conflict —
-// see migrateStaleStoredVersions) from loopbackConfig (the server's own
-// privileged identity, only reachable once libkapi's post-start hooks run —
-// after ListenAndServe's listener is bound and Serve is already running,
-// but before the controller manager starts), creates the CRD and waits for
-// it to become Established, then waits for Kontinuum's GVK to actually
-// resolve through a RESTMapper built off the same loopbackConfig — the same
-// kind of RESTMapper the registry's own Manager (and any other
-// controller-runtime client) uses. Established alone doesn't guarantee
-// that; since WithPostStartHook registrations run before the controller
-// manager starts (see libkapi's own doc on WithPostStartHook and
-// WithController), this closes the gap before anything downstream can lose
-// the race. logger receives a warning for every retry along the way.
-func EnsureCRD(ctx context.Context, loopbackConfig *restclient.Config, logger *slog.Logger) error {
+// apiextensions client from loopbackConfig (the server's own privileged
+// identity, only reachable once libkapi's post-start hooks run — after
+// ListenAndServe's listener is bound and Serve is already running, but
+// before the controller manager starts), creates the CRD and waits for it
+// to become Established, then waits for Kontinuum's GVK to actually resolve
+// through a RESTMapper built off the same loopbackConfig — the same kind of
+// RESTMapper the registry's own Manager (and any other controller-runtime
+// client) uses. Established alone doesn't guarantee that; since
+// WithPostStartHook registrations run before the controller manager starts
+// (see libkapi's own doc on WithPostStartHook and WithController), this
+// closes the gap before anything downstream can lose the race. caBundle
+// comes from EnsureConversionWebhookCert, called by the caller before this
+// (see its doc for why that ordering matters). logger receives a warning
+// for every retry along the way.
+func EnsureCRD(ctx context.Context, loopbackConfig *restclient.Config, caBundle []byte, logger *slog.Logger) error {
 	apiextensionsClient, err := apiextensionsclientset.NewForConfig(loopbackConfig)
 	if err != nil {
 		return fmt.Errorf("failed to build apiextensions client: %w", err)
 	}
 
-	scheme := runtime.NewScheme()
-
-	err = v1alpha2.AddToScheme(scheme)
-	if err != nil {
-		return fmt.Errorf("failed to register kontinuum.sh/v1alpha2 scheme: %w", err)
-	}
-
-	kontinuums, err := client.New(loopbackConfig, client.Options{Scheme: scheme})
-	if err != nil {
-		return fmt.Errorf("failed to build kontinuum client: %w", err)
-	}
-
-	err = ensureCRD(ctx, apiextensionsClient, kontinuums, logger)
+	err = ensureCRD(ctx, apiextensionsClient, caBundle, logger)
 	if err != nil {
 		return err
 	}
@@ -170,12 +247,18 @@ func EnsureCRD(ctx context.Context, loopbackConfig *restclient.Config, logger *s
 }
 
 // waitForDiscoverable blocks until Kontinuum's GVK stops returning
-// meta.NoKindMatchError from a RESTMapper built off loopbackConfig. A
-// genuine failure to become discoverable (bad manifest, RBAC issue) fails
-// this — and therefore ListenAndServe — instead of hanging or silently
-// leaving it for a downstream watcher to fail on its own. Retries use
-// crdBackoff (exponential, capped at crdMaxPollInterval), bounded overall by
-// crdEstablishTimeout; each retry logs a warning.
+// meta.NoKindMatchError from a RESTMapper built off loopbackConfig, for
+// every served version — both v1alpha2 and the conversion-webhook-served
+// v1alpha1 (see CustomResourceDefinition's doc for why v1alpha1 still has
+// to be served at all). Checking only the storage version left a real gap:
+// a caller (or, in this codebase, a test) creating a v1alpha1 object right
+// after /healthz reports ready could still race the RESTMapper's own
+// discovery cache and see "no matches for kind" even though the CRD already
+// lists it. A genuine failure to become discoverable (bad manifest, RBAC
+// issue) fails this — and therefore ListenAndServe — instead of hanging or
+// silently leaving it for a downstream watcher to fail on its own. Retries
+// use crdBackoff (exponential, capped at crdMaxPollInterval), bounded
+// overall by crdEstablishTimeout per version; each retry logs a warning.
 func waitForDiscoverable(ctx context.Context, loopbackConfig *restclient.Config, logger *slog.Logger) error {
 	httpClient, err := restclient.HTTPClientFor(loopbackConfig)
 	if err != nil {
@@ -187,28 +270,47 @@ func waitForDiscoverable(ctx context.Context, loopbackConfig *restclient.Config,
 		return fmt.Errorf("failed to build rest mapper: %w", err)
 	}
 
-	gvk := v1alpha2.GroupVersion().WithKind(crdKind)
+	gvks := []schema.GroupVersionKind{
+		v1alpha2.GroupVersion().WithKind(crdKind),
+		v1alpha1.GroupVersion().WithKind(crdKind),
+	}
 
+	for _, gvk := range gvks {
+		err := waitForGVKDiscoverable(ctx, restMapper, gvk, logger)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// waitForGVKDiscoverable polls restMapper for gvk until it resolves or
+// crdEstablishTimeout elapses — see waitForDiscoverable's doc.
+func waitForGVKDiscoverable(
+	ctx context.Context, restMapper meta.RESTMapper, gvk schema.GroupVersionKind, logger *slog.Logger,
+) error {
 	timeoutCtx, cancel := context.WithTimeout(ctx, crdEstablishTimeout)
 	defer cancel()
 
-	err = wait.ExponentialBackoffWithContext(timeoutCtx, crdBackoff(),
+	err := wait.ExponentialBackoffWithContext(timeoutCtx, crdBackoff(),
 		func(context.Context) (bool, error) {
 			_, mappingErr := restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
 			if mappingErr != nil {
 				if meta.IsNoMatchError(mappingErr) {
-					logger.Warn("Kontinuum kind not yet resolvable via rest mapper, retrying", "error", mappingErr)
+					logger.Warn("Kontinuum kind not yet resolvable via rest mapper, retrying",
+						"version", gvk.Version, "error", mappingErr)
 
 					return false, nil
 				}
 
-				return false, fmt.Errorf("failed to resolve %s rest mapping: %w", crdName(), mappingErr)
+				return false, fmt.Errorf("failed to resolve %s rest mapping for %s: %w", crdName(), gvk.Version, mappingErr)
 			}
 
 			return true, nil
 		})
 	if err != nil {
-		return fmt.Errorf("%s was never resolvable via the rest mapper: %w", crdName(), err)
+		return fmt.Errorf("%s was never resolvable via the rest mapper for %s: %w", crdName(), gvk.Version, err)
 	}
 
 	return nil
@@ -217,8 +319,8 @@ func waitForDiscoverable(ctx context.Context, loopbackConfig *restclient.Config,
 // ensureCRD creates the kontinuums.kontinuum.sh CRD if it doesn't already
 // exist — or updates it in place to match the current
 // CustomResourceDefinition() spec if it does, since a stale definition left
-// over from a previous run (e.g. one that still only serves a since-removed
-// API version) would otherwise never converge — then waits for it to become
+// over from a previous run (e.g. one predating a schema or printer-column
+// change) would otherwise never converge — then waits for it to become
 // Established. The create-or-update call is inside the same retry loop as
 // the Established check — not just a single unretried attempt — since a
 // transient failure here (the apiserver still finishing its own startup,
@@ -226,8 +328,7 @@ func waitForDiscoverable(ctx context.Context, loopbackConfig *restclient.Config,
 // fatal, only crdEstablishTimeout running out is. Retries use crdBackoff
 // (exponential, capped at crdMaxPollInterval); each retry logs a warning.
 func ensureCRD(
-	ctx context.Context, apiextensionsClient apiextensionsclientset.Interface, kontinuums client.Client,
-	logger *slog.Logger,
+	ctx context.Context, apiextensionsClient apiextensionsclientset.Interface, caBundle []byte, logger *slog.Logger,
 ) error {
 	crds := apiextensionsClient.ApiextensionsV1().CustomResourceDefinitions()
 
@@ -236,7 +337,7 @@ func ensureCRD(
 
 	err := wait.ExponentialBackoffWithContext(timeoutCtx, crdBackoff(),
 		func(ctx context.Context) (bool, error) {
-			err := ApplyCRD(ctx, crds, kontinuums, logger)
+			err := ApplyCRD(ctx, crds, caBundle)
 			if err != nil {
 				logger.Warn("Failed to create or update kontinuums.kontinuum.sh crd, retrying", "error", err)
 
@@ -264,25 +365,16 @@ func ensureCRD(
 }
 
 // ApplyCRD creates the kontinuums.kontinuum.sh CRD, or — if it already
-// exists — updates its spec to match CustomResourceDefinition()'s current
-// definition whenever the two differ. Without this, an already-registered
-// CRD from a previous run (e.g. one still listing a since-removed
-// spec.versions entry like v1alpha1) would keep serving the stale
+// exists — updates its spec to match CustomResourceDefinition(caBundle)'s
+// current definition whenever the two differ. Without this, an
+// already-registered CRD from a previous run would keep serving its stale
 // definition forever, since Create alone is a no-op once the object exists.
 // A no-op Update when the spec already matches is avoided so this doesn't
 // churn the CRD's resourceVersion on every retry once it's converged.
-//
-// An update can still fail with isStaleStoredVersionError: status.storedVersions
-// (bookkeeping the apiserver — not this code — maintains) can reference a
-// version, like v1alpha1 before the Role-into-status migration, that
-// CustomResourceDefinition() no longer lists at all, and apiextensions
-// refuses to drop a version still referenced there. kontinuums is only
-// needed to recover from that one case — see migrateStaleStoredVersions.
 func ApplyCRD(
-	ctx context.Context, crds apiextensionsv1client.CustomResourceDefinitionInterface, kontinuums client.Client,
-	logger *slog.Logger,
+	ctx context.Context, crds apiextensionsv1client.CustomResourceDefinitionInterface, caBundle []byte,
 ) error {
-	desired := CustomResourceDefinition()
+	desired := CustomResourceDefinition(caBundle)
 
 	_, err := crds.Create(ctx, desired, metav1.CreateOptions{})
 	if err == nil {
@@ -305,93 +397,8 @@ func ApplyCRD(
 	existing.Spec = desired.Spec
 
 	_, err = crds.Update(ctx, existing, metav1.UpdateOptions{})
-	if err == nil {
-		return nil
-	}
-
-	if !isStaleStoredVersionError(err) {
+	if err != nil {
 		return fmt.Errorf("failed to update existing %s crd: %w", crdName(), err)
-	}
-
-	err = migrateStaleStoredVersions(ctx, crds, kontinuums, logger)
-	if err != nil {
-		return fmt.Errorf("failed to migrate %s crd off a removed api version: %w", crdName(), err)
-	}
-
-	return nil
-}
-
-// isStaleStoredVersionError reports whether err is the specific
-// apiextensions validation failure that fires when status.storedVersions
-// references an API version CustomResourceDefinition() no longer lists in
-// spec.versions — the case migrateStaleStoredVersions handles.
-func isStaleStoredVersionError(err error) bool {
-	var statusErr *apierrors.StatusError
-
-	if !errors.As(err, &statusErr) || statusErr.Status().Details == nil {
-		return false
-	}
-
-	for _, cause := range statusErr.Status().Details.Causes {
-		if strings.HasPrefix(cause.Field, "status.storedVersions") {
-			return true
-		}
-	}
-
-	return false
-}
-
-// migrateStaleStoredVersions handles isStaleStoredVersionError: a version
-// this process no longer knows about — e.g. v1alpha1, from before the Role
-// moved into status — is still recorded in status.storedVersions from a
-// previous run, and apiextensions refuses to drop a version that's still
-// referenced there. Kontinuum objects are ephemeral heartbeats, not data
-// worth preserving across an API shape change (see Heartbeat and
-// TTLReconciler): a live process re-registers its own within one heartbeat
-// interval, and anything else was already a TTL-deletion candidate. So this
-// deletes every existing Kontinuum, resets status.storedVersions to just
-// the current storage version, and updates the spec to match — which by
-// then no longer conflicts, since nothing references the removed version
-// anymore.
-func migrateStaleStoredVersions(
-	ctx context.Context, crds apiextensionsv1client.CustomResourceDefinitionInterface, kontinuums client.Client,
-	logger *slog.Logger,
-) error {
-	var list v1alpha2.KontinuumList
-
-	err := kontinuums.List(ctx, &list)
-	if err != nil {
-		return fmt.Errorf("failed to list existing kontinuums: %w", err)
-	}
-
-	for i := range list.Items {
-		item := &list.Items[i]
-
-		err := kontinuums.Delete(ctx, item)
-		if err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("failed to delete kontinuum %q registered under a removed api version: %w", item.Name, err)
-		}
-
-		logger.Warn("Deleted kontinuum registered under a removed api version", "name", item.Name)
-	}
-
-	crd, err := crds.Get(ctx, crdName(), metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to fetch %s crd: %w", crdName(), err)
-	}
-
-	crd.Status.StoredVersions = []string{v1alpha2.APIVersion}
-
-	crd, err = crds.UpdateStatus(ctx, crd, metav1.UpdateOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to reset stored versions: %w", err)
-	}
-
-	crd.Spec = CustomResourceDefinition().Spec
-
-	_, err = crds.Update(ctx, crd, metav1.UpdateOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to update spec after resetting stored versions: %w", err)
 	}
 
 	return nil
