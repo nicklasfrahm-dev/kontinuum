@@ -65,6 +65,9 @@ spec:
             required:
             - role
             type: object
+            x-kubernetes-validations:
+            - message: 'region/zone: both or neither'
+              rule: has(self.region) == has(self.zone)
           status:
             description: KontinuumStatus reports the last time a Kontinuum reported
               in.
@@ -137,6 +140,9 @@ spec:
                   control-plane entrypoint.
                 type: string
             type: object
+            x-kubernetes-validations:
+            - message: 'region/zone: both or neither'
+              rule: has(self.region) == has(self.zone)
           status:
             description: KontinuumStatus reports the last time a Kontinuum reported
               in.

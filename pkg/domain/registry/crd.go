@@ -172,6 +172,7 @@ func kontinuumSchema() *apiextensionsv1.JSONSchemaProps {
 					"region": {Type: "string"},
 					"zone":   {Type: "string"},
 				},
+				XValidations: regionZoneValidationRules(),
 			},
 			"status": {
 				Type: "object",
@@ -180,6 +181,25 @@ func kontinuumSchema() *apiextensionsv1.JSONSchemaProps {
 					"lastHeartbeatTime": {Type: "string", Format: "date-time"},
 				},
 			},
+		},
+	}
+}
+
+// regionZoneValidationRules enforces, at admission time, the same
+// invariant registry.Role enforces in Go: region and zone must both be set
+// or both be empty. Declared once and shared by both spec schemas below so
+// they can't drift apart. Without this, the invariant was only ever
+// checked in registry.Role, called from a process's own startup config —
+// nothing stopped an external client (kubectl, a bug, an old client) from
+// writing an inconsistent object directly. has() guards against the
+// region/zone fields being entirely absent (the common case, thanks to
+// their omitempty json tags) as well as present-but-empty, so both forms
+// are treated identically.
+func regionZoneValidationRules() apiextensionsv1.ValidationRules {
+	return apiextensionsv1.ValidationRules{
+		{
+			Rule:    "(!has(self.region) || self.region == '') == (!has(self.zone) || self.zone == '')",
+			Message: ErrRegionZoneRequired.Error(),
 		},
 	}
 }
@@ -205,6 +225,7 @@ func kontinuumSchemaV1Alpha1() *apiextensionsv1.JSONSchemaProps {
 					"region": {Type: "string"},
 					"zone":   {Type: "string"},
 				},
+				XValidations: regionZoneValidationRules(),
 			},
 			"status": {
 				Type: "object",

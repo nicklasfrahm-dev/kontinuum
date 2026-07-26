@@ -69,7 +69,7 @@ func TestConversionWebhookBridgesLegacyRegistration(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	kontinuums, logger := startTestServer(ctx, t)
+	kontinuums, logger := startTestServer(ctx, t, true)
 
 	legacy := createLegacyRegistration(ctx, t, kontinuums)
 	runHeartbeatAndAssertBridge(ctx, t, kontinuums, logger, legacy)
@@ -168,15 +168,26 @@ func runHeartbeatAndAssertBridge(
 	assert.True(t, apierrors.IsNotFound(err), "heartbeat deregisters on shutdown, so the object should be gone")
 }
 
-// startTestServer builds and starts a real libkapi.Server wired exactly
-// like pkg/cli/serve.go's buildServer/registryOptions — the same scheme,
-// CRD post-start hook, conversion webhook certificate and server, and
-// Controller — and returns a client scoped to it (recognizing both
-// api/v1alpha1 and api/v1alpha2) once the server reports healthy. Reaching
-// /healthz also proves EnsureCRD already ran to completion: libkapi's own
-// post-start-hook healthz check only reports healthy once every registered
-// hook, including ours, has finished (see EnsureCRD's own doc).
-func startTestServer(ctx context.Context, t *testing.T) (ctrlclient.Client, *slog.Logger) {
+// startTestServer builds and starts a real libkapi.Server wired like
+// pkg/cli/serve.go's buildServer/registryOptions — the same scheme and CRD
+// post-start hook always; a Controller and the conversion webhook server
+// only when withController is true — and returns a client scoped to it
+// (recognizing both api/v1alpha1 and api/v1alpha2) once the server reports
+// healthy. Reaching /healthz also proves EnsureCRD already ran to
+// completion: libkapi's own post-start-hook healthz check only reports
+// healthy once every registered hook, including ours, has finished (see
+// EnsureCRD's own doc).
+//
+// withController is false for tests that never exercise conversion or the
+// heartbeat/TTL reconciler (e.g. region_zone_validation_e2e_test.go): a
+// Controller registers a controller-runtime controller named "kontinuum"
+// in a process-global metrics registry, so a second real server in the
+// same test binary that also builds one fails with "controller with name
+// kontinuum already exists" — not a real conflict, just an artifact of two
+// tests in one process each wanting their own Controller. Skipping it
+// where it's genuinely unneeded avoids that without serializing the tests
+// against each other.
+func startTestServer(ctx context.Context, t *testing.T, withController bool) (ctrlclient.Client, *slog.Logger) {
 	t.Helper()
 
 	logger := slog.Default()
@@ -188,11 +199,6 @@ func startTestServer(ctx context.Context, t *testing.T) (ctrlclient.Client, *slo
 	caBundle, err := registry.EnsureConversionWebhookCert()
 	require.NoError(t, err)
 
-	controller := registry.NewController(registry.Config{
-		Role:   v1alpha2.RoleControlPlane,
-		Logger: logger,
-	})
-
 	ensureCRD := func(ctx context.Context, loopbackConfig *restclient.Config) error {
 		return registry.EnsureCRD(ctx, loopbackConfig, caBundle, logger)
 	}
@@ -200,15 +206,27 @@ func startTestServer(ctx context.Context, t *testing.T) (ctrlclient.Client, *slo
 	addr := freeAddr(ctx, t)
 	dbPath := filepath.Join(t.TempDir(), "registry-e2e.db")
 
-	server, err := libkapi.New(ctx,
+	opts := []libkapi.Option{
 		libkapi.WithAddr(addr),
 		libkapi.WithStorage("sqlite://"+dbPath),
 		libkapi.WithLogger(logger),
 		libkapi.WithScheme(scheme),
 		libkapi.WithPostStartHook(ensureCRD),
-		libkapi.WithController(controller),
-		libkapi.WithWebhookServer(libkapi.WebhookConfig{Port: registry.ConversionWebhookPort}),
-	)
+	}
+
+	if withController {
+		controller := registry.NewController(registry.Config{
+			Role:   v1alpha2.RoleControlPlane,
+			Logger: logger,
+		})
+
+		opts = append(opts,
+			libkapi.WithController(controller),
+			libkapi.WithWebhookServer(libkapi.WebhookConfig{Port: registry.ConversionWebhookPort}),
+		)
+	}
+
+	server, err := libkapi.New(ctx, opts...)
 	require.NoError(t, err)
 
 	go func() { _ = server.ListenAndServe(ctx) }()

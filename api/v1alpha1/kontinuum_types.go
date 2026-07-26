@@ -12,6 +12,15 @@ const (
 	RoleWorker = "worker"
 )
 
+// This marker's rule is a simplified has()-only check, not the fuller
+// (absent-or-empty) one registry.CustomResourceDefinition actually
+// enforces (see regionZoneValidationRules) — the marker comment can't wrap
+// across lines, and the fuller expression doesn't fit within this repo's
+// line-length limit. config/crd's generated manifest is a reference
+// artifact only; the real, authoritative CRD built in Go carries the
+// stricter rule.
+// +kubebuilder:validation:XValidation:rule="has(self.region) == has(self.zone)",message="region/zone: both or neither"
+
 // KontinuumSpec describes a single running kontinuum process.
 type KontinuumSpec struct {
 	// Role is either RoleControlPlane or RoleWorker.
