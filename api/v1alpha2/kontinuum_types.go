@@ -37,6 +37,7 @@ type KontinuumStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
+// +kubebuilder:storageversion
 // +kubebuilder:printcolumn:name="Role",type="string",JSONPath=".status.role"
 // +kubebuilder:printcolumn:name="Region",type="string",JSONPath=".spec.region"
 // +kubebuilder:printcolumn:name="Zone",type="string",JSONPath=".spec.zone"
