@@ -284,17 +284,25 @@ func TestHandleSettingsShowsKubeconfigOnlyWhenAuthEnabled(t *testing.T) {
 		if authEnabled {
 			assert.Contains(t, string(body), "kubectl access")
 			assert.Contains(t, string(body), "server: http://example.com")
-			assert.Contains(t, string(body), "insecure-skip-tls-verify: true")
-			assert.Contains(t, string(body), "name: example.com\n    cluster:")
-			assert.Contains(t, string(body), "cluster: example.com")
-			assert.Contains(t, string(body), "name: oidc@example.com")
-			assert.Contains(t, string(body), "current-context: oidc@example.com")
+			assert.NotContains(t, string(body), "insecure-skip-tls-verify")
+			assert.Contains(t, string(body), "name: kontinuum-example.com\n    cluster:")
+			assert.Contains(t, string(body), "cluster: kontinuum-example.com")
+			assert.Contains(t, string(body), "name: oidc@kontinuum-example.com")
+			assert.Contains(t, string(body), "current-context: oidc@kontinuum-example.com")
+			assert.Contains(t, string(body), "user: kontinuum-example.com")
+			assert.Contains(t, string(body), "name: kontinuum-example.com\n    user:")
+			assert.NotContains(t, string(body), "user: oidc\n")
+			assert.NotContains(t, string(body), "name: oidc\n")
 			assert.Contains(t, string(body), "--oidc-issuer-url="+testOIDCIssuerURL)
 			assert.Contains(t, string(body), "--oidc-client-id="+testOIDCClientID)
 			assert.Contains(t, string(body), "downloadKubeconfig()")
+			assert.Contains(t, string(body), "kontinuum config import")
+			assert.Contains(t, string(body), "copyImportSnippet(this)")
+			assert.Contains(t, string(body), "KUBECONFIG")
 		} else {
 			assert.NotContains(t, string(body), "kubectl access")
 			assert.NotContains(t, string(body), "oidc-login")
+			assert.NotContains(t, string(body), "kontinuum config import")
 		}
 	}
 }
@@ -332,12 +340,49 @@ func TestHandleSettingsStripsPortFromKubeconfigClusterName(t *testing.T) {
 	require.NoError(t, resp.Body.Close())
 
 	assert.Contains(t, string(body), "server: http://example.com:8443")
-	assert.Contains(t, string(body), "name: example.com\n    cluster:")
-	assert.Contains(t, string(body), "cluster: example.com")
-	assert.Contains(t, string(body), "name: oidc@example.com")
+	assert.Contains(t, string(body), "name: kontinuum-example.com\n    cluster:")
+	assert.Contains(t, string(body), "cluster: kontinuum-example.com")
+	assert.Contains(t, string(body), "name: oidc@kontinuum-example.com")
 	assert.NotContains(t, string(body), "example.com:8443\n    cluster:")
 	assert.NotContains(t, string(body), "cluster: example.com:8443")
 	assert.NotContains(t, string(body), "oidc@example.com:8443")
+}
+
+func TestHandleSettingsSetsInsecureSkipTLSVerifyForLocalHosts(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	cfg := config.Config{}
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+	cfg.OIDC.ClientID = testOIDCClientID
+
+	for _, host := range []string{"localhost:8443", "127.0.0.1:8443", "[::1]:8443"} {
+		kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+			return stubKontinuumLister{}, nil
+		}
+
+		router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, true, nil)
+
+		mux := http.NewServeMux()
+		router.RegisterRoutes(mux, nil, nil)
+
+		request := newTestRequest(t, "/app/settings")
+		request.Host = host
+
+		recorder := httptest.NewRecorder()
+		mux.ServeHTTP(recorder, request)
+
+		resp := recorder.Result()
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+
+		assert.Contains(t, string(body), "insecure-skip-tls-verify: true", "host %q", host)
+	}
 }
 
 func TestHandleSettingsUsesForwardedProtoForKubeconfigOrigin(t *testing.T) {
@@ -373,7 +418,7 @@ func TestHandleSettingsUsesForwardedProtoForKubeconfigOrigin(t *testing.T) {
 	require.NoError(t, resp.Body.Close())
 
 	assert.Contains(t, string(body), "server: https://example.com")
-	assert.Contains(t, string(body), "name: oidc@example.com")
+	assert.Contains(t, string(body), "name: oidc@kontinuum-example.com")
 	assert.NotContains(t, string(body), "insecure-skip-tls-verify")
 }
 
