@@ -259,12 +259,13 @@ func registryOptions(cfg *config.Config, logger *slog.Logger, scheme *runtime.Sc
 	registryLogger := logger.With("component", "registry")
 
 	controller := registry.NewController(registry.Config{
-		Role:    role,
-		Region:  cfg.Server.Region,
-		Zone:    cfg.Server.Zone,
-		Logger:  registryLogger,
-		Version: version,
-		Storage: cfg.Server.Storage,
+		Role:          role,
+		Region:        cfg.Server.Region,
+		Zone:          cfg.Server.Zone,
+		Logger:        registryLogger,
+		Version:       version,
+		Storage:       cfg.Server.Storage,
+		DisplayConfig: displayConfig(cfg),
 	})
 
 	ensureCRD := func(ctx context.Context, loopbackConfig *rest.Config) error {
@@ -277,6 +278,29 @@ func registryOptions(cfg *config.Config, logger *slog.Logger, scheme *runtime.Sc
 		libkapi.WithController(controller),
 		libkapi.WithWebhookServer(libkapi.WebhookConfig{Port: registry.ConversionWebhookPort}),
 	}, nil
+}
+
+// displayConfig builds the non-confidential configuration snapshot written
+// to status.config on every heartbeat — see v1alpha2.KontinuumConfigStatus.
+// cfg.Log and cfg.OIDC are already that same status type (see
+// pkg/config.Config's doc), so they're copied through as-is; only Server
+// needs translating — Addr copies straight across, Storage is redacted
+// (config.RedactStorage) rather than omitted, since the unredacted original
+// still goes into the Secret status.secretRef points to (see
+// registry.Config.Storage) — and OIDC.Enabled needs deriving, since
+// pkg/config.Load never sets it (see KontinuumOIDCConfigStatus's doc).
+func displayConfig(cfg *config.Config) v1alpha2.KontinuumConfigStatus {
+	oidc := cfg.OIDC
+	oidc.Enabled = oidc.IssuerURL != ""
+
+	return v1alpha2.KontinuumConfigStatus{
+		Server: v1alpha2.KontinuumServerConfigStatus{
+			Addr:    cfg.Server.Addr,
+			Storage: config.RedactStorage(cfg.Server.Storage),
+		},
+		Log:  cfg.Log,
+		OIDC: oidc,
+	}
 }
 
 // namespaceListerFactory builds a ui.NamespaceListerFactory that calls back

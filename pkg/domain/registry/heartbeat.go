@@ -45,6 +45,9 @@ type Heartbeat struct {
 	// KontinuumStatus.SecretRef's doc) and instead upserted into a Secret on
 	// every heartbeat via ensureSecret.
 	SecretData map[string]string
+	// Config is this process's own non-confidential configuration, written
+	// to status.config on every heartbeat.
+	Config v1alpha2.KontinuumConfigStatus
 }
 
 // Reconcile implements reconcile.Reconciler, reacting to its own object's
@@ -141,6 +144,7 @@ func (h *Heartbeat) beat(ctx context.Context, server *v1alpha2.Kontinuum) {
 	server.Status.LastHeartbeatTime = metav1.Now()
 	server.Status.Version = h.Version
 	server.Status.SecretRef = secretRef
+	server.Status.Config = h.Config
 
 	err = h.Client.Status().Update(ctx, server)
 	if err != nil {
@@ -236,6 +240,7 @@ func (h *Heartbeat) reregister(ctx context.Context, server *v1alpha2.Kontinuum) 
 	server.Status.LastHeartbeatTime = metav1.Now()
 	server.Status.Version = h.Version
 	server.Status.SecretRef = secretRef
+	server.Status.Config = h.Config
 
 	err = h.Client.Status().Update(ctx, server)
 	if err != nil {

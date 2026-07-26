@@ -74,6 +74,86 @@ type KontinuumStatus struct {
 	// independently of who can read this broadly-visible Kontinuum object.
 	// +optional
 	SecretRef KontinuumSecretReference `json:"secretRef"`
+	// Config is this process's own non-confidential configuration, shown on
+	// its per-instance settings page (/app/topology/{name}). Its shape
+	// mirrors pkg/config.Config's own Server/Log/OIDC grouping exactly —
+	// pkg/config.Config.Log and .OIDC are in fact this same
+	// KontinuumLogConfigStatus/KontinuumOIDCConfigStatus type (see that
+	// package), so there is exactly one definition of each shape, not two
+	// that could drift apart. Server isn't shared the same way: Region/Zone
+	// (part of pkg/config.ServerConfig, needed to seed KontinuumSpec at
+	// startup) already live on KontinuumSpec, not here, and Storage here
+	// must always be the credential-stripped display copy — never the raw,
+	// connectable value pkg/config.ServerConfig.Storage holds — so keeping
+	// it a distinct type keeps that distinction from being type-checked
+	// away by accident.
+	// +optional
+	Config KontinuumConfigStatus `json:"config"`
+}
+
+// KontinuumConfigStatus is a Kontinuum's own non-confidential
+// configuration — see KontinuumStatus.Config's doc for why this mirrors,
+// but doesn't always literally share, pkg/config.Config's shape.
+type KontinuumConfigStatus struct {
+	// +optional
+	Server KontinuumServerConfigStatus `json:"server"`
+	// +optional
+	Log KontinuumLogConfigStatus `json:"log"`
+	// +optional
+	OIDC KontinuumOIDCConfigStatus `json:"oidc"`
+}
+
+// KontinuumServerConfigStatus mirrors pkg/config.ServerConfig's
+// non-confidential fields.
+type KontinuumServerConfigStatus struct {
+	// Addr is the listener address this process is serving on.
+	// +optional
+	Addr string `json:"addr"`
+	// Storage is the storage connection string with any embedded
+	// credentials stripped (see pkg/config.RedactStorage). The
+	// credential-bearing original lives in the Secret
+	// KontinuumStatus.SecretRef points to.
+	// +optional
+	Storage string `json:"storage"`
+}
+
+// KontinuumLogConfigStatus is pkg/config.LogConfig, referenced directly by
+// that package rather than redefined — see pkg/config.Config.Log.
+type KontinuumLogConfigStatus struct {
+	// Level is one of: debug, info, warn, error.
+	// +optional
+	Level string `default:"warn" json:"level"`
+	// Format is one of: console, text, json.
+	// +optional
+	Format string `default:"json" json:"format"`
+}
+
+// KontinuumOIDCConfigStatus is pkg/config.OIDCConfig, referenced directly
+// by that package rather than redefined — see pkg/config.Config.OIDC.
+// Enabled has no `default` tag: pkg/config.Load never sets it directly
+// (its string-only field walk skips bool fields entirely), it's always
+// derived as IssuerURL != "" — see pkg/cli/serve.go's displayConfig.
+type KontinuumOIDCConfigStatus struct {
+	// Enabled is true when this process has OIDC authentication configured.
+	// +optional
+	Enabled bool `json:"enabled"`
+	// IssuerURL is the OIDC issuer URL. Empty when Enabled is false.
+	// +optional
+	//nolint:tagliatelle // "issuerURL" (acronym kept uppercase) is the established Kubernetes API convention
+	IssuerURL string `default:"" json:"issuerURL"`
+	// ClientID is the OAuth 2.0 public client ID registered with the
+	// issuer.
+	// +optional
+	//nolint:tagliatelle // "clientID" (acronym kept uppercase) is the established Kubernetes API convention
+	ClientID string `default:"kontinuum" json:"clientID"`
+	// RedirectURL is the browser login flow's callback URL.
+	// +optional
+	//nolint:tagliatelle // "redirectURL" (acronym kept uppercase) is the established Kubernetes API convention
+	RedirectURL string `default:"http://localhost:8080/app" json:"redirectURL"`
+	// AdminGroups is a comma-delimited list of OIDC groups granted full
+	// access. Empty when Enabled is false.
+	// +optional
+	AdminGroups string `default:"" json:"adminGroups"`
 }
 
 // KontinuumSecretReference points to the Secret holding a Kontinuum's

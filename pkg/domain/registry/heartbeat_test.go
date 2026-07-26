@@ -53,6 +53,12 @@ func TestHeartbeatRegistersAndUpdatesStatus(t *testing.T) {
 
 	fakeClient := newFakeClient(t)
 
+	testConfig := v1alpha2.KontinuumConfigStatus{
+		Server: v1alpha2.KontinuumServerConfigStatus{Addr: ":8080", Storage: testSecretDataValue},
+		Log:    v1alpha2.KontinuumLogConfigStatus{Level: "info", Format: "json"},
+		OIDC:   v1alpha2.KontinuumOIDCConfigStatus{Enabled: true, IssuerURL: "https://auth.example.com"},
+	}
+
 	heartbeat := &registry.Heartbeat{
 		Client:     fakeClient,
 		Name:       "test-server",
@@ -62,6 +68,7 @@ func TestHeartbeatRegistersAndUpdatesStatus(t *testing.T) {
 		Logger:     slog.Default(),
 		Version:    "v1.2.3",
 		SecretData: map[string]string{"KONTINUUM_SERVER_STORAGE": testSecretDataValue},
+		Config:     testConfig,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -89,13 +96,28 @@ func TestHeartbeatRegistersAndUpdatesStatus(t *testing.T) {
 		Namespace: v1alpha2.DefaultSecretNamespace,
 	}, server.Status.SecretRef)
 	assertConfigSecret(t, fakeClient, server.Status.SecretRef, heartbeat.SecretData)
+	assert.Equal(t, testConfig, server.Status.Config)
 
 	firstHeartbeat := server.Status.LastHeartbeatTime.Time
+	assertHeartbeatAdvancesThenDeregisters(t, fakeClient, "test-server", cancel, done, firstHeartbeat)
+}
+
+// assertHeartbeatAdvancesThenDeregisters waits for name's Kontinuum object
+// to get a heartbeat later than since, cancels the Heartbeat.Start run
+// behind done, waits for it to return, then asserts the object was
+// deregistered — the common tail shared by every test that drives a full
+// Heartbeat.Start lifecycle.
+func assertHeartbeatAdvancesThenDeregisters(
+	t *testing.T, fakeClient client.Client, name string, cancel context.CancelFunc, done <-chan error, since time.Time,
+) {
+	t.Helper()
+
+	var server v1alpha2.Kontinuum
 
 	require.Eventually(t, func() bool {
-		err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-server"}, &server)
+		err := fakeClient.Get(context.Background(), types.NamespacedName{Name: name}, &server)
 
-		return err == nil && server.Status.LastHeartbeatTime.After(firstHeartbeat)
+		return err == nil && server.Status.LastHeartbeatTime.After(since)
 	}, time.Second, time.Millisecond, "heartbeat never advanced")
 
 	cancel()
@@ -107,7 +129,7 @@ func TestHeartbeatRegistersAndUpdatesStatus(t *testing.T) {
 		t.Fatal("Start did not return after ctx was canceled")
 	}
 
-	err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-server"}, &server)
+	err := fakeClient.Get(context.Background(), types.NamespacedName{Name: name}, &server)
 	assert.True(t, apierrors.IsNotFound(err), "server should be deregistered after Start returns")
 }
 

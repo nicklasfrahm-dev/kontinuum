@@ -2,7 +2,7 @@
 <div>
     <div class="mb-6">
         <h1 class="text-xl font-bold text-white">Settings</h1>
-        <p class="mt-1 text-sm text-neutral-500">Server configuration for this kontinuum instance.</p>
+        <p class="mt-1 text-sm text-neutral-500">Access this kontinuum deployment's API server.</p>
     </div>
 
     {{if .AuthEnabled}}
@@ -157,72 +157,6 @@
         }
     </script>
     {{end}}
-
-    <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
-        <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
-            {{template "icon-server"}}
-            <h2 class="text-sm font-bold text-white uppercase tracking-wider">Server</h2>
-        </div>
-        <dl class="divide-y divide-neutral-800">
-            <div class="px-6 py-3 flex items-center justify-between gap-4">
-                <dt class="text-sm text-neutral-500">Version</dt>
-                <dd class="text-sm font-medium text-white">{{.Version}}</dd>
-            </div>
-            <div class="px-6 py-3 flex items-center justify-between gap-4">
-                <dt class="text-sm text-neutral-500">Listen address</dt>
-                <dd class="text-sm font-medium text-white">{{.Addr}}</dd>
-            </div>
-            <div class="px-6 py-3 flex items-center justify-between gap-4">
-                <dt class="text-sm text-neutral-500">Storage backend</dt>
-                <dd class="text-sm font-medium text-white">{{.StorageBackend}}</dd>
-            </div>
-            <div class="px-6 py-3 flex items-center justify-between gap-4">
-                <dt class="text-sm text-neutral-500">Storage target</dt>
-                <dd class="text-sm font-medium text-white break-all text-right">{{.StorageTarget}}</dd>
-            </div>
-            <div class="px-6 py-3 flex items-center justify-between gap-4">
-                <dt class="text-sm text-neutral-500">Log level</dt>
-                <dd class="text-sm font-medium text-white">{{.LogLevel}}</dd>
-            </div>
-            <div class="px-6 py-3 flex items-center justify-between gap-4">
-                <dt class="text-sm text-neutral-500">Log format</dt>
-                <dd class="text-sm font-medium text-white">{{.LogFormat}}</dd>
-            </div>
-        </dl>
-    </div>
-
-    <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
-        <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
-            {{template "icon-shield"}}
-            <h2 class="text-sm font-bold text-white uppercase tracking-wider">Authentication</h2>
-        </div>
-        <dl class="divide-y divide-neutral-800">
-            <div class="px-6 py-3 flex items-center justify-between gap-4">
-                <dt class="text-sm text-neutral-500">OIDC</dt>
-                <dd class="text-sm font-medium text-white">
-                    {{if .AuthEnabled}}
-                    <span class="inline-flex items-center gap-1.5 bg-emerald-500/10 border border-emerald-500/30 rounded-full px-2.5 py-1 text-xs font-medium text-emerald-400">Enabled</span>
-                    {{else}}
-                    <span class="inline-flex items-center gap-1.5 bg-neutral-800 border border-neutral-700 rounded-full px-2.5 py-1 text-xs font-medium text-neutral-400">Disabled</span>
-                    {{end}}
-                </dd>
-            </div>
-            {{if .AuthEnabled}}
-            <div class="px-6 py-3 flex items-center justify-between gap-4">
-                <dt class="text-sm text-neutral-500">Issuer URL</dt>
-                <dd class="text-sm font-medium text-white break-all text-right">{{.OIDCIssuerURL}}</dd>
-            </div>
-            <div class="px-6 py-3 flex items-center justify-between gap-4">
-                <dt class="text-sm text-neutral-500">Client ID</dt>
-                <dd class="text-sm font-medium text-white">{{.OIDCClientID}}</dd>
-            </div>
-            <div class="px-6 py-3 flex items-center justify-between gap-4">
-                <dt class="text-sm text-neutral-500">Admin groups</dt>
-                <dd class="text-sm font-medium text-white break-all text-right">{{.OIDCAdminGroups}}</dd>
-            </div>
-            {{end}}
-        </dl>
-    </div>
 </div>
 {{end}}
 

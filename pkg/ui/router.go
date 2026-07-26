@@ -35,11 +35,12 @@ type NamespaceLister interface {
 // separate, privileged internal client.
 type NamespaceListerFactory func(ctx context.Context) (NamespaceLister, error)
 
-// KontinuumClient is the subset of the Kubernetes API the UI needs to list
-// and delete registered kontinuum instances (see pkg/domain/registry, which
-// owns the kontinuums.kontinuum.sh CRD and the objects it acts on). It is
-// satisfied by a controller-runtime client.Client.
+// KontinuumClient is the subset of the Kubernetes API the UI needs to get,
+// list, and delete registered kontinuum instances (see pkg/domain/registry,
+// which owns the kontinuums.kontinuum.sh CRD and the objects it acts on).
+// It is satisfied by a controller-runtime client.Client.
 type KontinuumClient interface {
+	Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error
 	List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error
 	Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error
 }
@@ -65,6 +66,7 @@ var templatesFS embed.FS
 const (
 	pageHome     = "home"
 	pageTopology = "topology"
+	pageInstance = "instance"
 	pageSettings = "settings"
 )
 
@@ -117,11 +119,12 @@ func NewRouter(
 		pageHome: mustParsePage("templates/home_content.html"),
 		pageTopology: mustParsePage("templates/topology_content.html",
 			"templates/components/icon_trash.html"),
+		pageInstance: mustParsePage("templates/instance_content.html",
+			"templates/components/icon_server.html", "templates/components/icon_shield.html"),
 		pageSettings: mustParsePage("templates/settings_content.html",
 			"templates/components/icon_copy.html", "templates/components/icon_download.html",
 			"templates/components/icon_eye.html", "templates/components/icon_eye_off.html",
-			"templates/components/icon_terminal.html", "templates/components/icon_server.html",
-			"templates/components/icon_shield.html", "templates/components/icon_check.html"),
+			"templates/components/icon_terminal.html", "templates/components/icon_check.html"),
 	}
 
 	return &Router{
@@ -167,6 +170,7 @@ func (r *Router) RegisterRoutes(
 	mux.HandleFunc("GET /app", appRoot)
 	mux.HandleFunc("GET /app/home", protect(r.handleHome))
 	mux.HandleFunc("GET /app/topology", protect(r.renderTopology))
+	mux.HandleFunc("GET /app/topology/{name}", protect(r.handleInstanceDetail))
 	mux.HandleFunc("DELETE /app/topology/{name}", protect(r.handleDeleteInstance))
 	mux.HandleFunc("GET /app/settings", protect(r.handleSettings))
 }
@@ -355,20 +359,82 @@ func (r *Router) renderTopology(writer http.ResponseWriter, request *http.Reques
 	})
 }
 
+// handleInstanceDetail is GET /app/topology/{name}'s handler — it shows one
+// Kontinuum instance's own settings (status.config, status.secretRef),
+// sourced from the shared Kontinuum object store rather than this
+// process's own local config, so it renders the same regardless of which
+// instance's UI you happen to be browsing from.
+func (r *Router) handleInstanceDetail(writer http.ResponseWriter, request *http.Request) {
+	kontinuums, err := r.kontinuumsFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	var item v1alpha2.Kontinuum
+
+	name := request.PathValue("name")
+
+	err = kontinuums.Get(request.Context(), client.ObjectKey{Name: name}, &item)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			http.NotFound(writer, request)
+
+			return
+		}
+
+		// Forbidden means the signed-in identity is authenticated but not
+		// authorized — the session itself isn't the problem, but there's
+		// no reason to keep it either, so send the caller back to sign in
+		// rather than leave them stuck on a page they can't use.
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return
+		}
+
+		http.Error(writer, "failed to get kontinuum instance: "+err.Error(), http.StatusBadGateway)
+
+		return
+	}
+
+	cfg := item.Status.Config
+
+	r.render(writer, pageInstance, map[string]any{
+		"Title":           item.Name,
+		"ActiveMenu":      "topology",
+		"Version":         r.version,
+		"AuthEnabled":     r.authEnabled,
+		"Name":            item.Name,
+		"Role":            item.Status.Role,
+		"Region":          item.Spec.Region,
+		"Zone":            item.Spec.Zone,
+		"LastHeartbeat":   formatAge(item.Status.LastHeartbeatTime.Time),
+		"Age":             formatAge(item.CreationTimestamp.Time),
+		"APIVersion":      v1alpha2.GroupVersion().String(),
+		"InstanceVersion": item.Status.Version,
+		"Addr":            cfg.Server.Addr,
+		"StorageBackend":  storageBackendName(cfg.Server.Storage),
+		"StorageTarget":   cfg.Server.Storage,
+		"SecretName":      item.Status.SecretRef.Name,
+		"SecretNamespace": item.Status.SecretRef.Namespace,
+		"LogLevel":        cfg.Log.Level,
+		"LogFormat":       cfg.Log.Format,
+		"OIDCEnabled":     cfg.OIDC.Enabled,
+		"OIDCIssuerURL":   cfg.OIDC.IssuerURL,
+		"OIDCClientID":    cfg.OIDC.ClientID,
+		"OIDCRedirectURL": cfg.OIDC.RedirectURL,
+		"OIDCAdminGroups": cfg.OIDC.AdminGroups,
+	})
+}
+
 func (r *Router) handleSettings(writer http.ResponseWriter, request *http.Request) {
 	data := map[string]any{
-		"Title":           "Settings",
-		"ActiveMenu":      "settings",
-		"Version":         r.version,
-		"Addr":            r.cfg.Server.Addr,
-		"StorageBackend":  storageBackendName(r.cfg.Server.Storage),
-		"StorageTarget":   r.cfg.Server.Storage,
-		"LogLevel":        r.cfg.Log.Level,
-		"LogFormat":       r.cfg.Log.Format,
-		"AuthEnabled":     r.authEnabled,
-		"OIDCIssuerURL":   r.cfg.OIDC.IssuerURL,
-		"OIDCClientID":    r.cfg.OIDC.ClientID,
-		"OIDCAdminGroups": r.cfg.OIDC.AdminGroups,
+		"Title":       "Settings",
+		"ActiveMenu":  "settings",
+		"Version":     r.version,
+		"AuthEnabled": r.authEnabled,
 	}
 
 	if r.authEnabled {

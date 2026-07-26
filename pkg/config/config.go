@@ -11,16 +11,27 @@ import (
 	"reflect"
 	"strings"
 	"unicode"
+
+	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 )
 
 const envPrefix = "KONTINUUM_"
 
 // Config holds all kontinuum configuration. Each leaf string field carries a
 // `default` struct tag; the env-var name is auto-derived from its path.
+//
+// Log and OIDC are v1alpha2's own KontinuumLogConfigStatus/
+// KontinuumOIDCConfigStatus types, not locally redefined ones: those types
+// are also what a Kontinuum's status.config reports on its per-instance
+// settings page (/app/topology/{name}), so this is the one place their
+// shape (field names, `default` values) is declared — see
+// v1alpha2.KontinuumStatus.Config's doc for why Server isn't shared the
+// same way (Region/Zone belong on KontinuumSpec, and Storage here must stay
+// the raw, connectable value, never the redacted display copy status uses).
 type Config struct {
 	Server ServerConfig
-	Log    LogConfig
-	OIDC   OIDCConfig
+	Log    v1alpha2.KontinuumLogConfigStatus
+	OIDC   v1alpha2.KontinuumOIDCConfigStatus
 }
 
 // ServerConfig holds the API server listener and storage configuration.
@@ -37,38 +48,6 @@ type ServerConfig struct {
 	// along with Region, to run as the control-plane entrypoint — see
 	// registry.Role.
 	Zone string `default:""`
-}
-
-// LogConfig holds logging configuration. Level and Format are stored as
-// strings and parsed by pkg/logging, keeping this package dependency-free.
-type LogConfig struct {
-	// Level is one of: debug, info, warn, error. Defaults to "warn".
-	Level string `default:"warn"`
-	// Format is one of: console, text, json. Defaults to "json".
-	// console and text are equivalent (colorful, human-readable).
-	Format string `default:"json"`
-}
-
-// OIDCConfig configures OIDC authentication: bearer-token validation on the
-// Kubernetes-style API and the PKCE browser login flow for the /app UI. An
-// empty IssuerURL disables OIDC entirely, matching kontinuum's default of no
-// authentication.
-type OIDCConfig struct {
-	// IssuerURL is the OIDC issuer URL (e.g. Dex). The discovery document is
-	// fetched from {IssuerURL}/.well-known/openid-configuration at startup.
-	IssuerURL string `default:""`
-	// ClientID is the OAuth 2.0 public client ID registered with the issuer.
-	// No client secret is used — authentication relies entirely on PKCE.
-	ClientID string `default:"kontinuum"`
-	// RedirectURL is the browser login flow's callback URL. It must exactly
-	// match one of the redirect URIs registered with the issuer, and is
-	// reused as both the login-initiation and callback endpoint since the
-	// registered URI has no dedicated /callback path.
-	RedirectURL string `default:"http://localhost:8080/app"`
-	// AdminGroups is a comma-delimited list of OIDC groups granted full
-	// (system:masters-equivalent) access. Members of system:masters are
-	// always allowed; every other group has no access by default.
-	AdminGroups string `default:""`
 }
 
 // Load reads configuration from KONTINUUM_-prefixed environment variables,
@@ -96,14 +75,18 @@ func Defaults() *Config {
 // Server.Storage (e.g. "postgres://user:pass@host/db").
 func Redact(cfg Config) Config {
 	redacted := cfg
-	redacted.Server.Storage = redactStorage(cfg.Server.Storage)
+	redacted.Server.Storage = RedactStorage(cfg.Server.Storage)
 
 	return redacted
 }
 
-// redactStorage strips an embedded username/password from a storage
+// RedactStorage strips an embedded username/password from a storage
 // connection string, leaving the scheme, host, path, and query intact.
-func redactStorage(raw string) string {
+// Exported (not just used via Redact) so callers that only have the raw
+// connection string — not a whole Config — can still redact it; see
+// pkg/cli/serve.go, which uses this to populate
+// v1alpha2.KontinuumConfigStatus.StorageTarget.
+func RedactStorage(raw string) string {
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return raw

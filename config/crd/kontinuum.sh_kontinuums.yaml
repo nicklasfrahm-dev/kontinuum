@@ -166,6 +166,83 @@ spec:
               would make every Create fail structural-schema validation against that
               always-empty status.
             properties:
+              config:
+                description: |-
+                  Config is this process's own non-confidential configuration, shown on
+                  its per-instance settings page (/app/topology/{name}). Its shape
+                  mirrors pkg/config.Config's own Server/Log/OIDC grouping exactly —
+                  pkg/config.Config.Log and .OIDC are in fact this same
+                  KontinuumLogConfigStatus/KontinuumOIDCConfigStatus type (see that
+                  package), so there is exactly one definition of each shape, not two
+                  that could drift apart. Server isn't shared the same way: Region/Zone
+                  (part of pkg/config.ServerConfig, needed to seed KontinuumSpec at
+                  startup) already live on KontinuumSpec, not here, and Storage here
+                  must always be the credential-stripped display copy — never the raw,
+                  connectable value pkg/config.ServerConfig.Storage holds — so keeping
+                  it a distinct type keeps that distinction from being type-checked
+                  away by accident.
+                properties:
+                  log:
+                    description: |-
+                      KontinuumLogConfigStatus is pkg/config.LogConfig, referenced directly by
+                      that package rather than redefined — see pkg/config.Config.Log.
+                    properties:
+                      format:
+                        description: 'Format is one of: console, text, json.'
+                        type: string
+                      level:
+                        description: 'Level is one of: debug, info, warn, error.'
+                        type: string
+                    type: object
+                  oidc:
+                    description: |-
+                      KontinuumOIDCConfigStatus is pkg/config.OIDCConfig, referenced directly
+                      by that package rather than redefined — see pkg/config.Config.OIDC.
+                      Enabled has no `default` tag: pkg/config.Load never sets it directly
+                      (its string-only field walk skips bool fields entirely), it's always
+                      derived as IssuerURL != "" — see pkg/cli/serve.go's displayConfig.
+                    properties:
+                      adminGroups:
+                        description: |-
+                          AdminGroups is a comma-delimited list of OIDC groups granted full
+                          access. Empty when Enabled is false.
+                        type: string
+                      clientID:
+                        description: |-
+                          ClientID is the OAuth 2.0 public client ID registered with the
+                          issuer.
+                        type: string
+                      enabled:
+                        description: Enabled is true when this process has OIDC authentication
+                          configured.
+                        type: boolean
+                      issuerURL:
+                        description: IssuerURL is the OIDC issuer URL. Empty when
+                          Enabled is false.
+                        type: string
+                      redirectURL:
+                        description: RedirectURL is the browser login flow's callback
+                          URL.
+                        type: string
+                    type: object
+                  server:
+                    description: |-
+                      KontinuumServerConfigStatus mirrors pkg/config.ServerConfig's
+                      non-confidential fields.
+                    properties:
+                      addr:
+                        description: Addr is the listener address this process is
+                          serving on.
+                        type: string
+                      storage:
+                        description: |-
+                          Storage is the storage connection string with any embedded
+                          credentials stripped (see pkg/config.RedactStorage). The
+                          credential-bearing original lives in the Secret
+                          KontinuumStatus.SecretRef points to.
+                        type: string
+                    type: object
+                type: object
               lastHeartbeatTime:
                 description: |-
                   LastHeartbeatTime is when this process last reported in. The server

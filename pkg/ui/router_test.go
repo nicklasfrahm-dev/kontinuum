@@ -49,7 +49,30 @@ func (s stubNamespaceLister) List(context.Context, metav1.ListOptions) (*corev1.
 type stubKontinuumLister struct {
 	items     []v1alpha2.Kontinuum
 	err       error
+	getErr    error
 	deleteErr error
+}
+
+// Get looks up a Kontinuum by name in items, matching a real client's
+// NotFound behavior when no item matches — see
+// TestHandleInstanceDetailReturnsNotFoundForUnknownInstance.
+func (s stubKontinuumLister) Get(
+	_ context.Context, key client.ObjectKey, obj client.Object, _ ...client.GetOption,
+) error {
+	if s.getErr != nil {
+		return s.getErr
+	}
+
+	for _, item := range s.items {
+		if item.Name == key.Name {
+			// obj is always *v1alpha2.Kontinuum in this package's tests.
+			*obj.(*v1alpha2.Kontinuum) = item //nolint:forcetypeassert // see comment above
+
+			return nil
+		}
+	}
+
+	return apierrors.NewNotFound(schema.GroupResource{Group: v1alpha2.GroupName, Resource: "kontinuums"}, key.Name)
 }
 
 func (s stubKontinuumLister) List(_ context.Context, list client.ObjectList, _ ...client.ListOption) error {
@@ -242,45 +265,156 @@ func TestHandleHomeShowsLogoutLinkOnlyWhenAuthEnabled(t *testing.T) {
 	}
 }
 
-func TestHandleSettingsShowsOIDCDetailsOnlyWhenAuthEnabled(t *testing.T) {
+// instanceWithConfig builds a Kontinuum fixture carrying the given
+// status.config — shared by the handleInstanceDetail tests below.
+func instanceWithConfig(name string, cfg v1alpha2.KontinuumConfigStatus) v1alpha2.Kontinuum {
+	return v1alpha2.Kontinuum{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Status: v1alpha2.KontinuumStatus{
+			Role:      v1alpha2.RoleWorker,
+			SecretRef: v1alpha2.KontinuumSecretReference{Name: name, Namespace: v1alpha2.DefaultSecretNamespace},
+			Config:    cfg,
+		},
+	}
+}
+
+func TestHandleInstanceDetailRendersInstanceSettings(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
 		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
 	}
 
-	cfg := config.Config{}
-	cfg.OIDC.IssuerURL = testOIDCIssuerURL
-	cfg.OIDC.ClientID = testOIDCClientID
-	cfg.OIDC.AdminGroups = "platform-team"
+	item := instanceWithConfig("worker-1", v1alpha2.KontinuumConfigStatus{
+		Server: v1alpha2.KontinuumServerConfigStatus{Addr: ":8080", Storage: "postgres://db.internal:5432/kontinuum"},
+		Log:    v1alpha2.KontinuumLogConfigStatus{Level: "info", Format: "json"},
+		OIDC: v1alpha2.KontinuumOIDCConfigStatus{
+			Enabled: true, IssuerURL: testOIDCIssuerURL, ClientID: testOIDCClientID, AdminGroups: "platform-team",
+		},
+	})
 
-	for _, authEnabled := range []bool{true, false} {
-		kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
-			return stubKontinuumLister{}, nil
-		}
-
-		router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, authEnabled, nil)
-
-		mux := http.NewServeMux()
-		router.RegisterRoutes(mux, nil, nil)
-
-		recorder := httptest.NewRecorder()
-		mux.ServeHTTP(recorder, newTestRequest(t, "/app/settings"))
-
-		resp := recorder.Result()
-
-		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-		require.NoError(t, resp.Body.Close())
-
-		if authEnabled {
-			assert.Contains(t, string(body), testOIDCIssuerURL)
-			assert.Contains(t, string(body), "platform-team")
-		} else {
-			assert.NotContains(t, string(body), testOIDCIssuerURL)
-			assert.NotContains(t, string(body), "platform-team")
-		}
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{items: []v1alpha2.Kontinuum{item}}, nil
 	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/topology/worker-1"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "worker-1")
+	assert.Contains(t, string(body), ":8080")
+	assert.Contains(t, string(body), "postgres://db.internal:5432/kontinuum")
+	assert.Contains(t, string(body), "kontinuum-system/worker-1")
+	assert.Contains(t, string(body), testOIDCIssuerURL)
+	assert.Contains(t, string(body), "platform-team")
+}
+
+func TestHandleInstanceDetailHidesOIDCDetailsWhenInstanceOIDCDisabled(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	item := instanceWithConfig("worker-1", v1alpha2.KontinuumConfigStatus{
+		OIDC: v1alpha2.KontinuumOIDCConfigStatus{Enabled: false, IssuerURL: testOIDCIssuerURL},
+	})
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{items: []v1alpha2.Kontinuum{item}}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/topology/worker-1"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.NotContains(t, string(body), testOIDCIssuerURL)
+}
+
+func TestHandleInstanceDetailReturnsNotFoundForUnknownInstance(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/topology/missing"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestHandleInstanceDetailReturnsServerErrorWhenFactoryFails(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return nil, errFactory
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/topology/worker-1"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+}
+
+func TestHandleInstanceDetailInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: "kontinuums"}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{getErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
+	}
+
+	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/topology/worker-1"), kontinuumFactory)
 }
 
 func TestHandleSettingsShowsKubeconfigOnlyWhenAuthEnabled(t *testing.T) {

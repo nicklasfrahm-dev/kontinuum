@@ -54,6 +54,10 @@ type Config struct {
 	// it's kept out of status and instead stored in a Secret status.secretRef
 	// points to — see Heartbeat.SecretData.
 	Storage string
+	// DisplayConfig is this process's own non-confidential configuration,
+	// written to status.config on every heartbeat — see
+	// v1alpha2.KontinuumConfigStatus.
+	DisplayConfig v1alpha2.KontinuumConfigStatus
 }
 
 // Controller wires kontinuum's server registry — the kontinuums.kontinuum.sh
@@ -109,6 +113,7 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		Logger:     c.Config.Logger,
 		Version:    c.Config.Version,
 		SecretData: map[string]string{storageSecretKey: c.Config.Storage},
+		Config:     c.Config.DisplayConfig,
 	}
 
 	combined := &CombinedReconciler{TTL: reconciler, Heartbeat: heartbeat}
