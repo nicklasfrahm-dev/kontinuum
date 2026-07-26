@@ -147,6 +147,8 @@ jobs:
             ghcr.io/${{ github.repository }}:latest
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max' || '' }}
 
   release:
     name: Release
