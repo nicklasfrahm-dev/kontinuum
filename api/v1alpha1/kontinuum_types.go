@@ -1,4 +1,4 @@
-package v1alpha2
+package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,26 +17,22 @@ const (
 // enforces (see regionZoneValidationRules) — the marker comment can't wrap
 // across lines, and the fuller expression doesn't fit within this repo's
 // line-length limit. config/crd's generated manifest is a reference
-// artifact only (see api/v1alpha2/doc.go); the real, authoritative CRD
-// built in Go carries the stricter rule.
+// artifact only; the real, authoritative CRD built in Go carries the
+// stricter rule.
 // +kubebuilder:validation:XValidation:rule="has(self.region) == has(self.zone)",message="region/zone: both or neither"
 
 // KontinuumSpec describes a single running kontinuum process.
 type KontinuumSpec struct {
-	// Region is the region this process manages. Empty when both Region and
-	// Zone are empty, in which case the process is the control-plane entrypoint.
+	// Role is either RoleControlPlane or RoleWorker.
+	Role string `json:"role"`
+	// Region is the region this process manages. Empty when Role is RoleControlPlane.
 	Region string `json:"region,omitempty"`
-	// Zone is the availability zone this process manages. Empty when both
-	// Region and Zone are empty, in which case the process is the
-	// control-plane entrypoint.
+	// Zone is the availability zone this process manages. Empty when Role is RoleControlPlane.
 	Zone string `json:"zone,omitempty"`
 }
 
 // KontinuumStatus reports the last time a Kontinuum reported in.
 type KontinuumStatus struct {
-	// Role is either RoleControlPlane or RoleWorker, derived from
-	// spec.region and spec.zone — see registry.Role.
-	Role string `json:"role"`
 	// LastHeartbeatTime is when this process last reported in. The server
 	// registry deletes a Kontinuum whose LastHeartbeatTime is older than
 	// its configured stale threshold (5 minutes by default).
@@ -46,8 +42,7 @@ type KontinuumStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
-// +kubebuilder:storageversion
-// +kubebuilder:printcolumn:name="Role",type="string",JSONPath=".status.role"
+// +kubebuilder:printcolumn:name="Role",type="string",JSONPath=".spec.role"
 // +kubebuilder:printcolumn:name="Region",type="string",JSONPath=".spec.region"
 // +kubebuilder:printcolumn:name="Zone",type="string",JSONPath=".spec.zone"
 

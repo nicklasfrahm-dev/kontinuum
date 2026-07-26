@@ -15,10 +15,12 @@
             <thead>
                 <tr class="border-b border-neutral-800">
                     <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Name</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">API Version</th>
                     <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Role</th>
                     <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Region</th>
                     <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Zone</th>
                     <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Last Heartbeat</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Age</th>
                     <th class="px-6 py-2 text-right text-xs font-medium text-neutral-500 uppercase tracking-wider">Actions</th>
                 </tr>
             </thead>
@@ -26,6 +28,7 @@
                 {{range .Instances}}
                 <tr class="border-b border-neutral-800 last:border-b-0 hover:bg-neutral-800/50 transition-colors">
                     <td class="px-6 py-2 text-sm font-medium text-white">{{.Name}}</td>
+                    <td class="px-6 py-2 text-sm text-neutral-400">{{.APIVersion}}</td>
                     <td class="px-6 py-2">
                         {{if eq .Role "controlplane"}}
                         <span class="inline-flex items-center gap-1.5 bg-accent/10 border border-accent/30 rounded-full px-2.5 py-1 text-xs font-medium text-accent">Control Plane</span>
@@ -35,6 +38,7 @@
                     </td>
                     <td class="px-6 py-2 text-sm text-neutral-400">{{if .Region}}{{.Region}}{{else}}-{{end}}</td>
                     <td class="px-6 py-2 text-sm text-neutral-400">{{if .Zone}}{{.Zone}}{{else}}-{{end}}</td>
+                    <td class="px-6 py-2 text-sm text-neutral-400">{{.LastHeartbeat}}</td>
                     <td class="px-6 py-2 text-sm text-neutral-400">{{.Age}}</td>
                     <td class="px-6 py-2 text-right">
                         <button type="button"

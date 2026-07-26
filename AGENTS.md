@@ -31,8 +31,8 @@
 
 ## Tests
 
-- Tests must use the `_test` package (external test package, e.g. `package config_test`).
-- If a test needs access to an unexported function, make the function public. Do not use `export_test.go` to expose internals.
+- Tests must use the `_test` package (external test package, e.g. `package config_test`). They MUST NEVER live in the same package as the code under test.
+- If a test needs access to an unexported function, make the function exported instead (e.g. `applyCRD` becomes `ApplyCRD`). Do not use `export_test.go`, and do not add an internal (same-package) test file, to work around this.
 - Tests must use `github.com/stretchr/testify`'s `assert`/`require` packages.
 - Tests must run with `-race`.
 

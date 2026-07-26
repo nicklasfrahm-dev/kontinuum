@@ -15,6 +15,83 @@ spec:
   scope: Cluster
   versions:
   - additionalPrinterColumns:
+    - jsonPath: .spec.role
+      name: Role
+      type: string
+    - jsonPath: .spec.region
+      name: Region
+      type: string
+    - jsonPath: .spec.zone
+      name: Zone
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Kontinuum represents a single running kontinuum process registered in the
+          central server registry.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: KontinuumSpec describes a single running kontinuum process.
+            properties:
+              region:
+                description: Region is the region this process manages. Empty when
+                  Role is RoleControlPlane.
+                type: string
+              role:
+                description: Role is either RoleControlPlane or RoleWorker.
+                type: string
+              zone:
+                description: Zone is the availability zone this process manages. Empty
+                  when Role is RoleControlPlane.
+                type: string
+            required:
+            - role
+            type: object
+            x-kubernetes-validations:
+            - message: 'region/zone: both or neither'
+              rule: has(self.region) == has(self.zone)
+          status:
+            description: KontinuumStatus reports the last time a Kontinuum reported
+              in.
+            properties:
+              lastHeartbeatTime:
+                description: |-
+                  LastHeartbeatTime is when this process last reported in. The server
+                  registry deletes a Kontinuum whose LastHeartbeatTime is older than
+                  its configured stale threshold (5 minutes by default).
+                format: date-time
+                type: string
+            required:
+            - lastHeartbeatTime
+            type: object
+        required:
+        - metadata
+        - spec
+        - status
+        type: object
+    served: true
+    storage: false
+    subresources:
+      status: {}
+  - additionalPrinterColumns:
     - jsonPath: .status.role
       name: Role
       type: string
@@ -63,6 +140,9 @@ spec:
                   control-plane entrypoint.
                 type: string
             type: object
+            x-kubernetes-validations:
+            - message: 'region/zone: both or neither'
+              rule: has(self.region) == has(self.zone)
           status:
             description: KontinuumStatus reports the last time a Kontinuum reported
               in.
