@@ -1,10 +1,12 @@
 package cli_test
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/charmbracelet/huh"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -51,6 +53,18 @@ func (s *stubPrompter) Text(_ string) (string, error) {
 	s.t.Fatal("unexpected Text call")
 
 	return "", nil
+}
+
+// abortingPrompter simulates a user cancelling the interactive paste prompt
+// (e.g. Ctrl+C/Esc), which huh reports via the huh.ErrUserAborted sentinel.
+type abortingPrompter struct{}
+
+func (abortingPrompter) Confirm(string, bool) (bool, error) {
+	return false, huh.ErrUserAborted
+}
+
+func (abortingPrompter) Text(string) (string, error) {
+	return "", huh.ErrUserAborted
 }
 
 func newCluster(server string) *clientcmdapi.Cluster {
@@ -214,7 +228,6 @@ func TestNewConfigImportCmdRejectsExtraArgs(t *testing.T) {
 
 	cmd := cli.NewConfigImportCmd()
 	cmd.SetArgs([]string{"one", "two"})
-	cmd.SilenceUsage = true
 	cmd.SilenceErrors = true
 
 	err := cmd.Execute()
@@ -248,4 +261,22 @@ users:
 
 	err := cmd.Execute()
 	require.NoError(t, err)
+}
+
+func TestRunConfigImportPrintsPlainNoticeWhenPromptAborted(t *testing.T) {
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "config"))
+
+	cmd := cli.NewConfigImportCmd()
+
+	var stderr bytes.Buffer
+
+	cmd.SetErr(&stderr)
+
+	err := cli.RunConfigImport(cmd, nil, abortingPrompter{})
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, huh.ErrUserAborted)
+	assert.True(t, cmd.SilenceUsage, "aborting should silence cobra's usage output")
+	assert.True(t, cmd.SilenceErrors, "aborting should silence cobra's default error output")
+	assert.Equal(t, "Aborted.\n", stderr.String())
 }

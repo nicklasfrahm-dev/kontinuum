@@ -87,10 +87,29 @@ func NewConfigImportCmd() *cobra.Command {
 		Use:   "import [path]",
 		Short: "Merge a kubeconfig into the existing kubeconfig",
 		Args:  cobra.MaximumNArgs(1),
+		// Runtime errors (parse/merge/write failures, an aborted prompt)
+		// shouldn't print the command usage alongside the error.
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runConfigImport(cmd, args, HuhPrompter{})
+			return RunConfigImport(cmd, args, HuhPrompter{})
 		},
 	}
+}
+
+// RunConfigImport is "config import"'s implementation: it reads the
+// kubeconfig to import, merges it into the existing kubeconfig on disk, and
+// writes the result back to the same file. An aborted interactive prompt
+// (Ctrl+C/Esc) is the user cancelling, not a failure: it prints a plain
+// "Aborted." notice instead of cobra's default "Error: ..." wrapper chain.
+func RunConfigImport(cmd *cobra.Command, args []string, prompt Prompter) error {
+	err := runConfigImport(cmd, args, prompt)
+	if errors.Is(err, huh.ErrUserAborted) {
+		cmd.SilenceErrors = true
+
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Aborted.")
+	}
+
+	return err
 }
 
 // runConfigImport reads the kubeconfig to import, merges it into the
