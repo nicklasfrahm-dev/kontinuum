@@ -127,4 +127,4 @@ The container image is built on `distroless/static` with `CGO_ENABLED=0`, so SQL
 
 ## License
 
-Apache License 2.0.
+[Apache License 2.0](LICENSE.md).
