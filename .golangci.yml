@@ -33,6 +33,17 @@ linters:
         - stdlib
         - runtime\.Object
         - client\.Client
+    wrapcheck:
+      # grpc-go's own status.Error/Errorf already produce a self-describing
+      # error (code + message) that is the correct thing to return directly
+      # from a gRPC service method — see pkg/domain/kms. Wrapping it with
+      # fmt.Errorf would double the "rpc error: code = ... desc = ..."
+      # envelope into the status message itself, since grpc-go's
+      # status.FromError takes an errors.As-found wrapped status's Proto but
+      # sets its Message to the wrapping error's full Error() string.
+      extra-ignore-sigs:
+        - status.Error(
+        - status.Errorf(
 
 issues:
   max-issues-per-linter: 0
