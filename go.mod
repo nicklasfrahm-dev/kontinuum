@@ -21,7 +21,7 @@ require (
 	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
-	github.com/kommodity-io/kommodity v0.151.0
+	github.com/kommodity-io/kommodity v0.151.1-0.20260727224712-3e6938e4e7bc
 	github.com/lmittmann/tint v1.2.0
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
@@ -31,6 +31,7 @@ require (
 	k8s.io/apimachinery v0.32.6
 	k8s.io/client-go v0.32.6
 	sigs.k8s.io/controller-runtime v0.20.4
+	sigs.k8s.io/yaml v1.6.0
 )
 
 require (
@@ -364,6 +365,7 @@ require (
 	k8s.io/klog/v2 v2.130.1 // indirect
 	k8s.io/kms v0.32.6 // indirect
 	k8s.io/kube-aggregator v0.32.3 // indirect
+	k8s.io/kube-controller-manager v0.32.6 // indirect
 	k8s.io/kube-openapi v0.0.0-20250701173324-9bd5c66d9911 // indirect
 	k8s.io/kubelet v0.32.6 // indirect
 	k8s.io/kubernetes v1.32.6 // indirect
@@ -375,5 +377,4 @@ require (
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.7.0 // indirect
-	sigs.k8s.io/yaml v1.6.0 // indirect
 )
