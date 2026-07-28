@@ -1,0 +1,198 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.3
+  name: instances.kontinuum.sh
+spec:
+  group: kontinuum.sh
+  names:
+    kind: Instance
+    listKind: InstanceList
+    plural: instances
+    singular: instance
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.talosVersion
+      name: TalosVersion
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Discovered")].status
+      name: Discovered
+      type: string
+    name: v1alpha2
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Instance represents a single machine (bare metal or, via ProviderRef, a
+          provisioned cloud resource) that can be claimed by an InstancePool — see
+          issue #24's architecture decision 2/5. This phase's controller only
+          implements discovery/probing; claiming is a later phase.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: InstanceSpec is this Instance's discovery entrypoint.
+            properties:
+              interfaces:
+                description: |-
+                  Interfaces lists candidate addresses (IP or hostname) this Instance's
+                  controller dials, in Talos maintenance mode, to discover it — see
+                  InstanceStatus.Interfaces. Ignored once ProviderRef is set: discovery
+                  then comes from that provider's own controller instead.
+                items:
+                  type: string
+                type: array
+              providerRef:
+                description: |-
+                  ProviderRef points at the concrete provider object backing this
+                  Instance (e.g. an AWSInstance) — see issue #24's architecture
+                  decision 2/5. Unset means bare metal, discovered via Interfaces
+                  above; set means a separate provider-specific controller populates
+                  Status instead, and deleting this Instance cascades to deprovisioning
+                  the real cloud resource via ownerRef.
+                properties:
+                  apiVersion:
+                    description: APIVersion is the referenced object's apiVersion
+                      (group/version).
+                    type: string
+                  kind:
+                    description: Kind is the referenced object's kind.
+                    type: string
+                  name:
+                    description: Name is the referenced object's name.
+                    type: string
+                required:
+                - apiVersion
+                - kind
+                - name
+                type: object
+            type: object
+          status:
+            description: |-
+              InstanceStatus reports this Instance's discovery/probing result. Every
+              field is +optional despite lacking omitempty — see KontinuumStatus's own
+              doc for why: the status subresource strips whatever the main endpoint's
+              Create/Update payload carries before validation runs.
+            properties:
+              conditions:
+                description: |-
+                  Conditions reports this Instance's state. Discovered is set true once
+                  one of spec.interfaces has been successfully probed.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              interfaces:
+                description: |-
+                  Interfaces lists the network interfaces discovered on this Instance —
+                  see InstanceInterfaceStatus. Populated by maintenance-mode probing
+                  when ProviderRef is unset, or by the provider controller otherwise —
+                  identical contract either way.
+                items:
+                  description: |-
+                    InstanceInterfaceStatus is one network interface discovered on this
+                    Instance, via Talos's COSI network resources while probing
+                    spec.interfaces in maintenance mode.
+                  properties:
+                    addresses:
+                      description: Addresses lists this interface's discovered IP
+                        addresses (CIDR form).
+                      items:
+                        type: string
+                      type: array
+                    macAddress:
+                      description: MACAddress is the interface's hardware address,
+                        when available.
+                      type: string
+                    name:
+                      description: Name is the interface's kernel name (e.g. eth0).
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+              talosVersion:
+                description: |-
+                  TalosVersion is the Talos version this Instance reported while being
+                  probed.
+                type: string
+            type: object
+        required:
+        - metadata
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -210,7 +210,7 @@ func startTestServer(ctx context.Context, t *testing.T, withController bool) (ct
 
 	opts := []libkapi.Option{
 		libkapi.WithAddr(addr),
-		libkapi.WithStorage("sqlite://"+dbPath),
+		libkapi.WithStorage("sqlite://" + dbPath),
 		libkapi.WithLogger(logger),
 		libkapi.WithScheme(scheme),
 		libkapi.WithPostStartHook(ensureCRD),
