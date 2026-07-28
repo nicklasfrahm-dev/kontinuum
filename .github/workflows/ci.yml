@@ -89,7 +89,7 @@ jobs:
         run: go generate ./...
 
       - name: Run tests with coverage
-        uses: nicklasfrahm-dev/go-coverage-action@1622711d1186497f27de9d5056883384cbbf960b # v2.0.3
+        uses: nicklasfrahm-dev/go-coverage-action@c98422f704df2fcf76ae75e0f97dd6c482b4f504 # v2.0.5
         with:
           cover-pkg: ./...
           cover-mode: atomic
