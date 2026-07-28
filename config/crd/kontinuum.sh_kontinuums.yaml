@@ -58,8 +58,8 @@ spec:
               role:
                 description: Role is either RoleControlPlane or RoleWorker.
                 enum:
-                - controlplane
-                - worker
+                - ControlPlane
+                - Worker
                 type: string
               zone:
                 description: Zone is the availability zone this process manages. Empty
@@ -265,8 +265,8 @@ spec:
                   Role is either RoleControlPlane or RoleWorker, derived from
                   spec.region and spec.zone — see registry.Role.
                 enum:
-                - controlplane
-                - worker
+                - ControlPlane
+                - Worker
                 type: string
               secretRef:
                 description: |-

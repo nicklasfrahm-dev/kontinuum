@@ -25,7 +25,7 @@ func TestNewControllerDefaultsIntervals(t *testing.T) {
 	t.Parallel()
 
 	controller := registry.NewController(registry.Config{
-		Role:   "controlplane",
+		Role:   "ControlPlane",
 		Logger: slog.Default(),
 	})
 
@@ -37,7 +37,7 @@ func TestNewControllerKeepsExplicitIntervals(t *testing.T) {
 	t.Parallel()
 
 	controller := registry.NewController(registry.Config{
-		Role:              "controlplane",
+		Role:              "ControlPlane",
 		Logger:            slog.Default(),
 		HeartbeatInterval: time.Second,
 		StaleThreshold:    10 * time.Second,

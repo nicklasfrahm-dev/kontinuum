@@ -7,9 +7,9 @@ import (
 const (
 	// RoleControlPlane identifies a Kontinuum as the read-write entrypoint —
 	// KONTINUUM_SERVER_REGION and KONTINUUM_SERVER_ZONE are both unset.
-	RoleControlPlane = "controlplane"
+	RoleControlPlane = "ControlPlane"
 	// RoleWorker identifies a Kontinuum as managing a single region and zone.
-	RoleWorker = "worker"
+	RoleWorker = "Worker"
 
 	// DefaultSecretNamespace is where status.secretRef.namespace points by
 	// default — created automatically if it doesn't already exist, since
@@ -57,7 +57,7 @@ type KontinuumStatus struct {
 	// Role is either RoleControlPlane or RoleWorker, derived from
 	// spec.region and spec.zone — see registry.Role.
 	// +optional
-	// +kubebuilder:validation:Enum=controlplane;worker
+	// +kubebuilder:validation:Enum=ControlPlane;Worker
 	Role string `json:"role"`
 	// LastHeartbeatTime is when this process last reported in. The server
 	// registry deletes a Kontinuum whose LastHeartbeatTime is older than

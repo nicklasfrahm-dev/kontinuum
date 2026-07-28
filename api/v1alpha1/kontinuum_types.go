@@ -7,9 +7,9 @@ import (
 const (
 	// RoleControlPlane identifies a Kontinuum as the read-write entrypoint —
 	// KONTINUUM_SERVER_REGION and KONTINUUM_SERVER_ZONE are both unset.
-	RoleControlPlane = "controlplane"
+	RoleControlPlane = "ControlPlane"
 	// RoleWorker identifies a Kontinuum as managing a single region and zone.
-	RoleWorker = "worker"
+	RoleWorker = "Worker"
 )
 
 // This marker is the CRD's actual, authoritative region/zone invariant —
@@ -28,7 +28,7 @@ const (
 // KontinuumSpec describes a single running kontinuum process.
 type KontinuumSpec struct {
 	// Role is either RoleControlPlane or RoleWorker.
-	// +kubebuilder:validation:Enum=controlplane;worker
+	// +kubebuilder:validation:Enum=ControlPlane;Worker
 	Role string `json:"role"`
 	// Region is the region this process manages. Empty when Role is RoleControlPlane.
 	Region string `json:"region,omitempty"`
