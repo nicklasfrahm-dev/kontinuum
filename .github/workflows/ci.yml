@@ -108,18 +108,8 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Run code generators
-        run: go generate ./...
-
-      # Selects every gated, Docker-requiring test by name convention
-      # (TestE2E* — see pkg/domain/instance/talos_e2e_test.go's own doc)
-      # rather than the whole suite: the `test` job above already covers
-      # everything else, and running it again here under KONTINUUM_TEST_E2E
-      # would just duplicate that work behind a slower, Docker-dependent job.
       - name: Run gated end-to-end tests
-        env:
-          KONTINUUM_TEST_E2E: "1"
-        run: go test ./... -run '^TestE2E' -v -timeout 5m
+        run: make test-e2e
 
   containerize:
     name: Containerize

@@ -89,6 +89,15 @@ image: ## Build the container image
 test: generate ## Run tests
 	$(GOTEST) -v ./...
 
+.PHONY: test-e2e
+# TestE2E* is this repo's naming convention (see
+# pkg/domain/instance/talos_e2e_test.go's own doc) for gated tests that need
+# Docker and boot real containers — selected by name here, and by
+# .github/workflows/ci.yml's "E2E" job, rather than run as part of the
+# default `test` target above.
+test-e2e: generate ## Run gated end-to-end tests (requires Docker; boots real containers)
+	KONTINUUM_TEST_E2E=1 $(GOTEST) -v ./... -run '^TestE2E' -timeout 5m
+
 .PHONY: vet
 vet: generate ## Run go vet
 	$(GOCMD) vet ./...
