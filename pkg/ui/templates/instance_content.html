@@ -7,7 +7,7 @@
 
     <div class="mb-6 flex items-center gap-3">
         <h1 class="text-xl font-bold text-white">{{.Name}}</h1>
-        {{if eq .Role "controlplane"}}
+        {{if eq .Role "ControlPlane"}}
         <span class="inline-flex items-center gap-1.5 bg-accent/10 border border-accent/30 rounded-full px-2.5 py-1 text-xs font-medium text-accent">Control Plane</span>
         {{else}}
         <span class="inline-flex items-center gap-1.5 bg-neutral-800 border border-neutral-700 rounded-full px-2.5 py-1 text-xs font-medium text-neutral-400">Worker</span>

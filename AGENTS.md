@@ -8,6 +8,7 @@
 - Linters may never be disabled via the config. Fix the code, not the linter.
 - Comments must be on their own line above the code, never on the same line. This applies to all files, including markdown code blocks.
 - If the Makefile is modified, the README.md make targets section must be updated with the output of `make help`.
+- All enums must be PascalCase, with abbreviations capitalized, following Kubernetes conventions (e.g. `ClusterIP`).
 
 ## Commits
 
