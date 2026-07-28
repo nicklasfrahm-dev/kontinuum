@@ -21,7 +21,7 @@ require (
 	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
-	github.com/kommodity-io/kommodity v0.151.1-0.20260727224712-3e6938e4e7bc
+	github.com/kommodity-io/kommodity v0.151.1
 	github.com/lmittmann/tint v1.2.0
 	github.com/siderolabs/kms-client v0.2.0
 	github.com/spf13/cobra v1.10.2
