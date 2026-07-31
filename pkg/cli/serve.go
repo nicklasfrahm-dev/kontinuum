@@ -25,6 +25,7 @@ import (
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/auth"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/registry"
 	"github.com/nicklasfrahm/kontinuum/pkg/logging"
 	"github.com/nicklasfrahm/kontinuum/pkg/ui"
@@ -216,8 +217,8 @@ func buildServer(
 		libkapi.WithAddr(cfg.Server.Addr),
 		libkapi.WithStorage(cfg.Server.Storage),
 		libkapi.WithLogger(logger),
-		libkapi.WithHTTPHandlerFactory(customHandlers(uiRouter, oidcHandler)),
-	}, authOpts, registryOpts)
+		libkapi.WithServerFactory(customHandlers(uiRouter, oidcHandler)),
+	}, authOpts, registryOpts, instanceOptions(logger))
 
 	// Storage is resolved against a background context so the backend
 	// is only torn down by Server.Shutdown, not by the signal context
@@ -279,6 +280,31 @@ func registryOptions(cfg *config.Config, logger *slog.Logger, scheme *runtime.Sc
 		libkapi.WithController(controller),
 		libkapi.WithWebhookServer(libkapi.WebhookConfig{Port: registry.ConversionWebhookPort}),
 	}, nil
+}
+
+// instanceOptions builds the libkapi options that wire the zone-join
+// build-out's first controller (see pkg/domain/instance) onto the Server:
+// WithPostStartHook ensures the four new CRDs (Zone, Instance, InstancePool,
+// TalosCluster) exist as soon as the listener is up, before the controller
+// manager starts — mirroring registryOptions' own ensureCRD timing, since
+// instance.EnsureCRDs has the identical ordering requirement. WithController
+// hands the Instance discovery reconciler off to libkapi's own Manager
+// lifecycle. Unlike registryOptions, this needs no WithScheme call (scheme
+// already carries these kinds — see buildServer's v1alpha2.AddToScheme) and
+// no webhook server (none of these four kinds have a conversion webhook).
+func instanceOptions(logger *slog.Logger) []libkapi.Option {
+	instanceLogger := logger.With("component", "instance")
+
+	controller := instance.NewController(instance.Config{Logger: instanceLogger})
+
+	ensureCRDs := func(ctx context.Context, loopbackConfig *rest.Config) error {
+		return instance.EnsureCRDs(ctx, loopbackConfig, instanceLogger)
+	}
+
+	return []libkapi.Option{
+		libkapi.WithPostStartHook(ensureCRDs),
+		libkapi.WithController(controller),
+	}
 }
 
 // displayConfig builds the non-confidential configuration snapshot written
@@ -403,8 +429,10 @@ func shutdownServer(server *libkapi.Server, logger *slog.Logger) error {
 // request that does not match a registered route falls through to the
 // Kubernetes API server's own handler. oidcHandler is nil when OIDC is not
 // configured, leaving the UI unprotected.
-func customHandlers(uiRouter *ui.Router, oidcHandler *auth.Handler) libkapi.HTTPHandlerFactory {
-	return func(mux *http.ServeMux) error {
+func customHandlers(uiRouter *ui.Router, oidcHandler *auth.Handler) libkapi.ServerFactory {
+	return func(c *libkapi.Ctx) error {
+		mux := c.HTTPMux()
+
 		var appRoot http.HandlerFunc
 
 		var protect func(http.HandlerFunc) http.HandlerFunc

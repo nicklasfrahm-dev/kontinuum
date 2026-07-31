@@ -21,12 +21,19 @@ func GroupVersion() schema.GroupVersion {
 	return schema.GroupVersion{Group: GroupName, Version: APIVersion}
 }
 
-// AddToScheme registers Kontinuum and KontinuumList with s.
-func AddToScheme(s *runtime.Scheme) error {
-	gv := GroupVersion()
+// AddToScheme registers Kontinuum, Zone, Instance, InstancePool,
+// TalosCluster, and their List types with scheme.
+func AddToScheme(scheme *runtime.Scheme) error {
+	groupVersion := GroupVersion()
 
-	s.AddKnownTypes(gv, &Kontinuum{}, &KontinuumList{})
-	metav1.AddToGroupVersion(s, gv)
+	scheme.AddKnownTypes(groupVersion,
+		&Kontinuum{}, &KontinuumList{},
+		&Zone{}, &ZoneList{},
+		&Instance{}, &InstanceList{},
+		&InstancePool{}, &InstancePoolList{},
+		&TalosCluster{}, &TalosClusterList{},
+	)
+	metav1.AddToGroupVersion(scheme, groupVersion)
 
 	return nil
 }
