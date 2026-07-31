@@ -216,7 +216,7 @@ func buildServer(
 		libkapi.WithAddr(cfg.Server.Addr),
 		libkapi.WithStorage(cfg.Server.Storage),
 		libkapi.WithLogger(logger),
-		libkapi.WithHTTPHandlerFactory(customHandlers(uiRouter, oidcHandler)),
+		libkapi.WithServerFactory(customHandlers(uiRouter, oidcHandler)),
 	}, authOpts, registryOpts)
 
 	// Storage is resolved against a background context so the backend
@@ -403,8 +403,10 @@ func shutdownServer(server *libkapi.Server, logger *slog.Logger) error {
 // request that does not match a registered route falls through to the
 // Kubernetes API server's own handler. oidcHandler is nil when OIDC is not
 // configured, leaving the UI unprotected.
-func customHandlers(uiRouter *ui.Router, oidcHandler *auth.Handler) libkapi.HTTPHandlerFactory {
-	return func(mux *http.ServeMux) error {
+func customHandlers(uiRouter *ui.Router, oidcHandler *auth.Handler) libkapi.ServerFactory {
+	return func(c *libkapi.Ctx) error {
+		mux := c.HTTPMux()
+
 		var appRoot http.HandlerFunc
 
 		var protect func(http.HandlerFunc) http.HandlerFunc
