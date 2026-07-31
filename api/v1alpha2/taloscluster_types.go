@@ -94,6 +94,14 @@ type TalosClusterStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions" patchMergeKey:"type" patchStrategy:"merge"`
+	// SecretRef points to the Secret holding this cluster's generated Talos
+	// secrets bundle (key "secrets-bundle") and, once bootstrapped, its
+	// kubeconfig (key "kubeconfig") — kept out of status directly for the
+	// same reason KontinuumStatus.SecretRef is: a Secret's RBAC can be
+	// restricted independently of who can read this broadly-visible
+	// TalosCluster object.
+	// +optional
+	SecretRef SecretReference `json:"secretRef"`
 }
 
 // +kubebuilder:object:root=true

@@ -22,3 +22,16 @@ type InstancePoolReference struct {
 	// Name is the referenced InstancePool's name.
 	Name string `json:"name"`
 }
+
+// SecretReference points to a Secret holding confidential data owned by
+// another object's status — kept as its own type (rather than reusing
+// KontinuumSecretReference) so TalosCluster's status doesn't couple to
+// Kontinuum's own type for what is otherwise an identical shape.
+type SecretReference struct {
+	// Name is the Secret's name.
+	// +optional
+	Name string `json:"name"`
+	// Namespace is the Secret's namespace.
+	// +optional
+	Namespace string `json:"namespace"`
+}
