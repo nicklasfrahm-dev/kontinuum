@@ -212,8 +212,7 @@ func (r *Reconciler) reconcileControlPlane(
 
 	controlPlaneAddr := dialAddress(members[0])
 
-	cpBytes, _, talosCfg, err := generateConfigs(
-		bundle, cluster.Name, controlPlaneAddr, cluster.Spec.ControlPlane.TalosVersionSpec)
+	cpBytes, _, talosCfg, err := generateConfigs(bundle, cluster, controlPlaneAddr)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to generate control plane config for %q: %w", cluster.Name, err)
 	}
@@ -310,11 +309,20 @@ func (r *Reconciler) installCiliumEarly(
 		return ctrl.Result{}, false, err
 	}
 
+	if !addonEnabled(cluster.Spec.Addons.Cilium) {
+		return ctrl.Result{}, true, nil
+	}
+
+	req, err := buildAddonRequest(cluster.Spec.Addons.Cilium, ciliumReleaseName, ciliumRepoURL, ciliumChartName,
+		defaultCiliumChartVersion, defaultCiliumNamespace, ciliumValues)
+	if err != nil {
+		return ctrl.Result{}, false, err
+	}
+
 	installCtx, cancel := context.WithTimeout(ctx, addonInstallTimeout)
 	defer cancel()
 
-	err = r.AddonInstaller.Install(installCtx, kubeconfig, ciliumReleaseName, ciliumRepoURL, ciliumChartName,
-		ciliumChartVersion, ciliumNamespace, ciliumValues())
+	err = r.AddonInstaller.Install(installCtx, kubeconfig, req)
 	if err != nil {
 		r.Logger.Warn("failed to install cilium", "cluster", cluster.Name, "error", err)
 
@@ -324,7 +332,7 @@ func (r *Reconciler) installCiliumEarly(
 		return result, false, condErr
 	}
 
-	healthy, reason, err := r.probeAddonHealthy(ctx, cluster, kubeconfig, "cilium", ciliumNamespace)
+	healthy, reason, err := r.probeAddonHealthy(ctx, cluster, kubeconfig, "cilium", req.Namespace)
 	if err != nil {
 		return ctrl.Result{}, false, err
 	}
@@ -387,8 +395,17 @@ func (r *Reconciler) reconcileWorkers(
 
 	controlPlaneAddr := dialAddress(controlPlaneMembers[0])
 
+	// Every worker pool shares the same cluster-wide talos/kubernetes
+	// version (see KubernetesSpec's own doc), so the machine config is
+	// generated once here and reused for every pool below, rather than
+	// per-pool as when versions could differ per worker.
+	_, workerBytes, _, err := generateConfigs(bundle, cluster, controlPlaneAddr)
+	if err != nil {
+		return fmt.Errorf("failed to generate worker config for %q: %w", cluster.Name, err)
+	}
+
 	for _, worker := range cluster.Spec.Workers {
-		err := r.reconcileWorkerPool(ctx, cluster, bundle, controlPlaneAddr, worker)
+		err := r.reconcileWorkerPool(ctx, cluster, worker, workerBytes)
 		if err != nil {
 			return err
 		}
@@ -397,19 +414,11 @@ func (r *Reconciler) reconcileWorkers(
 	return nil
 }
 
-// reconcileWorkerPool applies one worker pool's machine config to every
-// member claimed by worker.PoolRef.
+// reconcileWorkerPool applies workerBytes to every member claimed by
+// worker.PoolRef.
 func (r *Reconciler) reconcileWorkerPool(
-	ctx context.Context, cluster *v1alpha2.TalosCluster, bundle *talossecrets.Bundle,
-	controlPlaneAddr string, worker v1alpha2.TalosClusterWorkerSpec,
+	ctx context.Context, cluster *v1alpha2.TalosCluster, worker v1alpha2.TalosClusterWorkerSpec, workerBytes []byte,
 ) error {
-	versions := inheritVersions(worker.TalosVersionSpec, cluster.Spec.ControlPlane.TalosVersionSpec)
-
-	_, workerBytes, _, err := generateConfigs(bundle, cluster.Name, controlPlaneAddr, versions)
-	if err != nil {
-		return fmt.Errorf("failed to generate worker config for pool %q: %w", worker.PoolRef.Name, err)
-	}
-
 	members, err := resolveMembers(ctx, r.Client, worker.PoolRef)
 	if err != nil {
 		return err
@@ -433,7 +442,18 @@ func (r *Reconciler) reconcileWorkerPool(
 // Reconcile). Cilium is installed earlier, as part of reaching
 // ControlPlaneReady itself — see installCiliumEarly's own doc for why.
 func (r *Reconciler) reconcileAddons(ctx context.Context, cluster *v1alpha2.TalosCluster) (ctrl.Result, error) {
+	if !addonEnabled(cluster.Spec.Addons.CertManager) {
+		return r.setReadyCondition(ctx, cluster, metav1.ConditionTrue, reasonAddonsInstalled,
+			"cert-manager disabled, nothing to install")
+	}
+
 	kubeconfig, err := r.loadKubeconfig(ctx, cluster)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	req, err := buildAddonRequest(cluster.Spec.Addons.CertManager, certManagerReleaseName, certManagerRepoURL,
+		certManagerChartName, defaultCertManagerChartVersion, defaultCertManagerNamespace, certManagerValues)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -441,8 +461,7 @@ func (r *Reconciler) reconcileAddons(ctx context.Context, cluster *v1alpha2.Talo
 	installCtx, cancel := context.WithTimeout(ctx, addonInstallTimeout)
 	defer cancel()
 
-	err = r.AddonInstaller.Install(installCtx, kubeconfig, certManagerReleaseName, certManagerRepoURL,
-		certManagerChartName, certManagerChartVersion, certManagerNamespace, certManagerValues())
+	err = r.AddonInstaller.Install(installCtx, kubeconfig, req)
 	if err != nil {
 		r.Logger.Warn("failed to install cert-manager", "cluster", cluster.Name, "error", err)
 
@@ -450,7 +469,7 @@ func (r *Reconciler) reconcileAddons(ctx context.Context, cluster *v1alpha2.Talo
 			"cert-manager install failed: "+err.Error())
 	}
 
-	healthy, reason, err := r.probeAddonHealthy(ctx, cluster, kubeconfig, "cert-manager", certManagerNamespace)
+	healthy, reason, err := r.probeAddonHealthy(ctx, cluster, kubeconfig, "cert-manager", req.Namespace)
 	if err != nil {
 		return ctrl.Result{}, err
 	}

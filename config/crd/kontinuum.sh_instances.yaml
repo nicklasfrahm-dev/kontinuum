@@ -15,7 +15,7 @@ spec:
   scope: Cluster
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .status.talosVersion
+    - jsonPath: .status.talos.version
       name: TalosVersion
       type: string
     - jsonPath: .status.conditions[?(@.type=="Discovered")].status
@@ -182,11 +182,17 @@ spec:
                   - name
                   type: object
                 type: array
-              talosVersion:
+              talos:
                 description: |-
-                  TalosVersion is the Talos version this Instance reported while being
-                  probed.
-                type: string
+                  Talos groups every Talos-reported status value — see
+                  InstanceTalosStatus's own doc.
+                properties:
+                  version:
+                    description: |-
+                      Version is the Talos version this Instance reported while being
+                      probed.
+                    type: string
+                type: object
             type: object
         required:
         - metadata

@@ -89,7 +89,7 @@ func TestE2ETalosClusterBootstrapsAndWorkerJoins(t *testing.T) {
 	assertWorkerJoins(ctx, t, kubeconfig)
 
 	assertNamespaceHealthy(ctx, t, podProber, kubeconfig, "kube-system")
-	assertNamespaceHealthy(ctx, t, podProber, kubeconfig, "cert-manager")
+	assertNamespaceHealthy(ctx, t, podProber, kubeconfig, "kontinuum-system")
 }
 
 // assertNamespaceHealthy fails the test if not every pod in namespace

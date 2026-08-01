@@ -54,7 +54,7 @@ func ensureSecretsBundle(
 		return loadSecretsBundle(ctx, kubeClient, cluster.Status.SecretRef)
 	}
 
-	talosVersion, _ := resolveVersions(cluster.Spec.ControlPlane.TalosVersionSpec)
+	talosVersion, _ := resolveVersions(cluster)
 
 	contract, err := talosconfig.ParseContractFromVersion(talosVersion)
 	if err != nil {

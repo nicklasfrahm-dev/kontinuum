@@ -90,7 +90,7 @@ func TestE2EInstanceDiscoversRealTalosContainer(t *testing.T) {
 	var got v1alpha2.Instance
 
 	require.NoError(t, fakeClient.Get(ctx, client.ObjectKeyFromObject(obj), &got))
-	assert.NotEmpty(t, got.Status.TalosVersion)
+	assert.NotEmpty(t, got.Status.Talos.Version)
 	assert.NotEmpty(t, got.Status.Interfaces)
 	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, instance.DiscoveredConditionType))
 }

@@ -1,0 +1,5 @@
+# Default cert-manager install values. Merged with (and overridden by) any
+# user-supplied spec.addons.cert-manager.values — see mergeValues in
+# addons.go.
+crds:
+  enabled: true

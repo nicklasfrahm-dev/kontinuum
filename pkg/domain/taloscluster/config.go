@@ -40,20 +40,20 @@ const (
 )
 
 // resolveVersions fills in defaultTalosVersion/defaultKubernetesVersion for
-// whichever of v's fields are left empty, and strips a leading "v" from the
-// Kubernetes version: TalosVersionSpec.Kubernetes' own doc uses the
-// conventional "v1.32.0" form, but generate.NewInput's kubernetesVersion
-// argument is used bare (Talos machinery prepends its own "v" when
-// building image references like the kubelet image tag — passing an
-// already-prefixed value here doubles it into an invalid "vv1.32.0" tag
-// that fails to pull).
-func resolveVersions(versions v1alpha2.TalosVersionSpec) (string, string) {
-	talosVersion := versions.Talos
+// whichever of cluster's talos/kubernetes version fields are left empty,
+// and strips a leading "v" from the Kubernetes version: KubernetesSpec's
+// own doc uses the conventional "v1.32.0" form, but generate.NewInput's
+// kubernetesVersion argument is used bare (Talos machinery prepends its
+// own "v" when building image references like the kubelet image tag —
+// passing an already-prefixed value here doubles it into an invalid
+// "vv1.32.0" tag that fails to pull).
+func resolveVersions(cluster *v1alpha2.TalosCluster) (string, string) {
+	talosVersion := cluster.Spec.Talos.Version
 	if talosVersion == "" {
 		talosVersion = defaultTalosVersion
 	}
 
-	kubernetesVersion := versions.Kubernetes
+	kubernetesVersion := cluster.Spec.Kubernetes.Version
 	if kubernetesVersion == "" {
 		kubernetesVersion = defaultKubernetesVersion
 	}
@@ -61,23 +61,6 @@ func resolveVersions(versions v1alpha2.TalosVersionSpec) (string, string) {
 	kubernetesVersion = strings.TrimPrefix(kubernetesVersion, "v")
 
 	return talosVersion, kubernetesVersion
-}
-
-// inheritVersions fills in worker's empty Talos/Kubernetes fields from
-// controlPlane's own — a worker pool that leaves both unset always runs
-// exactly the control plane's versions, per-field, rather than silently
-// falling straight to the package defaults while the control plane runs
-// something else.
-func inheritVersions(worker, controlPlane v1alpha2.TalosVersionSpec) v1alpha2.TalosVersionSpec {
-	if worker.Talos == "" {
-		worker.Talos = controlPlane.Talos
-	}
-
-	if worker.Kubernetes == "" {
-		worker.Kubernetes = controlPlane.Kubernetes
-	}
-
-	return worker
 }
 
 // endpointFor builds the https://<addr>:6443 cluster endpoint embedded in
@@ -107,9 +90,11 @@ func endpointFor(addr string) string {
 // single-node cluster (this phase's common case — see decision 3/5) has
 // nowhere else for Cilium/CoreDNS/cert-manager to run.
 func generateConfigs(
-	bundle *talossecrets.Bundle, clusterName, controlPlaneAddr string, versions v1alpha2.TalosVersionSpec,
+	bundle *talossecrets.Bundle, cluster *v1alpha2.TalosCluster, controlPlaneAddr string,
 ) ([]byte, []byte, *clientconfig.Config, error) {
-	talosVersion, kubernetesVersion := resolveVersions(versions)
+	clusterName := cluster.Name
+
+	talosVersion, kubernetesVersion := resolveVersions(cluster)
 
 	contract, err := talosconfig.ParseContractFromVersion(talosVersion)
 	if err != nil {

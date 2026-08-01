@@ -2,6 +2,7 @@ package taloscluster_test
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -66,27 +68,14 @@ func (f *fakeBootstrapper) Kubeconfig(_ context.Context, _ string, _ *clientconf
 	return f.kubeconfig, nil
 }
 
-// addonInstallCall records one AddonInstaller.Install invocation's
-// arguments, for asserting the right chart/repo/namespace was used.
-type addonInstallCall struct {
-	releaseName string
-	repoURL     string
-	chartName   string
-	version     string
-	namespace   string
-	values      map[string]any
-}
-
 // fakeAddonInstaller is taloscluster.AddonInstaller's test double.
 type fakeAddonInstaller struct {
-	calls []addonInstallCall
+	calls []taloscluster.AddonInstallRequest
 	err   error
 }
 
-func (f *fakeAddonInstaller) Install(
-	_ context.Context, _ []byte, releaseName, repoURL, chartName, version, namespace string, values map[string]any,
-) error {
-	f.calls = append(f.calls, addonInstallCall{releaseName, repoURL, chartName, version, namespace, values})
+func (f *fakeAddonInstaller) Install(_ context.Context, _ []byte, req taloscluster.AddonInstallRequest) error {
+	f.calls = append(f.calls, req)
 
 	return f.err
 }
@@ -273,6 +262,85 @@ func TestReconcileCiliumNotHealthyBlocksControlPlaneReady(t *testing.T) {
 		"the health check must never run while cilium isn't healthy yet")
 }
 
+// TestReconcileCiliumDisabledSkipsInstall covers AddonSpec.Enabled: once
+// explicitly set false, ControlPlaneReady must go true without ever
+// calling AddonInstaller.Install or PodProber.NamespaceHealthy for cilium
+// — an addon a user has opted out of (e.g. because ArgoCD already owns it)
+// must never block the reconciler.
+func TestReconcileCiliumDisabledSkipsInstall(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	cluster.Spec.Addons.Cilium = v1alpha2.AddonSpec{Enabled: new(bool)}
+	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", "10.0.0.1")
+
+	fakeClient := newFakeClient(t, cluster, cpInstance)
+
+	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig")}
+	installer := &fakeAddonInstaller{}
+	prober := &fakePodProber{}
+	reconciler := newReconciler(fakeClient, bootstrapper, installer, prober)
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "eu-1a"},
+	})
+	require.NoError(t, err)
+	assert.Zero(t, result, "control plane becoming ready needs no requeue")
+	assert.Empty(t, installer.calls, "a disabled addon must never be installed")
+	assert.Empty(t, prober.calls, "a disabled addon must never be health-probed")
+
+	var got v1alpha2.TalosCluster
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a"}, &got))
+	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, taloscluster.ControlPlaneReadyConditionType))
+}
+
+// TestReconcileAddonNamespaceVersionAndValuesOverride covers
+// AddonSpec.Namespace/.Version/.Values all being honored together: the
+// resulting AddonInstallRequest carries the overridden namespace/version,
+// and the request's Values has the user-supplied value winning over the
+// package's own default for a conflicting key (kubeProxyReplacement),
+// while a default-only key (envoy.enabled) survives untouched — see
+// mergeValues' own doc for why.
+func TestReconcileAddonNamespaceVersionAndValuesOverride(t *testing.T) {
+	t.Parallel()
+
+	userValues, err := json.Marshal(map[string]any{"kubeProxyReplacement": false, "extraFlag": true})
+	require.NoError(t, err)
+
+	cluster := testCluster()
+	cluster.Spec.Addons.Cilium = v1alpha2.AddonSpec{
+		Namespace: "custom-cilium-ns",
+		Version:   "1.99.0",
+		Values:    &apiextensionsv1.JSON{Raw: userValues},
+	}
+
+	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", "10.0.0.1")
+
+	fakeClient := newFakeClient(t, cluster, cpInstance)
+
+	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig")}
+	installer := &fakeAddonInstaller{}
+	prober := &fakePodProber{}
+	reconciler := newReconciler(fakeClient, bootstrapper, installer, prober)
+
+	_, err = reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "eu-1a"},
+	})
+	require.NoError(t, err)
+
+	require.Len(t, installer.calls, 1)
+	req := installer.calls[0]
+	assert.Equal(t, "custom-cilium-ns", req.Namespace)
+	assert.Equal(t, "1.99.0", req.Version)
+	assert.Equal(t, false, req.Values["kubeProxyReplacement"], "user value must win over the package default")
+	assert.Equal(t, true, req.Values["extraFlag"], "a user-only key must survive the merge")
+
+	envoy, ok := req.Values["envoy"].(map[string]any)
+	require.True(t, ok, "a default-only key must survive the merge untouched")
+	assert.Equal(t, true, envoy["enabled"])
+}
+
 // TestReconcileCertManagerNotHealthyBlocksReady is
 // TestReconcileCiliumNotHealthyBlocksControlPlaneReady's counterpart for
 // cert-manager/Ready — control plane already ready, cert-manager's Install
@@ -301,7 +369,7 @@ func TestReconcileCertManagerNotHealthyBlocksReady(t *testing.T) {
 	bootstrapper := &fakeBootstrapper{}
 	installer := &fakeAddonInstaller{}
 	prober := &fakePodProber{results: map[string]namespaceHealthResult{
-		"cert-manager": {healthy: false, reason: "no pods found yet"},
+		"kontinuum-system": {healthy: false, reason: "no pods found yet"},
 	}}
 	reconciler := newReconciler(fakeClient, bootstrapper, installer, prober)
 
@@ -310,7 +378,7 @@ func TestReconcileCertManagerNotHealthyBlocksReady(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, testRetryInterval, result.RequeueAfter)
-	assert.Equal(t, []string{"cert-manager"}, prober.calls)
+	assert.Equal(t, []string{"kontinuum-system"}, prober.calls)
 
 	var got v1alpha2.TalosCluster
 
@@ -348,7 +416,7 @@ func TestReconcileCiliumInstallFailureBlocksControlPlaneReady(t *testing.T) {
 	assert.Equal(t, testRetryInterval, result.RequeueAfter)
 	assert.Equal(t, []string{"10.0.0.1"}, bootstrapper.bootstrapCalls)
 	require.Len(t, installer.calls, 1, "only cilium is attempted, never cert-manager")
-	assert.Equal(t, "cilium", installer.calls[0].releaseName)
+	assert.Equal(t, "cilium", installer.calls[0].ReleaseName)
 
 	var got v1alpha2.TalosCluster
 
@@ -392,9 +460,9 @@ func TestReconcileFullSequence(t *testing.T) {
 		"only the control-plane member is touched before ControlPlaneReady")
 
 	require.Len(t, installer.calls, 1, "cilium installs as soon as the apiserver is reachable, not after full health")
-	assert.Equal(t, "cilium", installer.calls[0].releaseName)
-	assert.Equal(t, "https://helm.cilium.io", installer.calls[0].repoURL)
-	assert.Equal(t, "kube-system", installer.calls[0].namespace)
+	assert.Equal(t, "cilium", installer.calls[0].ReleaseName)
+	assert.Equal(t, "https://helm.cilium.io", installer.calls[0].RepoURL)
+	assert.Equal(t, "kube-system", installer.calls[0].Namespace)
 
 	var afterFirst v1alpha2.TalosCluster
 
@@ -417,9 +485,9 @@ func TestReconcileFullSequence(t *testing.T) {
 		"the worker is only touched on the reconcile after ControlPlaneReady")
 
 	require.Len(t, installer.calls, 2)
-	assert.Equal(t, "cert-manager", installer.calls[1].releaseName)
-	assert.Equal(t, "https://charts.jetstack.io", installer.calls[1].repoURL)
-	assert.Equal(t, "cert-manager", installer.calls[1].namespace)
+	assert.Equal(t, "cert-manager", installer.calls[1].ReleaseName)
+	assert.Equal(t, "https://charts.jetstack.io", installer.calls[1].RepoURL)
+	assert.Equal(t, "kontinuum-system", installer.calls[1].Namespace)
 
 	var afterSecond v1alpha2.TalosCluster
 

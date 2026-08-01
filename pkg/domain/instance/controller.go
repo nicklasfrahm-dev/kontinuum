@@ -138,7 +138,7 @@ func (r *Reconciler) probeCandidates(ctx context.Context, inst *v1alpha2.Instanc
 	for _, candidate := range inst.Spec.Interfaces {
 		talosVersion, interfaces, err := r.probe(ctx, candidate)
 		if err == nil {
-			inst.Status.TalosVersion = talosVersion
+			inst.Status.Talos.Version = talosVersion
 			inst.Status.Interfaces = interfaces
 
 			return r.setDiscovered(ctx, inst, metav1.ConditionTrue, reasonDiscovered, "discovered via "+candidate)
