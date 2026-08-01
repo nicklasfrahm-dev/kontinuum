@@ -125,7 +125,13 @@ func loadChart(chartName, repoURL, version string) (*chart.Chart, error) {
 }
 
 // installRelease runs a fresh `helm install`, creating namespace if it
-// doesn't already exist.
+// doesn't already exist. Deliberately non-blocking (no Wait/WaitForJobs):
+// this returns as soon as the manifests are applied, without waiting for
+// any pod to actually start. Pod health is gated separately, by
+// PodProber, on a later reconcile — matching this reconciler's existing
+// self-healing, non-blocking pattern (ApplyConfiguration/Bootstrap don't
+// block for completion either) rather than tying up the calling reconcile
+// for however long a cold rollout takes.
 func installRelease(
 	ctx context.Context, actionConfig *action.Configuration, releaseName, namespace string,
 	chrt *chart.Chart, values map[string]any,
@@ -144,7 +150,7 @@ func installRelease(
 }
 
 // upgradeRelease runs `helm upgrade` in place against an already-installed
-// release.
+// release — see installRelease's own doc for why this stays non-blocking.
 func upgradeRelease(
 	ctx context.Context, actionConfig *action.Configuration, releaseName, namespace string,
 	chrt *chart.Chart, values map[string]any,
@@ -193,17 +199,73 @@ func writeTempKubeconfig(kubeconfig []byte) (string, func(), error) {
 
 // ciliumValues builds the Helm values for the Cilium install — envoy and
 // node LB IPAM enabled, kube-proxy replaced, per the issue's own scope.
-// apiServerHost/apiServerPort must point at the real Kubernetes API
-// endpoint: with kube-proxy disabled, Cilium can no longer discover it any
-// other way, and the agent fails to start without these set explicitly.
-func ciliumValues(apiServerHost string, apiServerPort int) map[string]any {
+// These follow Talos's own documented Cilium install
+// (docs.siderolabs.com/kubernetes-guides/cni/deploying-cilium), not just the
+// chart's defaults — every non-obvious value below diverges from that
+// default for a specific, Talos-driven reason.
+//
+// k8sServiceHost/k8sServicePort point at KubePrism, Talos's own built-in
+// local apiserver proxy that every node runs on localhost:7445 — not a
+// specific control-plane member's address. With kube-proxy disabled,
+// Cilium can't discover the apiserver any other way, and the agent won't
+// start without these set explicitly; KubePrism sidesteps needing a real
+// control-plane load balancer, since every node's own copy is always
+// reachable at the same fixed address regardless of which (or how many)
+// control-plane members exist.
+//
+// securityContext.capabilities pins the agent and clean-cilium-state init
+// container to Talos's reduced capability sets, instead of the chart's own
+// broader defaults. clean-cilium-state in particular is otherwise prone to
+// "OCI runtime create failed: ... unable to apply caps: can't apply
+// capabilities: operation not permitted" — the chart's default set isn't
+// fully grantable under Talos's own container runtime constraints.
+//
+// cgroup.autoMount.enabled is disabled, with hostRoot pointed at Talos's
+// own cgroup2 mount: Talos already mounts cgroup2 itself, so Cilium's own
+// redundant auto-mount inside its init container is both unnecessary and,
+// under the same capability constraints as above, another likely source of
+// that same "operation not permitted" failure.
+//
+// ipam.mode is set to "kubernetes" per Talos's own guide — Cilium reads pod
+// CIDRs from each Node's own spec rather than running its own IPAM
+// allocator, which needs no extra moving parts on a Talos-managed cluster.
+//
+// operator.replicas is pinned to 1: the chart's own default is 2 (for HA)
+// with operator.hostNetwork: true, which makes the operator's prometheus
+// containerPort an implicit hostPort. On a single-node cluster (every
+// TalosCluster this reconciler bootstraps today — see
+// AllowSchedulingOnControlPlanes in config.go) a second replica can never
+// be scheduled: it permanently fails with "0/1 nodes are available: ...
+// didn't have free ports for the requested pod ports", which is exactly
+// what a two-replica default looks like from PodProber's perspective —
+// bare Pending that never resolves, indistinguishable from a genuine hang
+// without inspecting the pod's own PodScheduled condition message. The
+// chart's own values.yaml even documents this, verbatim: "In HA mode,
+// cilium-operator pods must not be scheduled on the same node as they will
+// clash with each other".
+func ciliumValues() map[string]any {
 	return map[string]any{
 		"kubeProxyReplacement": true,
-		"k8sServiceHost":       apiServerHost,
-		"k8sServicePort":       apiServerPort,
+		"k8sServiceHost":       "localhost",
+		"k8sServicePort":       kubePrismPort,
 		"envoy":                map[string]any{"enabled": true},
 		"l2announcements":      map[string]any{"enabled": true},
 		"nodeIPAM":             map[string]any{"enabled": true},
+		"operator":             map[string]any{"replicas": 1},
+		"ipam":                 map[string]any{"mode": "kubernetes"},
+		"cgroup": map[string]any{
+			"autoMount": map[string]any{"enabled": false},
+			"hostRoot":  "/sys/fs/cgroup",
+		},
+		"securityContext": map[string]any{
+			"capabilities": map[string]any{
+				"ciliumAgent": []string{
+					"CHOWN", "KILL", "NET_ADMIN", "NET_RAW", "IPC_LOCK", "SYS_ADMIN",
+					"SYS_RESOURCE", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID",
+				},
+				"cleanCiliumState": []string{"NET_ADMIN", "SYS_ADMIN", "SYS_RESOURCE"},
+			},
+		},
 	}
 }
 

@@ -91,6 +91,33 @@ func (f *fakeAddonInstaller) Install(
 	return f.err
 }
 
+// namespaceHealthResult is one PodProber.NamespaceHealthy fake result.
+type namespaceHealthResult struct {
+	healthy bool
+	reason  string
+	err     error
+}
+
+// fakePodProber is taloscluster.PodProber's test double. A namespace with
+// no configured result defaults to healthy — most tests don't care about
+// pod health specifically and just need the addon-install-succeeded path
+// to keep progressing.
+type fakePodProber struct {
+	results map[string]namespaceHealthResult
+	calls   []string
+}
+
+func (f *fakePodProber) NamespaceHealthy(_ context.Context, _ []byte, namespace string) (bool, string, error) {
+	f.calls = append(f.calls, namespace)
+
+	result, ok := f.results[namespace]
+	if !ok {
+		return true, "", nil
+	}
+
+	return result.healthy, result.reason, result.err
+}
+
 func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
 	t.Helper()
 
@@ -133,12 +160,13 @@ func testCluster() *v1alpha2.TalosCluster {
 }
 
 func newReconciler(
-	fakeClient client.Client, bootstrapper *fakeBootstrapper, installer *fakeAddonInstaller,
+	fakeClient client.Client, bootstrapper *fakeBootstrapper, installer *fakeAddonInstaller, prober *fakePodProber,
 ) *taloscluster.Reconciler {
 	return &taloscluster.Reconciler{
 		Client:             fakeClient,
 		Bootstrapper:       bootstrapper,
 		AddonInstaller:     installer,
+		PodProber:          prober,
 		HealthCheckTimeout: testHealthCheckTimeout,
 		RetryInterval:      testRetryInterval,
 		Logger:             slog.Default(),
@@ -153,7 +181,8 @@ func TestReconcileWaitsForControlPlaneInstances(t *testing.T) {
 
 	bootstrapper := &fakeBootstrapper{}
 	installer := &fakeAddonInstaller{}
-	reconciler := newReconciler(fakeClient, bootstrapper, installer)
+	prober := &fakePodProber{}
+	reconciler := newReconciler(fakeClient, bootstrapper, installer, prober)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "eu-1a"},
@@ -182,7 +211,8 @@ func TestReconcileControlPlaneNotYetHealthy(t *testing.T) {
 
 	bootstrapper := &fakeBootstrapper{healthCheckErr: assert.AnError}
 	installer := &fakeAddonInstaller{}
-	reconciler := newReconciler(fakeClient, bootstrapper, installer)
+	prober := &fakePodProber{}
+	reconciler := newReconciler(fakeClient, bootstrapper, installer, prober)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "eu-1a"},
@@ -202,6 +232,96 @@ func TestReconcileControlPlaneNotYetHealthy(t *testing.T) {
 	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, taloscluster.BootstrappedConditionType))
 }
 
+// TestReconcileCiliumNotHealthyBlocksControlPlaneReady covers
+// probeAddonHealthy's gating of ControlPlaneReady: even though the Cilium
+// Install call itself succeeds (installRelease/upgradeRelease only apply
+// manifests, they don't wait for rollout — see that doc), ControlPlaneReady
+// must not go true, and the health check must never run, until Cilium's
+// own pods actually report healthy.
+func TestReconcileCiliumNotHealthyBlocksControlPlaneReady(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", "10.0.0.1")
+
+	fakeClient := newFakeClient(t, cluster, cpInstance)
+
+	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig")}
+	installer := &fakeAddonInstaller{}
+	prober := &fakePodProber{results: map[string]namespaceHealthResult{
+		"kube-system": {healthy: false, reason: "kube-system/cilium-abc123 is Running but not Ready"},
+	}}
+	reconciler := newReconciler(fakeClient, bootstrapper, installer, prober)
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "eu-1a"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, testRetryInterval, result.RequeueAfter)
+	require.Len(t, installer.calls, 1, "cilium install is still attempted")
+	assert.Equal(t, []string{"kube-system"}, prober.calls)
+
+	var got v1alpha2.TalosCluster
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a"}, &got))
+
+	cond := meta.FindStatusCondition(got.Status.Conditions, taloscluster.ControlPlaneReadyConditionType)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, "AddonNotHealthy", cond.Reason)
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, taloscluster.BootstrappedConditionType),
+		"the health check must never run while cilium isn't healthy yet")
+}
+
+// TestReconcileCertManagerNotHealthyBlocksReady is
+// TestReconcileCiliumNotHealthyBlocksControlPlaneReady's counterpart for
+// cert-manager/Ready — control plane already ready, cert-manager's Install
+// call succeeds, but its pods aren't healthy yet.
+func TestReconcileCertManagerNotHealthyBlocksReady(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	cluster.Status.Conditions = []metav1.Condition{
+		{Type: taloscluster.ControlPlaneReadyConditionType, Status: metav1.ConditionTrue, Reason: "Healthy"},
+	}
+	cluster.Status.SecretRef = v1alpha2.SecretReference{
+		Name: "taloscluster-eu-1a", Namespace: v1alpha2.DefaultSecretNamespace,
+	}
+	cluster.Spec.Workers = nil
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "taloscluster-eu-1a", Namespace: v1alpha2.DefaultSecretNamespace},
+		Data:       map[string][]byte{"secrets-bundle": []byte("{}"), "kubeconfig": []byte("fake-kubeconfig")},
+	}
+
+	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", "10.0.0.1")
+
+	fakeClient := newFakeClient(t, cluster, cpInstance, secret)
+
+	bootstrapper := &fakeBootstrapper{}
+	installer := &fakeAddonInstaller{}
+	prober := &fakePodProber{results: map[string]namespaceHealthResult{
+		"cert-manager": {healthy: false, reason: "no pods found yet"},
+	}}
+	reconciler := newReconciler(fakeClient, bootstrapper, installer, prober)
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "eu-1a"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, testRetryInterval, result.RequeueAfter)
+	assert.Equal(t, []string{"cert-manager"}, prober.calls)
+
+	var got v1alpha2.TalosCluster
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a"}, &got))
+
+	cond := meta.FindStatusCondition(got.Status.Conditions, taloscluster.ReadyConditionType)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, "AddonNotHealthy", cond.Reason)
+}
+
 // TestReconcileCiliumInstallFailureBlocksControlPlaneReady covers
 // installCiliumEarly's own failure branch — distinct from
 // TestReconcileControlPlaneNotYetHealthy's health-check failure — and
@@ -218,7 +338,8 @@ func TestReconcileCiliumInstallFailureBlocksControlPlaneReady(t *testing.T) {
 
 	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig")}
 	installer := &fakeAddonInstaller{err: assert.AnError}
-	reconciler := newReconciler(fakeClient, bootstrapper, installer)
+	prober := &fakePodProber{}
+	reconciler := newReconciler(fakeClient, bootstrapper, installer, prober)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "eu-1a"},
@@ -259,7 +380,8 @@ func TestReconcileFullSequence(t *testing.T) {
 
 	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig")}
 	installer := &fakeAddonInstaller{}
-	reconciler := newReconciler(fakeClient, bootstrapper, installer)
+	prober := &fakePodProber{}
+	reconciler := newReconciler(fakeClient, bootstrapper, installer, prober)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "eu-1a"}}
 
@@ -328,7 +450,8 @@ func TestReconcileAddonInstallFailureSetsReadyFalse(t *testing.T) {
 
 	bootstrapper := &fakeBootstrapper{}
 	installer := &fakeAddonInstaller{err: assert.AnError}
-	reconciler := newReconciler(fakeClient, bootstrapper, installer)
+	prober := &fakePodProber{}
+	reconciler := newReconciler(fakeClient, bootstrapper, installer, prober)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "eu-1a"},
@@ -351,7 +474,7 @@ func TestReconcileIgnoresMissingCluster(t *testing.T) {
 	t.Parallel()
 
 	fakeClient := newFakeClient(t)
-	reconciler := newReconciler(fakeClient, &fakeBootstrapper{}, &fakeAddonInstaller{})
+	reconciler := newReconciler(fakeClient, &fakeBootstrapper{}, &fakeAddonInstaller{}, &fakePodProber{})
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "missing"},

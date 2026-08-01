@@ -37,6 +37,7 @@ const (
 	reasonAddonsInstalled     = "AddonsInstalled"
 	reasonAddonInstallFailed  = "AddonInstallFailed"
 	reasonCiliumInstallFailed = "CiliumInstallFailed"
+	reasonAddonNotHealthy     = "AddonNotHealthy"
 
 	defaultHealthCheckTimeout = 10 * time.Second
 	defaultRetryInterval      = 15 * time.Second
@@ -44,15 +45,17 @@ const (
 	// addonInstallTimeout bounds every Helm install/upgrade call on the
 	// client side. Neither Cilium's nor cert-manager's chart fetch/apply
 	// carries any deadline of its own — without wrapping ctx here, a
-	// stalled chart download or a slow apply against a freshly-booted
-	// apiserver can block the reconcile that invoked it indefinitely (see
-	// this package's own bootstrap.go rpcTimeout for the identical
-	// rationale applied to the Talos RPCs). Five minutes gives a cold
-	// first attempt (image pulls, waiting for pods to actually go Ready
-	// against a just-booted apiserver) a realistic chance to converge in
-	// one pass rather than routinely timing out and relying on the next
-	// reconcile's retry.
-	addonInstallTimeout = 5 * time.Minute
+	// stalled chart download can block the reconcile that invoked it
+	// indefinitely (see this package's own bootstrap.go rpcTimeout for the
+	// identical rationale applied to the Talos RPCs). The install/upgrade
+	// calls themselves are non-blocking (no Wait/WaitForJobs) — they only
+	// apply manifests; whether the resulting pods are actually healthy is
+	// checked separately, by PodProber, on a later reconcile — so this
+	// timeout only needs to cover the apply itself, not a full rollout.
+	addonInstallTimeout = 30 * time.Second
+
+	// podProbeTimeout bounds each PodProber.NamespaceHealthy call.
+	podProbeTimeout = 15 * time.Second
 )
 
 // errKubeconfigNotStored is a static sentinel — err113 flags a dynamically
@@ -69,6 +72,10 @@ type Config struct {
 	// AddonInstaller installs Cilium and cert-manager once the control
 	// plane is healthy. Defaults to NewHelmInstaller() when nil.
 	AddonInstaller AddonInstaller
+	// PodProber checks whether an installed addon's pods are actually
+	// healthy — installRelease/upgradeRelease only apply manifests, they
+	// don't wait for rollout. Defaults to NewPodProber() when nil.
+	PodProber PodProber
 	// HealthCheckTimeout bounds each control-plane health-check attempt.
 	// Defaults to ten seconds when zero.
 	HealthCheckTimeout time.Duration
@@ -94,6 +101,10 @@ func NewController(cfg Config) *Controller {
 		cfg.AddonInstaller = NewHelmInstaller()
 	}
 
+	if cfg.PodProber == nil {
+		cfg.PodProber = NewPodProber()
+	}
+
 	if cfg.HealthCheckTimeout == 0 {
 		cfg.HealthCheckTimeout = defaultHealthCheckTimeout
 	}
@@ -115,6 +126,7 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		Client:             mgr.GetClient(),
 		Bootstrapper:       c.Config.Bootstrapper,
 		AddonInstaller:     c.Config.AddonInstaller,
+		PodProber:          c.Config.PodProber,
 		HealthCheckTimeout: c.Config.HealthCheckTimeout,
 		RetryInterval:      c.Config.RetryInterval,
 		Logger:             c.Config.Logger,
@@ -137,6 +149,7 @@ type Reconciler struct {
 	Client             client.Client
 	Bootstrapper       ClusterBootstrapper
 	AddonInstaller     AddonInstaller
+	PodProber          PodProber
 	HealthCheckTimeout time.Duration
 	RetryInterval      time.Duration
 	Logger             *slog.Logger
@@ -301,7 +314,7 @@ func (r *Reconciler) installCiliumEarly(
 	defer cancel()
 
 	err = r.AddonInstaller.Install(installCtx, kubeconfig, ciliumReleaseName, ciliumRepoURL, ciliumChartName,
-		ciliumChartVersion, ciliumNamespace, ciliumValues(controlPlaneAddr, kubernetesAPIPort))
+		ciliumChartVersion, ciliumNamespace, ciliumValues())
 	if err != nil {
 		r.Logger.Warn("failed to install cilium", "cluster", cluster.Name, "error", err)
 
@@ -311,7 +324,43 @@ func (r *Reconciler) installCiliumEarly(
 		return result, false, condErr
 	}
 
+	healthy, reason, err := r.probeAddonHealthy(ctx, cluster, kubeconfig, "cilium", ciliumNamespace)
+	if err != nil {
+		return ctrl.Result{}, false, err
+	}
+
+	if !healthy {
+		result, condErr := r.setControlPlaneCondition(ctx, cluster, metav1.ConditionFalse, reasonAddonNotHealthy,
+			"Waiting for cilium pods to become healthy: "+reason)
+
+		return result, false, condErr
+	}
+
 	return ctrl.Result{}, true, nil
+}
+
+// probeAddonHealthy checks namespace's pods via PodProber — installRelease/
+// upgradeRelease only apply manifests, they don't wait for rollout, so
+// this is the step that actually confirms an addon is usable, not just
+// applied. addon names which chart this is checking (e.g. "cilium",
+// "cert-manager"), for the log line only — callers build their own
+// condition message from the returned reason.
+func (r *Reconciler) probeAddonHealthy(
+	ctx context.Context, cluster *v1alpha2.TalosCluster, kubeconfig []byte, addon, namespace string,
+) (bool, string, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, podProbeTimeout)
+	defer cancel()
+
+	healthy, reason, err := r.PodProber.NamespaceHealthy(probeCtx, kubeconfig, namespace)
+	if err != nil {
+		return false, "", fmt.Errorf("failed to probe pod health for %s in %q: %w", addon, namespace, err)
+	}
+
+	if !healthy {
+		r.Logger.Warn("Addon pods not yet healthy", "cluster", cluster.Name, "addon", addon, "reason", reason)
+	}
+
+	return healthy, reason, nil
 }
 
 // reconcileWorkers applies each worker pool's machine config to its
@@ -399,6 +448,16 @@ func (r *Reconciler) reconcileAddons(ctx context.Context, cluster *v1alpha2.Talo
 
 		return r.setReadyCondition(ctx, cluster, metav1.ConditionFalse, reasonAddonInstallFailed,
 			"cert-manager install failed: "+err.Error())
+	}
+
+	healthy, reason, err := r.probeAddonHealthy(ctx, cluster, kubeconfig, "cert-manager", certManagerNamespace)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if !healthy {
+		return r.setReadyCondition(ctx, cluster, metav1.ConditionFalse, reasonAddonNotHealthy,
+			"Waiting for cert-manager pods to become healthy: "+reason)
 	}
 
 	return r.setReadyCondition(ctx, cluster, metav1.ConditionTrue, reasonAddonsInstalled, "cert-manager installed")

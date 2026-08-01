@@ -31,6 +31,12 @@ const (
 	// build the cluster endpoint embedded in every generated machine
 	// config.
 	kubernetesAPIPort = 6443
+
+	// kubePrismPort is the fixed local port Talos's own KubePrism apiserver
+	// proxy listens on, on every node — see ciliumValues' own doc for why
+	// Cilium is pointed at localhost:kubePrismPort instead of a specific
+	// control-plane member's address.
+	kubePrismPort = 7445
 )
 
 // resolveVersions fills in defaultTalosVersion/defaultKubernetesVersion for

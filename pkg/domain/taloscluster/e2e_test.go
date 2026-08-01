@@ -38,6 +38,7 @@ const (
 	e2eHealthCheckTimeout    = 60 * time.Second
 	e2eRetryInterval         = 15 * time.Second
 	e2eWorkerJoinTimeout     = 5 * time.Minute
+	e2eAddonHealthTimeout    = 3 * time.Minute
 )
 
 // TestE2ETalosClusterBootstrapsAndWorkerJoins is the gated, opt-in
@@ -72,7 +73,55 @@ func TestE2ETalosClusterBootstrapsAndWorkerJoins(t *testing.T) {
 
 	kubeconfig := fetchKubeconfig(ctx, t, fakeClient, got.Status.SecretRef)
 
+	// The reconciler itself already gates ControlPlaneReady/Ready on Cilium
+	// and cert-manager both being healthy (see probeAddonHealthy) — but
+	// only as of the control-plane node's own pods, checked before the
+	// worker ever joins. assertWorkerJoins runs first, deliberately, so the
+	// worker's own Cilium DaemonSet pod — a brand-new pod that starts its
+	// own Pending→Init→Running→Ready cycle the moment the worker node
+	// registers, entirely independent of the control-plane pod's already-
+	// healthy one — has actually been scheduled before this checks
+	// kube-system at all. assertNamespaceHealthy still polls rather than
+	// checking once, since "worker just joined" only bounds when that pod
+	// starts existing, not how long it then takes to converge.
+	podProber := taloscluster.NewPodProber()
+
 	assertWorkerJoins(ctx, t, kubeconfig)
+
+	assertNamespaceHealthy(ctx, t, podProber, kubeconfig, "kube-system")
+	assertNamespaceHealthy(ctx, t, podProber, kubeconfig, "cert-manager")
+}
+
+// assertNamespaceHealthy fails the test if not every pod in namespace
+// becomes healthy within e2eAddonHealthTimeout — see
+// taloscluster.PodProber.NamespaceHealthy's own doc for what "healthy"
+// means. Polls instead of checking once: a namespace can legitimately
+// contain a freshly-scheduled, not-yet-healthy pod whenever cluster
+// membership changes (see TestE2ETalosClusterBootstrapsAndWorkerJoins' own
+// doc on assertWorkerJoins running first) — that's expected convergence,
+// not a failure, and deserves a chance to settle rather than being judged
+// on a single instant.
+func assertNamespaceHealthy(
+	ctx context.Context, t *testing.T, podProber taloscluster.PodProber, kubeconfig []byte, namespace string,
+) {
+	t.Helper()
+
+	var reason string
+
+	converged := assert.Eventually(t, func() bool {
+		healthy, probeReason, err := podProber.NamespaceHealthy(ctx, kubeconfig, namespace)
+		if err != nil {
+			t.Logf("failed to probe %q pod health (may be transient): %v", namespace, err)
+
+			return false
+		}
+
+		reason = probeReason
+
+		return healthy
+	}, e2eAddonHealthTimeout, e2eReconcileTick)
+
+	assert.True(t, converged, "pods in %q never became healthy: %s", namespace, reason)
 }
 
 // reconcileUntilReady calls reconciler.Reconcile sequentially — waiting for
@@ -162,6 +211,7 @@ func setupE2ECluster(ctx context.Context, t *testing.T) (client.Client, *taloscl
 		Client:             fakeClient,
 		Bootstrapper:       taloscluster.NewTalosBootstrapper(logger),
 		AddonInstaller:     taloscluster.NewHelmInstaller(),
+		PodProber:          taloscluster.NewPodProber(),
 		HealthCheckTimeout: e2eHealthCheckTimeout,
 		RetryInterval:      e2eRetryInterval,
 		Logger:             logger,
