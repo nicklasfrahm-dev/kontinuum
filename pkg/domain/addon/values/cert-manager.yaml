@@ -1,0 +1,17 @@
+# Default cert-manager install — chart identity/version, namespace, and
+# Helm values all live together here — see cilium.yaml's own doc for why.
+# values are merged with (and overridden by) any user-supplied
+# spec.values for an Addon named "cert-manager".
+chart:
+  repo: https://charts.jetstack.io
+  version: v1.21.1
+namespace:
+  name: kontinuum-system
+lifecycle:
+  priority: 100
+values:
+  crds:
+    enabled: true
+  config:
+    gatewayAPI:
+      enabled: true

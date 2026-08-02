@@ -1,0 +1,39 @@
+# Gateway API CRDs — a required prerequisite for enabling Gateway API
+# support in cilium's and cert-manager's own charts (see their own
+# values files' gatewayAPI/enableGatewayAPI toggles): both assume the
+# Gateway API CRDs already exist, neither chart installs them itself.
+# This chart installs no pods of its own at all — PodProber's own "no
+# pods" gate (see its own doc) checks for exactly that instead of
+# vacuously passing. Only the standard Gateway API CRDs are enabled —
+# not Envoy Gateway's own extension CRDs (gateway.envoyproxy.io/*),
+# which are irrelevant here since Cilium implements Gateway API itself,
+# not Envoy Gateway. namespace is shared with cert-manager's own —
+# harmless, since PodProber's own health probe filters by this addon's
+# own release/chart label, not every pod in the namespace (see that
+# package's own doc).
+chart:
+  name: "oci://docker.io/envoyproxy/gateway-crds-helm"
+  version: 1.8.3
+namespace:
+  name: kontinuum-system
+lifecycle:
+  # Lower than the global default (100, see AddonLifecycleSpec.Priority's
+  # own doc) so this addon's own Reconciler blocks cilium/cert-manager
+  # from installing until these CRDs exist first — see EffectivePriority
+  # and Reconciler's own priority-wave gating. The exact number doesn't
+  # matter beyond "lower than cilium/cert-manager's own 100" — 50 just
+  # leaves headroom on both sides for a future addon to slot in between.
+  priority: 50
+  provisioning:
+    # KubectlApply (client-side render + real server-side apply), not the
+    # default HelmUpgradeInstall: the full standard Gateway API CRD set is
+    # large enough that a Helm release record (a single Secret, gzip-
+    # compressed but still capped at 1MiB) can't hold it — installing via
+    # HelmUpgradeInstall fails outright with a "Too long" apiserver error.
+    # See installViaKubectlApply's own doc for why this path exists at all.
+    method: KubectlApply
+values:
+  crds:
+    gatewayAPI:
+      enabled: true
+      channel: standard

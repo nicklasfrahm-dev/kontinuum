@@ -36,6 +36,16 @@ type InstanceInterfaceStatus struct {
 	Addresses []string `json:"addresses"`
 }
 
+// InstanceTalosStatus groups every Talos-reported status value under
+// status.talos — currently just Version, but the natural home for
+// anything else Talos itself reports about this Instance later.
+type InstanceTalosStatus struct {
+	// Version is the Talos version this Instance reported while being
+	// probed.
+	// +optional
+	Version string `json:"version"`
+}
+
 // InstanceStatus reports this Instance's discovery/probing result. Every
 // field is +optional despite lacking omitempty — see KontinuumStatus's own
 // doc for why: the status subresource strips whatever the main endpoint's
@@ -47,10 +57,10 @@ type InstanceStatus struct {
 	// identical contract either way.
 	// +optional
 	Interfaces []InstanceInterfaceStatus `json:"interfaces"`
-	// TalosVersion is the Talos version this Instance reported while being
-	// probed.
+	// Talos groups every Talos-reported status value — see
+	// InstanceTalosStatus's own doc.
 	// +optional
-	TalosVersion string `json:"talosVersion"`
+	Talos InstanceTalosStatus `json:"talos"`
 	// Conditions reports this Instance's state. Discovered is set true once
 	// one of spec.interfaces has been successfully probed.
 	// +optional
@@ -64,7 +74,7 @@ type InstanceStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
-// +kubebuilder:printcolumn:name="TalosVersion",type="string",JSONPath=".status.talosVersion"
+// +kubebuilder:printcolumn:name="TalosVersion",type="string",JSONPath=".status.talos.version"
 // The line exceeds this repo's normal length limit, but splitting a
 // kubebuilder marker across lines isn't supported, so it's exempted rather
 // than shortened — same convention as api/v1alpha2/kontinuum_types.go's own

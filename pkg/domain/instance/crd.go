@@ -1,10 +1,11 @@
 // Package instance is the zone-join build-out's first domain package (see
-// issue #24's architecture, phase 1 in issue #27): it ensures the four new
-// CRDs (Zone, Instance, InstancePool, TalosCluster) exist on the hub
+// issue #24's architecture, phase 1 in issue #27): it ensures the five new
+// CRDs (Zone, Instance, InstancePool, TalosCluster, Addon) exist on the hub
 // apiserver, and reconciles Instance's maintenance-mode discovery. None of
-// the other three kinds have a controller yet — later phases split their
-// own CRD-ensure and reconciler out of here once they get one, the same way
-// pkg/domain/registry owns Kontinuum's.
+// the other four kinds have their own controller here — later phases split
+// their own CRD-ensure and reconciler out of here once they get one, the
+// same way pkg/domain/registry owns Kontinuum's and pkg/domain/taloscluster/
+// pkg/domain/addon own theirs.
 package instance
 
 import (
@@ -45,17 +46,23 @@ func definitions() []crd.Definition {
 			ManifestFile: "kontinuum.sh_talosclusters.yaml",
 			GVKs:         []schema.GroupVersionKind{v1alpha2.GroupVersion().WithKind("TalosCluster")},
 		},
+		{
+			Name:         "addons.kontinuum.sh",
+			ManifestFile: "kontinuum.sh_addons.yaml",
+			GVKs:         []schema.GroupVersionKind{v1alpha2.GroupVersion().WithKind("Addon")},
+		},
 	}
 }
 
 // EnsureCRDs is a libkapi.PostStartHookFunc — see its registration in
 // pkg/cli/serve.go, and registry.EnsureCRD's doc for the timing this relies
 // on (loopbackConfig is only reachable once libkapi's post-start hooks run,
-// before the controller manager starts). It applies all four CRDs and
+// before the controller manager starts). It applies all five CRDs and
 // waits for each to become Established and discoverable, in the order
 // listed by definitions — Zone before the kinds that will eventually
-// reference it, so a partial failure fails on the first, most foundational
-// kind rather than a downstream one.
+// reference it, TalosCluster before Addon (which references it via
+// talosClusterRef), so a partial failure fails on the first, most
+// foundational kind rather than a downstream one.
 func EnsureCRDs(ctx context.Context, loopbackConfig *restclient.Config, logger *slog.Logger) error {
 	for _, def := range definitions() {
 		err := crd.Ensure(ctx, loopbackConfig, crdconfig.Files, def, logger)

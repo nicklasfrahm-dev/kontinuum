@@ -113,7 +113,7 @@ func TestReconcileDiscoversOnFirstCandidate(t *testing.T) {
 	var got v1alpha2.Instance
 
 	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "node-a"}, &got))
-	assert.Equal(t, "v1.9.0", got.Status.TalosVersion)
+	assert.Equal(t, "v1.9.0", got.Status.Talos.Version)
 	assert.Equal(t, []v1alpha2.InstanceInterfaceStatus{{Name: "eth0"}}, got.Status.Interfaces)
 	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, instance.DiscoveredConditionType))
 }
@@ -203,7 +203,7 @@ func TestReconcileSkipsAlreadyDiscovered(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "node-e"},
 		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{"10.0.0.1"}},
 		Status: v1alpha2.InstanceStatus{
-			TalosVersion: "v1.9.0",
+			Talos: v1alpha2.InstanceTalosStatus{Version: "v1.9.0"},
 			Conditions: []metav1.Condition{
 				{Type: instance.DiscoveredConditionType, Status: metav1.ConditionTrue, Reason: "Discovered"},
 			},

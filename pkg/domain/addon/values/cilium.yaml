@@ -1,0 +1,67 @@
+# Default Cilium install — chart identity/version, namespace, and Helm
+# values all live together here so there's one place to update when e.g.
+# bumping a chart version. The release/chart name itself defaults to this
+# file's own name ("cilium") — see resolveAddon in values.go. values are
+# merged with (and overridden by) any user-supplied spec.values for an
+# Addon named "cilium" — see mergeValues in values.go. Every value below
+# diverges from the chart's own default for a reason — see this package's
+# own doc — following Talos's own documented Cilium install
+# (docs.siderolabs.com/kubernetes-guides/cni/deploying-cilium). Fields
+# marked $cel are computed at reconcile time — see celvalues.go's own doc
+# for the ctx variable they evaluate against.
+chart:
+  repo: https://helm.cilium.io
+  version: 1.20.0
+namespace:
+  name: kube-system
+lifecycle:
+  priority: 100
+values:
+  kubeProxyReplacement: true
+  k8sServiceHost: localhost
+  k8sServicePort:
+    $cel: "ctx.talos.kubePrism.port"
+  envoy:
+    enabled: true
+  gatewayAPI:
+    enabled: true
+    # Both required for an HTTPRoute backendRef to name a Service whose
+    # own port declares appProtocol (ALPN needs the actual protocol
+    # negotiated over TLS; without appProtocol on the port, Cilium has
+    # no way to tell HTTP/1.1 backends from HTTP/2 wire-format ones).
+    enableAlpn: true
+    enableAppProtocol: true
+  l2announcements:
+    enabled: true
+  nodeIPAM:
+    enabled: true
+  operator:
+    # A second replica could never even schedule on a single-node cluster
+    # (hostNetwork: true means a port collision) — scale up only once
+    # there's more than one control-plane node to spread across.
+    replicas:
+      $cel: "ctx.taloscluster.status.controlPlane.replicas > 1 ? 2 : 1"
+  ipam:
+    mode: kubernetes
+  cgroup:
+    autoMount:
+      enabled: false
+    hostRoot: /sys/fs/cgroup
+  securityContext:
+    capabilities:
+      ciliumAgent:
+        - CHOWN
+        - KILL
+        - NET_ADMIN
+        - NET_RAW
+        - IPC_LOCK
+        - SYS_ADMIN
+        - SYS_RESOURCE
+        - DAC_OVERRIDE
+        - FOWNER
+        - SETGID
+        - SETUID
+      cleanCiliumState:
+        - NET_ADMIN
+        - SYS_ADMIN
+        - SYS_RESOURCE

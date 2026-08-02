@@ -1,0 +1,354 @@
+// Package instancepool implements InstancePool's claim-only reconciler —
+// see issue #24's architecture decision 2/5. It claims unclaimed Instance
+// objects matching spec.selector up to spec.replicas via a conditional
+// (CAS) label update, and releases the excess back to the candidate pool
+// when replicas shrinks. The provider-template/create-on-demand path is
+// explicitly out of scope for this phase (see InstanceTemplateSpec's own
+// doc). instancepool.kontinuum.sh's CRD is already ensured by
+// pkg/domain/instance.EnsureCRDs — no separate ensure step lives here.
+package instancepool
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"sort"
+	"time"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+
+	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
+)
+
+const (
+	// InsufficientCapacityConditionType is InstancePool.status.conditions'
+	// condition set when fewer than spec.replicas candidates could be
+	// claimed.
+	InsufficientCapacityConditionType = "InsufficientCapacity"
+
+	reasonClaimed             = "Claimed"
+	reasonCandidatesExhausted = "CandidatesExhausted"
+
+	defaultRetryInterval = 30 * time.Second
+)
+
+// Config configures a Controller.
+type Config struct {
+	// Logger receives the controller's log output.
+	Logger *slog.Logger
+	// RetryInterval is how long Reconcile waits before retrying after
+	// leaving InsufficientCapacity set. Defaults to thirty seconds when
+	// zero.
+	RetryInterval time.Duration
+}
+
+// Controller wires the InstancePool claim reconciler onto a
+// controller-runtime Manager. See NewController.
+type Controller struct {
+	Config Config
+}
+
+// NewController builds a Controller from cfg, defaulting RetryInterval when
+// left zero.
+func NewController(cfg Config) *Controller {
+	if cfg.RetryInterval == 0 {
+		cfg.RetryInterval = defaultRetryInterval
+	}
+
+	return &Controller{Config: cfg}
+}
+
+// SetupWithManager registers the InstancePool claim reconciler on mgr. It
+// also watches Instance — any Instance change (a new candidate appearing,
+// one being deleted, a label changing) can affect which pool should claim
+// it, so every InstancePool is re-enqueued on any Instance change. The
+// expected number of InstancePool objects is small, so this broad
+// re-enqueue (rather than narrowing to pools whose selector actually
+// matches the changed Instance) stays cheap — the same trade-off this
+// repo's registry.CombinedReconciler already accepts for a similarly small
+// object count.
+func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
+	reconciler := &Reconciler{
+		Client:        mgr.GetClient(),
+		RetryInterval: c.Config.RetryInterval,
+		Logger:        c.Config.Logger,
+	}
+
+	err := ctrl.NewControllerManagedBy(mgr).
+		For(&v1alpha2.InstancePool{}).
+		Watches(&v1alpha2.Instance{}, handler.EnqueueRequestsFromMapFunc(reconciler.enqueueAllPools)).
+		Complete(reconciler)
+	if err != nil {
+		return fmt.Errorf("failed to register instancepool controller: %w", err)
+	}
+
+	return nil
+}
+
+// Reconciler claims and releases Instance objects on behalf of an
+// InstancePool — see issue #24's architecture decision 2/5.
+type Reconciler struct {
+	Client        client.Client
+	RetryInterval time.Duration
+	Logger        *slog.Logger
+}
+
+// Reconcile implements reconcile.Reconciler: it releases any claimed
+// Instance beyond spec.replicas, then claims unclaimed candidates up to
+// spec.replicas, then writes status.readyReplicas and
+// InsufficientCapacityConditionType.
+func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	var pool v1alpha2.InstancePool
+
+	err := r.Client.Get(ctx, req.NamespacedName, &pool)
+	if apierrors.IsNotFound(err) {
+		return ctrl.Result{}, nil
+	}
+
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to get instance pool %q: %w", req.Name, err)
+	}
+
+	claimed, err := r.listClaimed(ctx, pool.Name)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if len(claimed) > int(pool.Spec.Replicas) {
+		claimed, err = r.release(ctx, &pool, claimed)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	insufficient := false
+
+	if len(claimed) < int(pool.Spec.Replicas) {
+		claimed, err = r.claim(ctx, &pool, claimed)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		insufficient = len(claimed) < int(pool.Spec.Replicas)
+	}
+
+	return r.updateStatus(ctx, &pool, claimed, insufficient)
+}
+
+// enqueueAllPools maps any Instance change to a reconcile request for every
+// InstancePool — see SetupWithManager's own doc for why this is broad
+// rather than selector-filtered.
+func (r *Reconciler) enqueueAllPools(ctx context.Context, _ client.Object) []ctrl.Request {
+	var pools v1alpha2.InstancePoolList
+
+	err := r.Client.List(ctx, &pools)
+	if err != nil {
+		r.Logger.Error("failed to list instance pools for instance watch", "error", err)
+
+		return nil
+	}
+
+	requests := make([]ctrl.Request, 0, len(pools.Items))
+	for _, pool := range pools.Items {
+		requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&pool)})
+	}
+
+	return requests
+}
+
+// listClaimed lists every Instance currently claimed by poolName.
+func (r *Reconciler) listClaimed(ctx context.Context, poolName string) ([]v1alpha2.Instance, error) {
+	var list v1alpha2.InstanceList
+
+	err := r.Client.List(ctx, &list, client.MatchingLabels{v1alpha2.LabelClaimedBy: poolName})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list instances claimed by %q: %w", poolName, err)
+	}
+
+	return list.Items, nil
+}
+
+// release unclaims the excess of claimed beyond pool.Spec.Replicas,
+// name-sorted for deterministic behavior, and returns the remaining
+// claimed set. A conflict releasing one Instance is logged and left for
+// the next reconcile, not fatal — the candidate stays (harmlessly)
+// over-claimed until then.
+func (r *Reconciler) release(
+	ctx context.Context, pool *v1alpha2.InstancePool, claimed []v1alpha2.Instance,
+) ([]v1alpha2.Instance, error) {
+	sort.Slice(claimed, func(i, j int) bool { return claimed[i].Name < claimed[j].Name })
+
+	target := int(pool.Spec.Replicas)
+
+	remaining := make([]v1alpha2.Instance, 0, target)
+
+	for i, inst := range claimed {
+		if i < target {
+			remaining = append(remaining, inst)
+
+			continue
+		}
+
+		delete(inst.Labels, v1alpha2.LabelClaimedBy)
+
+		err := r.Client.Update(ctx, &inst)
+		if err != nil && !apierrors.IsConflict(err) {
+			return nil, fmt.Errorf("failed to release instance %q from pool %q: %w", inst.Name, pool.Name, err)
+		}
+
+		if err != nil {
+			r.Logger.Warn("conflict releasing instance, will retry next reconcile",
+				"instance", inst.Name, "pool", pool.Name, "error", err)
+
+			remaining = append(remaining, inst)
+		}
+	}
+
+	return remaining, nil
+}
+
+// claim lists candidates matching pool.Spec.Selector, filters out anything
+// already claimed by any pool, and attempts to claim each — in name-sorted
+// order, for deterministic behavior — until either spec.replicas is met or
+// candidates are exhausted. A conflict claiming one candidate means another
+// pool won the race for it; that candidate is skipped, not retried, and
+// the next candidate is tried instead.
+func (r *Reconciler) claim(
+	ctx context.Context, pool *v1alpha2.InstancePool, claimed []v1alpha2.Instance,
+) ([]v1alpha2.Instance, error) {
+	selector, err := metav1.LabelSelectorAsSelector(&pool.Spec.Selector)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse selector for pool %q: %w", pool.Name, err)
+	}
+
+	var candidates v1alpha2.InstanceList
+
+	err = r.Client.List(ctx, &candidates, client.MatchingLabelsSelector{Selector: selector})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list candidate instances for pool %q: %w", pool.Name, err)
+	}
+
+	unclaimed := make([]v1alpha2.Instance, 0, len(candidates.Items))
+
+	for _, inst := range candidates.Items {
+		if _, alreadyClaimed := inst.Labels[v1alpha2.LabelClaimedBy]; !alreadyClaimed {
+			unclaimed = append(unclaimed, inst)
+		}
+	}
+
+	sort.Slice(unclaimed, func(i, j int) bool { return unclaimed[i].Name < unclaimed[j].Name })
+
+	for _, candidate := range unclaimed {
+		if len(claimed) >= int(pool.Spec.Replicas) {
+			break
+		}
+
+		claimedInst, ok, err := r.tryClaim(ctx, pool, candidate.Name)
+		if err != nil {
+			return nil, err
+		}
+
+		if ok {
+			claimed = append(claimed, claimedInst)
+		}
+	}
+
+	return claimed, nil
+}
+
+// tryClaim re-fetches name (a fresh Get, not the possibly-stale copy from
+// claim's own List) and attempts the CAS label update. A conflict means
+// another pool already claimed it since the List above — reported as
+// (zero, false, nil), not an error, so claim's loop moves on to the next
+// candidate.
+func (r *Reconciler) tryClaim(
+	ctx context.Context, pool *v1alpha2.InstancePool, name string,
+) (v1alpha2.Instance, bool, error) {
+	var inst v1alpha2.Instance
+
+	err := r.Client.Get(ctx, client.ObjectKey{Name: name}, &inst)
+	if apierrors.IsNotFound(err) {
+		return v1alpha2.Instance{}, false, nil
+	}
+
+	if err != nil {
+		return v1alpha2.Instance{}, false, fmt.Errorf("failed to get candidate instance %q: %w", name, err)
+	}
+
+	if _, alreadyClaimed := inst.Labels[v1alpha2.LabelClaimedBy]; alreadyClaimed {
+		return v1alpha2.Instance{}, false, nil
+	}
+
+	if inst.Labels == nil {
+		inst.Labels = map[string]string{}
+	}
+
+	inst.Labels[v1alpha2.LabelClaimedBy] = pool.Name
+
+	err = r.Client.Update(ctx, &inst)
+	if apierrors.IsConflict(err) {
+		return v1alpha2.Instance{}, false, nil
+	}
+
+	if err != nil {
+		return v1alpha2.Instance{}, false, fmt.Errorf("failed to claim instance %q for pool %q: %w", name, pool.Name, err)
+	}
+
+	return inst, true, nil
+}
+
+// updateStatus writes pool.Status.ReadyReplicas (claimed and Discovered)
+// and InsufficientCapacityConditionType, then persists it. insufficient
+// requeues after RetryInterval so a since-appeared candidate gets tried
+// again; sufficient capacity doesn't — the Instance watch (see
+// SetupWithManager) re-triggers on the next relevant change instead.
+func (r *Reconciler) updateStatus(
+	ctx context.Context, pool *v1alpha2.InstancePool, claimed []v1alpha2.Instance, insufficient bool,
+) (ctrl.Result, error) {
+	ready := int32(0)
+
+	for _, inst := range claimed {
+		if meta.IsStatusConditionTrue(inst.Status.Conditions, instance.DiscoveredConditionType) {
+			ready++
+		}
+	}
+
+	pool.Status.ReadyReplicas = ready
+
+	status := metav1.ConditionFalse
+
+	reason := reasonClaimed
+
+	message := fmt.Sprintf("claimed %d/%d replicas", len(claimed), pool.Spec.Replicas)
+
+	if insufficient {
+		status = metav1.ConditionTrue
+		reason = reasonCandidatesExhausted
+		message = fmt.Sprintf("only claimed %d/%d replicas: no more matching unclaimed candidates",
+			len(claimed), pool.Spec.Replicas)
+	}
+
+	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
+		Type:    InsufficientCapacityConditionType,
+		Status:  status,
+		Reason:  reason,
+		Message: message,
+	})
+
+	err := r.Client.Status().Update(ctx, pool)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to update instance pool %q status: %w", pool.Name, err)
+	}
+
+	if insufficient {
+		return ctrl.Result{RequeueAfter: r.RetryInterval}, nil
+	}
+
+	return ctrl.Result{}, nil
+}

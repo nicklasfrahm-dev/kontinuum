@@ -94,9 +94,12 @@ test: generate ## Run tests
 # pkg/domain/instance/talos_e2e_test.go's own doc) for gated tests that need
 # Docker and boot real containers — selected by name here, and by
 # .github/workflows/ci.yml's "E2E" job, rather than run as part of the
-# default `test` target above.
+# default `test` target above. The 15m timeout accounts for
+# pkg/domain/taloscluster's own TestE2E test, which bootstraps a real Talos
+# control plane and worker and installs Cilium/cert-manager for real —
+# considerably slower than instance's own maintenance-mode-only e2e test.
 test-e2e: generate ## Run gated end-to-end tests (requires Docker; boots real containers)
-	KONTINUUM_TEST_E2E=1 $(GOTEST) -v ./... -run '^TestE2E' -timeout 5m
+	KONTINUUM_TEST_E2E=1 $(GOTEST) -v ./... -run '^TestE2E' -timeout 15m
 
 .PHONY: vet
 vet: generate ## Run go vet

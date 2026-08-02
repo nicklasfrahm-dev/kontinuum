@@ -57,13 +57,6 @@ spec:
                   configuration — not an edge case to guard against — see decision
                   3/5.
                 properties:
-                  kubernetes:
-                    description: |-
-                      Kubernetes is the Kubernetes version this pool's members run (e.g.
-                      "v1.32.0"). MaxLength bounds the CEL cost estimate — see Talos's own
-                      doc.
-                    maxLength: 32
-                    type: string
                   poolRef:
                     description: |-
                       PoolRef names the InstancePool this member sizes from — see
@@ -76,27 +69,39 @@ spec:
                     required:
                     - name
                     type: object
-                  talos:
-                    description: |-
-                      Talos is the Talos version this pool's members run (e.g. "v1.9.0").
-                      MaxLength bounds the CEL cost estimate for TalosClusterSpec's version
-                      skew rule below — an unbounded string makes the apiserver reject the
-                      rule outright as too expensive to evaluate, regardless of actual
-                      input size.
-                    maxLength: 32
-                    type: string
                 required:
                 - poolRef
+                type: object
+              kubernetes:
+                description: |-
+                  Kubernetes pins this cluster's Kubernetes version — see
+                  KubernetesSpec's own doc for why this isn't per-pool.
+                properties:
+                  version:
+                    description: |-
+                      Version is the Kubernetes version this cluster runs (e.g. "v1.32.0").
+                      Empty means the reconciler's own pinned default.
+                    maxLength: 32
+                    type: string
+                type: object
+              talos:
+                description: |-
+                  Talos pins this cluster's Talos version — one version for the whole
+                  cluster, see TalosSpec's own doc.
+                properties:
+                  version:
+                    description: |-
+                      Version is the Talos version this cluster's members run (e.g.
+                      "v1.13.0"). Empty means the reconciler's own pinned default.
+                    maxLength: 32
+                    type: string
                 type: object
               workers:
                 description: |-
                   Workers lists this cluster's worker pools. The controller bootstraps
                   ControlPlane first and only starts reconciling Workers once the
                   control plane reports healthy — a worker attempting to join before
-                  etcd exists must block, not race. MaxItems bounds the CEL cost
-                  estimate for the version skew rule below, evaluated once per entry —
-                  see TalosVersionSpec.Talos's doc for why an unbounded list has the
-                  same problem an unbounded string does.
+                  etcd exists must block, not race.
                 items:
                   description: |-
                     TalosClusterWorkerSpec is one entry in TalosCluster.spec.workers — a
@@ -104,13 +109,6 @@ spec:
                     (e.g. a gpu pool alongside the default), each independently sized by its
                     own InstancePool.
                   properties:
-                    kubernetes:
-                      description: |-
-                        Kubernetes is the Kubernetes version this pool's members run (e.g.
-                        "v1.32.0"). MaxLength bounds the CEL cost estimate — see Talos's own
-                        doc.
-                      maxLength: 32
-                      type: string
                     name:
                       description: |-
                         Name identifies this worker pool within the cluster (e.g. "default",
@@ -126,15 +124,6 @@ spec:
                       required:
                       - name
                       type: object
-                    talos:
-                      description: |-
-                        Talos is the Talos version this pool's members run (e.g. "v1.9.0").
-                        MaxLength bounds the CEL cost estimate for TalosClusterSpec's version
-                        skew rule below — an unbounded string makes the apiserver reject the
-                        rule outright as too expensive to evaluate, regardless of actual
-                        input size.
-                      maxLength: 32
-                      type: string
                   required:
                   - name
                   - poolRef
@@ -144,14 +133,6 @@ spec:
             required:
             - controlPlane
             type: object
-            x-kubernetes-validations:
-            - message: a worker pool's kubernetes version must not lead the control
-                plane's, and may not trail it by more than 3 minor versions
-              rule: '!has(self.workers) || self.workers.all(w, !has(w.kubernetes)
-                || !has(self.controlPlane.kubernetes) || (w.kubernetes.split(''.'')[0]
-                == self.controlPlane.kubernetes.split(''.'')[0] && int(self.controlPlane.kubernetes.split(''.'')[1])
-                >= int(w.kubernetes.split(''.'')[1]) && int(self.controlPlane.kubernetes.split(''.'')[1])
-                - int(w.kubernetes.split(''.'')[1]) <= 3))'
           status:
             description: TalosClusterStatus reports this cluster's bootstrap progress.
             properties:
@@ -217,6 +198,22 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              secretRef:
+                description: |-
+                  SecretRef points to the Secret holding this cluster's generated Talos
+                  secrets bundle (key "secrets-bundle") and, once bootstrapped, its
+                  kubeconfig (key "kubeconfig") — kept out of status directly for the
+                  same reason KontinuumStatus.SecretRef is: a Secret's RBAC can be
+                  restricted independently of who can read this broadly-visible
+                  TalosCluster object.
+                properties:
+                  name:
+                    description: Name is the Secret's name.
+                    type: string
+                  namespace:
+                    description: Namespace is the Secret's namespace.
+                    type: string
+                type: object
             type: object
         required:
         - metadata
