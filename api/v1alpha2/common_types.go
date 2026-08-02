@@ -23,6 +23,14 @@ type InstancePoolReference struct {
 	Name string `json:"name"`
 }
 
+// TalosClusterReference names a TalosCluster by name — mirrors
+// InstancePoolReference's identical rationale, just for the parent an
+// Addon belongs to.
+type TalosClusterReference struct {
+	// Name is the referenced TalosCluster's name.
+	Name string `json:"name"`
+}
+
 // SecretReference points to a Secret holding confidential data owned by
 // another object's status — kept as its own type (rather than reusing
 // KontinuumSecretReference) so TalosCluster's status doesn't couple to

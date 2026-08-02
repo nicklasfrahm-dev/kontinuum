@@ -1,4 +1,4 @@
-package taloscluster
+package addon
 
 import (
 	"errors"
@@ -10,13 +10,19 @@ import (
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 )
 
+// kubePrismPort is the fixed local port Talos's own KubePrism apiserver
+// proxy listens on, on every node — see celContext's own doc for why
+// Cilium is pointed at localhost:kubePrismPort instead of a specific
+// control-plane member's address.
+const kubePrismPort = 7445
+
 // celFieldKey marks a position in an embedded default values file as
 // computed rather than literal — see evaluateComputedValues.
 const celFieldKey = "$cel"
 
 // errComputedValuesNotMap is a static sentinel — err113 flags a
 // dynamically constructed errors.New/fmt.Errorf call without a wrapped
-// static error, same as controller.go's own errKubeconfigNotStored.
+// static error.
 var errComputedValuesNotMap = errors.New("resolved computed values is not a map")
 
 // celEnv declares this package's one CEL variable: ctx, a dynamic value
@@ -43,13 +49,12 @@ func celEnv() (*cel.Env, error) {
 //     own natural status path: status.controlPlane.replicas — the
 //     control-plane pool's current claimed-Instance count, something
 //     TalosCluster's real API type doesn't persist itself (see
-//     Reconciler.controlPlaneCount), placed here rather than as a
-//     same-level sibling key so a future real status field of the same
-//     name would need no expression changes to adopt.
+//     controlPlaneMemberCount), placed here rather than as a same-level
+//     sibling key so a future real status field of the same name would
+//     need no expression changes to adopt.
 //   - ctx.talos carries facts about Talos itself, not any particular
 //     TalosCluster — currently just kubePrism.port, the fixed local port
-//     Talos's own KubePrism apiserver proxy listens on (see config.go's
-//     kubePrismPort).
+//     Talos's own KubePrism apiserver proxy listens on.
 //
 // Any expression can dot into whatever field it needs without a Go
 // change, as long as it already lives somewhere in this shape.

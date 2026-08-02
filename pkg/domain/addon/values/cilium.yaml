@@ -1,11 +1,11 @@
 # Default Cilium install — chart identity/version, namespace, and Helm
 # values all live together here so there's one place to update when e.g.
 # bumping a chart version. The release/chart name itself defaults to this
-# file's own name ("cilium") — see resolveAddon in addons.go. values are
-# merged with (and overridden by) any user-supplied spec.addons[].values
-# for an entry named "cilium" — see mergeValues in addons.go. Every value
-# below diverges from the chart's own default for a reason — see this
-# package's own doc — following Talos's own documented Cilium install
+# file's own name ("cilium") — see resolveAddon in values.go. values are
+# merged with (and overridden by) any user-supplied spec.values for an
+# Addon named "cilium" — see mergeValues in values.go. Every value below
+# diverges from the chart's own default for a reason — see this package's
+# own doc — following Talos's own documented Cilium install
 # (docs.siderolabs.com/kubernetes-guides/cni/deploying-cilium). Fields
 # marked $cel are computed at reconcile time — see celvalues.go's own doc
 # for the ctx variable they evaluate against.

@@ -1,7 +1,7 @@
 # Default cert-manager install — chart identity/version, namespace, and
 # Helm values all live together here — see cilium.yaml's own doc for why.
 # values are merged with (and overridden by) any user-supplied
-# spec.addons.cert-manager.values — see mergeValues in addons.go.
+# spec.values for an Addon named "cert-manager".
 chart:
   repo: https://charts.jetstack.io
   version: v1.17.2

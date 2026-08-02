@@ -25,6 +25,7 @@ import (
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/auth"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/addon"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instancepool"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/registry"
@@ -220,7 +221,8 @@ func buildServer(
 		libkapi.WithStorage(cfg.Server.Storage),
 		libkapi.WithLogger(logger),
 		libkapi.WithServerFactory(customHandlers(uiRouter, oidcHandler)),
-	}, authOpts, registryOpts, instanceOptions(logger), instancePoolOptions(logger), talosClusterOptions(logger))
+	}, authOpts, registryOpts, instanceOptions(logger), instancePoolOptions(logger), talosClusterOptions(logger),
+		addonOptions(logger))
 
 	// Storage is resolved against a background context so the backend
 	// is only torn down by Server.Shutdown, not by the signal context
@@ -326,6 +328,16 @@ func instancePoolOptions(logger *slog.Logger) []libkapi.Option {
 // own ensureCRDs call.
 func talosClusterOptions(logger *slog.Logger) []libkapi.Option {
 	controller := taloscluster.NewController(taloscluster.Config{Logger: logger.With("component", "taloscluster")})
+
+	return []libkapi.Option{libkapi.WithController(controller)}
+}
+
+// addonOptions builds the libkapi options that wire the Addon install/
+// health-probe reconciler (see pkg/domain/addon) onto the Server. No
+// WithPostStartHook is needed — addons.kontinuum.sh's CRD is already
+// ensured by instanceOptions' own ensureCRDs call.
+func addonOptions(logger *slog.Logger) []libkapi.Option {
+	controller := addon.NewController(addon.Config{Logger: logger.With("component", "addon")})
 
 	return []libkapi.Option{libkapi.WithController(controller)}
 }

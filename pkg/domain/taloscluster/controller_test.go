@@ -2,9 +2,7 @@ package taloscluster_test
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
-	"sync"
 	"testing"
 	"time"
 
@@ -12,7 +10,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -22,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/addon"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/taloscluster"
 )
@@ -69,67 +67,18 @@ func (f *fakeBootstrapper) Kubeconfig(_ context.Context, _ string, _ *clientconf
 	return f.kubeconfig, nil
 }
 
-// fakeAddonInstaller is taloscluster.AddonInstaller's test double. Guarded
-// by a mutex — addons now install in parallel (see reconcileAddons), so
-// concurrent goroutines really do call Install at the same time.
-type fakeAddonInstaller struct {
-	mu    sync.Mutex
-	calls []taloscluster.AddonInstallRequest
-	err   error
-}
-
-func (f *fakeAddonInstaller) Install(_ context.Context, _ []byte, req taloscluster.AddonInstallRequest) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	f.calls = append(f.calls, req)
-
-	return f.err
-}
-
-// findCall returns the first call in calls whose ReleaseName is name —
-// parallel installation means call order isn't deterministic, so tests
-// look calls up by name rather than by index.
-func findCall(calls []taloscluster.AddonInstallRequest, name string) taloscluster.AddonInstallRequest {
-	for _, call := range calls {
-		if call.ReleaseName == name {
-			return call
-		}
-	}
-
-	return taloscluster.AddonInstallRequest{}
-}
-
-// namespaceHealthResult is one PodProber.NamespaceHealthy fake result.
-type namespaceHealthResult struct {
-	healthy bool
-	reason  string
-	err     error
-}
-
-// fakePodProber is taloscluster.PodProber's test double. A namespace with
-// no configured result defaults to healthy — most tests don't care about
-// pod health specifically and just need the addon-install-succeeded path
-// to keep progressing. Guarded by a mutex for the same reason
-// fakeAddonInstaller is.
-type fakePodProber struct {
-	mu      sync.Mutex
-	results map[string]namespaceHealthResult
-	calls   []string
-}
-
-func (f *fakePodProber) NamespaceHealthy(_ context.Context, _ []byte, namespace string) (bool, string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	f.calls = append(f.calls, namespace)
-
-	result, ok := f.results[namespace]
+// indexAddonByTalosClusterRef mirrors the addon package's own unexported
+// indexer — duplicated here since the real one isn't reachable from an
+// external test package, and the manager's own field indexer registration
+// (Controller.SetupWithManager) never runs in these fake-client-only
+// tests.
+func indexAddonByTalosClusterRef(obj client.Object) []string {
+	a, ok := obj.(*v1alpha2.Addon)
 	if !ok {
-		return true, "", nil
+		return nil
 	}
 
-	return result.healthy, result.reason, result.err
+	return []string{a.Spec.TalosClusterRef.Name}
 }
 
 func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
@@ -142,7 +91,8 @@ func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
 
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&v1alpha2.TalosCluster{}).
+		WithStatusSubresource(&v1alpha2.TalosCluster{}, &v1alpha2.Addon{}).
+		WithIndex(&v1alpha2.Addon{}, addon.TalosClusterRefField, indexAddonByTalosClusterRef).
 		WithObjects(objects...).
 		Build()
 }
@@ -159,9 +109,14 @@ func claimedDiscoveredInstance(name, poolName, addr string) *v1alpha2.Instance {
 	}
 }
 
+// testClusterName is every fixture's own TalosCluster name — kept as one
+// constant rather than a parameter every test helper threads through,
+// since no test in this file needs more than one cluster.
+const testClusterName = "eu-1a"
+
 func testCluster() *v1alpha2.TalosCluster {
 	return &v1alpha2.TalosCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "eu-1a"},
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName},
 		Spec: v1alpha2.TalosClusterSpec{
 			ControlPlane: v1alpha2.TalosClusterMemberSpec{
 				PoolRef: v1alpha2.InstancePoolReference{Name: "cp-pool"},
@@ -173,14 +128,26 @@ func testCluster() *v1alpha2.TalosCluster {
 	}
 }
 
-func newReconciler(
-	fakeClient client.Client, bootstrapper *fakeBootstrapper, installer *fakeAddonInstaller, prober *fakePodProber,
-) *taloscluster.Reconciler {
+// readyAddon builds an Addon fixture already reporting the given Ready
+// status/reason — as if Reconciler (tested separately, in
+// pkg/domain/addon) had already reconciled it.
+func readyAddon(releaseName string, status metav1.ConditionStatus, reason string) *v1alpha2.Addon {
+	return &v1alpha2.Addon{
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName + "-" + releaseName},
+		Spec: v1alpha2.AddonSpec{
+			TalosClusterRef: v1alpha2.TalosClusterReference{Name: testClusterName},
+			ReleaseName:     releaseName,
+		},
+		Status: v1alpha2.AddonStatus{
+			Conditions: []metav1.Condition{{Type: "Ready", Status: status, Reason: reason}},
+		},
+	}
+}
+
+func newReconciler(fakeClient client.Client, bootstrapper *fakeBootstrapper) *taloscluster.Reconciler {
 	return &taloscluster.Reconciler{
 		Client:             fakeClient,
 		Bootstrapper:       bootstrapper,
-		AddonInstaller:     installer,
-		PodProber:          prober,
 		HealthCheckTimeout: testHealthCheckTimeout,
 		RetryInterval:      testRetryInterval,
 		Logger:             slog.Default(),
@@ -194,9 +161,7 @@ func TestReconcileWaitsForControlPlaneInstances(t *testing.T) {
 	fakeClient := newFakeClient(t, cluster)
 
 	bootstrapper := &fakeBootstrapper{}
-	installer := &fakeAddonInstaller{}
-	prober := &fakePodProber{}
-	reconciler := newReconciler(fakeClient, bootstrapper, installer, prober)
+	reconciler := newReconciler(fakeClient, bootstrapper)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "eu-1a"},
@@ -224,9 +189,7 @@ func TestReconcileControlPlaneNotYetHealthy(t *testing.T) {
 	fakeClient := newFakeClient(t, cluster, cpInstance)
 
 	bootstrapper := &fakeBootstrapper{healthCheckErr: assert.AnError}
-	installer := &fakeAddonInstaller{}
-	prober := &fakePodProber{}
-	reconciler := newReconciler(fakeClient, bootstrapper, installer, prober)
+	reconciler := newReconciler(fakeClient, bootstrapper)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "eu-1a"},
@@ -246,18 +209,14 @@ func TestReconcileControlPlaneNotYetHealthy(t *testing.T) {
 	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, taloscluster.BootstrappedConditionType))
 }
 
-// TestReconcileAddonNotHealthyBlocksReady covers applyAddonOutcomes'
-// gating of Ready: even though the Install call itself succeeds
-// (installRelease/upgradeRelease only apply manifests, they don't wait
-// for rollout — see that doc), Ready must not go true until every
-// enabled addon's own pods actually report healthy. ControlPlaneReady is
-// deliberately independent of addon health at the Go level now — in a
-// real cluster, Talos's own ClusterHealthCheck already can't pass without
-// Cilium applied, so nothing real is lost by not also gating
-// ControlPlaneReady here (see bootstrapAndCheckHealth's own doc); this
-// fake HealthCheck just never modeled that link either way, so it
-// succeeds regardless.
-func TestReconcileAddonNotHealthyBlocksReady(t *testing.T) {
+// TestReconcileSeedsBuiltinAddonsOnlyWhenMissing covers
+// addon.EnsureBuiltinSeeds' own create-only contract: on the first
+// reconcile, with no Addons at all yet, both cilium's and cert-manager's
+// get created — minimal spec (just TalosClusterRef/ReleaseName),
+// owned by the TalosCluster. A user edit afterward (here, disabling one)
+// must never get clobbered by a later reconcile — TalosCluster never
+// touches an Addon's spec once it exists.
+func TestReconcileSeedsBuiltinAddonsOnlyWhenMissing(t *testing.T) {
 	t.Parallel()
 
 	cluster := testCluster()
@@ -266,266 +225,73 @@ func TestReconcileAddonNotHealthyBlocksReady(t *testing.T) {
 	fakeClient := newFakeClient(t, cluster, cpInstance)
 
 	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig")}
-	installer := &fakeAddonInstaller{}
-	prober := &fakePodProber{results: map[string]namespaceHealthResult{
-		"kube-system": {healthy: false, reason: "kube-system/cilium-abc123 is Running but not Ready"},
-	}}
-	reconciler := newReconciler(fakeClient, bootstrapper, installer, prober)
+	reconciler := newReconciler(fakeClient, bootstrapper)
 
-	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "eu-1a"},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, testRetryInterval, result.RequeueAfter,
-		"a not-yet-healthy addon must still produce a requeue, even though ControlPlaneReady itself needs none")
-	require.Len(t, installer.calls, 2, "both built-in addons install in parallel, regardless of each other's health")
-	assert.ElementsMatch(t, []string{"kube-system", "kontinuum-system"}, prober.calls)
 
-	var got v1alpha2.TalosCluster
+	var cilium v1alpha2.Addon
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a"}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a-cilium"}, &cilium))
+	assert.Equal(t, "eu-1a", cilium.Spec.TalosClusterRef.Name)
+	assert.Equal(t, "cilium", cilium.Spec.ReleaseName)
+	assert.Nil(t, cilium.Spec.Chart, "a built-in seed leaves Chart unset — resolveAddon supplies the fallback")
+	require.Len(t, cilium.OwnerReferences, 1)
+	assert.Equal(t, "eu-1a", cilium.OwnerReferences[0].Name)
+	assert.Equal(t, "TalosCluster", cilium.OwnerReferences[0].Kind)
 
-	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, taloscluster.ControlPlaneReadyConditionType),
-		"control plane health is independent of addon health now")
+	var certManager v1alpha2.Addon
 
-	cond := meta.FindStatusCondition(got.Status.Conditions, taloscluster.ReadyConditionType)
-	require.NotNil(t, cond)
-	assert.Equal(t, metav1.ConditionFalse, cond.Status)
-	assert.Equal(t, "AddonNotHealthy", cond.Reason)
-}
+	require.NoError(t, fakeClient.Get(context.Background(),
+		types.NamespacedName{Name: "eu-1a-cert-manager"}, &certManager))
+	assert.Equal(t, "cert-manager", certManager.Spec.ReleaseName)
 
-// TestReconcileCiliumDisabledSkipsInstall covers AddonSpec.Enabled: once
-// explicitly set false, cilium must never be installed or health-probed —
-// an addon a user has opted out of (e.g. because ArgoCD already owns it)
-// must never block the reconciler. cert-manager, still a built-in
-// default not mentioned here, installs normally alongside it.
-func TestReconcileCiliumDisabledSkipsInstall(t *testing.T) {
-	t.Parallel()
-
-	cluster := testCluster()
-	cluster.Spec.Addons = []v1alpha2.AddonSpec{{Name: "cilium", Enabled: new(bool)}}
-	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", "10.0.0.1")
-
-	fakeClient := newFakeClient(t, cluster, cpInstance)
-
-	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig")}
-	installer := &fakeAddonInstaller{}
-	prober := &fakePodProber{}
-	reconciler := newReconciler(fakeClient, bootstrapper, installer, prober)
-
-	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "eu-1a"},
-	})
-	require.NoError(t, err)
-	assert.Zero(t, result, "control plane and cert-manager both becoming ready needs no requeue")
-	require.Len(t, installer.calls, 1, "a disabled addon must never be installed")
-	assert.Equal(t, "cert-manager", installer.calls[0].ReleaseName)
-	assert.Equal(t, []string{"kontinuum-system"}, prober.calls, "a disabled addon must never be health-probed")
-
-	var got v1alpha2.TalosCluster
-
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a"}, &got))
-	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, taloscluster.ControlPlaneReadyConditionType))
-	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, taloscluster.ReadyConditionType))
-}
-
-// TestReconcileAddonNamespaceVersionAndValuesOverride covers
-// AddonSpec.Namespace/.Chart.Version/.Values all being honored together
-// for a built-in addon, with Chart.Repo left unset falling back to the
-// built-in's own default: the resulting AddonInstallRequest carries the
-// overridden namespace/version but the built-in's own repo, and the
-// request's Values has the user-supplied value winning over the
-// package's own default for a conflicting key (kubeProxyReplacement),
-// while a default-only key (envoy.enabled) survives untouched — see
-// mergeValues' own doc for why.
-func TestReconcileAddonNamespaceVersionAndValuesOverride(t *testing.T) {
-	t.Parallel()
-
-	userValues, err := json.Marshal(map[string]any{"kubeProxyReplacement": false, "extraFlag": true})
-	require.NoError(t, err)
-
-	cluster := testCluster()
-	cluster.Spec.Addons = []v1alpha2.AddonSpec{
-		{
-			Name:      "cilium",
-			Namespace: v1alpha2.AddonNamespaceSpec{Name: "custom-cilium-ns"},
-			Chart:     &v1alpha2.AddonChartSpec{Version: "1.99.0"},
-			Values:    &apiextensionsv1.JSON{Raw: userValues},
-		},
-	}
-
-	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", "10.0.0.1")
-
-	fakeClient := newFakeClient(t, cluster, cpInstance)
-
-	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig")}
-	installer := &fakeAddonInstaller{}
-	prober := &fakePodProber{}
-	reconciler := newReconciler(fakeClient, bootstrapper, installer, prober)
+	// simulate a user disabling cilium after the fact
+	cilium.Spec.Enabled = new(bool)
+	require.NoError(t, fakeClient.Update(context.Background(), &cilium))
 
 	_, err = reconciler.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "eu-1a"},
 	})
 	require.NoError(t, err)
 
-	require.Len(t, installer.calls, 2, "cert-manager, still a built-in default, installs alongside the override")
-	req := findCall(installer.calls, "cilium")
-	assert.Equal(t, "custom-cilium-ns", req.Namespace)
-	assert.Equal(t, "1.99.0", req.Version)
-	assert.Equal(t, "https://helm.cilium.io", req.RepoURL, "unset chart.repo falls back to the built-in default")
-	assert.Equal(t, false, req.Values["kubeProxyReplacement"], "user value must win over the package default")
-	assert.Equal(t, true, req.Values["extraFlag"], "a user-only key must survive the merge")
+	var afterSecond v1alpha2.Addon
 
-	envoy, ok := req.Values["envoy"].(map[string]any)
-	require.True(t, ok, "a default-only key must survive the merge untouched")
-	assert.Equal(t, true, envoy["enabled"])
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a-cilium"}, &afterSecond))
+	require.NotNil(t, afterSecond.Spec.Enabled)
+	assert.False(t, *afterSecond.Spec.Enabled, "a second reconcile must never re-enable a user-disabled built-in")
 }
 
-// TestReconcileCiliumOperatorReplicasScaleWithControlPlaneCount covers
-// values/cilium.yaml's $cel-driven operator.replicas rule (see
-// celvalues.go and celvalues_test.go for the mechanism itself): a
-// single-control-plane cluster keeps the file's own literal default (1,
-// since a second replica could never even schedule with hostNetwork:
-// true), while a multi-control-plane cluster gets bumped to 2.
-func TestReconcileCiliumOperatorReplicasScaleWithControlPlaneCount(t *testing.T) {
-	t.Parallel()
-
-	cluster := testCluster()
-	cpInstance1 := claimedDiscoveredInstance("cp-node-1", "cp-pool", "10.0.0.1")
-	cpInstance2 := claimedDiscoveredInstance("cp-node-2", "cp-pool", "10.0.0.2")
-
-	fakeClient := newFakeClient(t, cluster, cpInstance1, cpInstance2)
-
-	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig")}
-	installer := &fakeAddonInstaller{}
-	prober := &fakePodProber{}
-	reconciler := newReconciler(fakeClient, bootstrapper, installer, prober)
-
-	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "eu-1a"},
-	})
-	require.NoError(t, err)
-
-	require.Len(t, installer.calls, 2)
-
-	req := findCall(installer.calls, "cilium")
-	operator, ok := req.Values["operator"].(map[string]any)
-	require.True(t, ok)
-	assert.Equal(t, int64(2), operator["replicas"], "two control-plane nodes must scale cilium-operator to 2 replicas")
-}
-
-// TestReconcileCustomAddonInstalls covers a fully user-defined addon —
-// not one of the two built-ins, Chart fully specified — installed and
-// probed exactly like a built-in, no special treatment.
-func TestReconcileCustomAddonInstalls(t *testing.T) {
-	t.Parallel()
-
-	cluster := testCluster()
-	cluster.Spec.Addons = []v1alpha2.AddonSpec{
-		{
-			Name:      "my-addon",
-			Namespace: v1alpha2.AddonNamespaceSpec{Name: "my-addon-ns"},
-			Chart:     &v1alpha2.AddonChartSpec{Repo: "https://example.com/charts", Name: "my-chart", Version: "1.0.0"},
-		},
-	}
-	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", "10.0.0.1")
-
-	fakeClient := newFakeClient(t, cluster, cpInstance)
-
-	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig")}
-	installer := &fakeAddonInstaller{}
-	prober := &fakePodProber{}
-	reconciler := newReconciler(fakeClient, bootstrapper, installer, prober)
-
-	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "eu-1a"},
-	})
-	require.NoError(t, err)
-
-	require.Len(t, installer.calls, 3, "the two built-ins plus the custom addon")
-	req := findCall(installer.calls, "my-addon")
-	assert.Equal(t, "https://example.com/charts", req.RepoURL)
-	assert.Equal(t, "my-chart", req.ChartName)
-	assert.Equal(t, "1.0.0", req.Version)
-	assert.Equal(t, "my-addon-ns", req.Namespace)
-	assert.Contains(t, prober.calls, "my-addon-ns")
-}
-
-// TestReconcileCustomAddonWithoutChartFails covers a non-built-in addon
-// with no Chart set: there's no built-in default to fall back to, so
-// resolveAddons must fail with a descriptive error, surfaced as Ready's
-// own AddonInstallFailed reason — and, since resolution happens before
-// any install starts, not even the two built-ins get installed on this
-// reconcile.
-func TestReconcileCustomAddonWithoutChartFails(t *testing.T) {
-	t.Parallel()
-
-	cluster := testCluster()
-	cluster.Spec.Addons = []v1alpha2.AddonSpec{{Name: "my-addon"}}
-	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", "10.0.0.1")
-
-	fakeClient := newFakeClient(t, cluster, cpInstance)
-
-	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig")}
-	installer := &fakeAddonInstaller{}
-	prober := &fakePodProber{}
-	reconciler := newReconciler(fakeClient, bootstrapper, installer, prober)
-
-	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "eu-1a"},
-	})
-	require.NoError(t, err)
-	assert.Empty(t, installer.calls, "a resolution failure must never attempt any install, not even the built-ins")
-
-	var got v1alpha2.TalosCluster
-
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a"}, &got))
-
-	cond := meta.FindStatusCondition(got.Status.Conditions, taloscluster.ReadyConditionType)
-	require.NotNil(t, cond)
-	assert.Equal(t, metav1.ConditionFalse, cond.Status)
-	assert.Equal(t, "AddonInstallFailed", cond.Reason)
-	assert.Contains(t, cond.Message, "my-addon")
-}
-
-// TestReconcileCertManagerNotHealthyBlocksReady is
-// TestReconcileAddonNotHealthyBlocksReady's counterpart for the
-// post-ControlPlaneReady convergence path: cilium's pods are healthy,
-// cert-manager's aren't yet — Ready must stay false until both are.
-func TestReconcileCertManagerNotHealthyBlocksReady(t *testing.T) {
+// TestReconcileAggregatesReadyAcrossAddons covers reconcileAddons'
+// aggregation of pre-existing Addon status (installation/health-probing
+// itself is pkg/domain/addon's own Reconciler, tested separately):
+// both built-ins already Ready=True (so neither gets re-seeded) makes
+// TalosCluster's own Ready true; either one reporting False keeps it
+// false, with a message naming which.
+func TestReconcileAggregatesReadyAcrossAddons(t *testing.T) {
 	t.Parallel()
 
 	cluster := testCluster()
 	cluster.Status.Conditions = []metav1.Condition{
 		{Type: taloscluster.ControlPlaneReadyConditionType, Status: metav1.ConditionTrue, Reason: "Healthy"},
 	}
-	cluster.Status.SecretRef = v1alpha2.SecretReference{
-		Name: "taloscluster-eu-1a", Namespace: v1alpha2.DefaultSecretNamespace,
-	}
 	cluster.Spec.Workers = nil
 
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "taloscluster-eu-1a", Namespace: v1alpha2.DefaultSecretNamespace},
-		Data:       map[string][]byte{"secrets-bundle": []byte("{}"), "kubeconfig": []byte("fake-kubeconfig")},
-	}
-
 	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", "10.0.0.1")
+	cilium := readyAddon("cilium", metav1.ConditionTrue, "Healthy")
+	certManager := readyAddon("cert-manager", metav1.ConditionFalse, "NotHealthy")
 
-	fakeClient := newFakeClient(t, cluster, cpInstance, secret)
+	fakeClient := newFakeClient(t, cluster, cpInstance, cilium, certManager)
 
-	bootstrapper := &fakeBootstrapper{}
-	installer := &fakeAddonInstaller{}
-	prober := &fakePodProber{results: map[string]namespaceHealthResult{
-		"kontinuum-system": {healthy: false, reason: "no pods found yet"},
-	}}
-	reconciler := newReconciler(fakeClient, bootstrapper, installer, prober)
+	reconciler := newReconciler(fakeClient, &fakeBootstrapper{})
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "eu-1a"},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, testRetryInterval, result.RequeueAfter)
-	assert.ElementsMatch(t, []string{"kube-system", "kontinuum-system"}, prober.calls)
 
 	var got v1alpha2.TalosCluster
 
@@ -535,61 +301,105 @@ func TestReconcileCertManagerNotHealthyBlocksReady(t *testing.T) {
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, "AddonNotHealthy", cond.Reason)
-}
+	assert.Contains(t, cond.Message, "cert-manager")
 
-// TestReconcileAddonInstallFailureDuringBootstrap covers
-// bootstrapAndCheckHealth combining reconcileAddons' own requeue signal
-// with the control-plane health outcome: even though HealthCheck itself
-// succeeds (ControlPlaneReady goes true, needing no requeue of its own),
-// a failed addon install must still produce a non-zero RequeueAfter,
-// rather than that signal getting silently dropped. Install() itself
-// failing is distinct from a probe reporting not-yet-healthy — it
-// surfaces as AddonInstallFailed, not AddonNotHealthy.
-func TestReconcileAddonInstallFailureDuringBootstrap(t *testing.T) {
-	t.Parallel()
+	// flip cert-manager to healthy — Ready must follow on the next reconcile
+	certManager.Status.Conditions[0].Status = metav1.ConditionTrue
+	require.NoError(t, fakeClient.Status().Update(context.Background(), certManager))
 
-	cluster := testCluster()
-	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", "10.0.0.1")
-
-	fakeClient := newFakeClient(t, cluster, cpInstance)
-
-	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig")}
-	installer := &fakeAddonInstaller{err: assert.AnError}
-	prober := &fakePodProber{}
-	reconciler := newReconciler(fakeClient, bootstrapper, installer, prober)
-
-	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+	_, err = reconciler.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "eu-1a"},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, testRetryInterval, result.RequeueAfter,
-		"a failed addon install must still produce a requeue, even though ControlPlaneReady itself needs none")
-	assert.Equal(t, []string{"10.0.0.1"}, bootstrapper.bootstrapCalls)
-	require.Len(t, installer.calls, 2, "both built-in addons are attempted in parallel")
-	assert.Empty(t, prober.calls, "a failed install is never health-probed")
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a"}, &got))
+	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, taloscluster.ReadyConditionType))
+}
+
+// TestReconcileDisabledAddonSkippedInAggregation covers a disabled Addon
+// (spec.enabled: false) never blocking TalosCluster's own Ready, even
+// with no Ready condition of its own at all — Reconciler never
+// touches a disabled Addon's status (see its own doc).
+func TestReconcileDisabledAddonSkippedInAggregation(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	cluster.Status.Conditions = []metav1.Condition{
+		{Type: taloscluster.ControlPlaneReadyConditionType, Status: metav1.ConditionTrue, Reason: "Healthy"},
+	}
+	cluster.Spec.Workers = nil
+
+	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", "10.0.0.1")
+	certManager := readyAddon("cert-manager", metav1.ConditionTrue, "Healthy")
+	cilium := &v1alpha2.Addon{
+		ObjectMeta: metav1.ObjectMeta{Name: "eu-1a-cilium"},
+		Spec: v1alpha2.AddonSpec{
+			TalosClusterRef: v1alpha2.TalosClusterReference{Name: "eu-1a"},
+			ReleaseName:     "cilium",
+			Enabled:         new(bool),
+		},
+	}
+
+	fakeClient := newFakeClient(t, cluster, cpInstance, cilium, certManager)
+
+	reconciler := newReconciler(fakeClient, &fakeBootstrapper{})
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "eu-1a"},
+	})
+	require.NoError(t, err)
+
+	var got v1alpha2.TalosCluster
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a"}, &got))
+	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, taloscluster.ReadyConditionType),
+		"a disabled addon with no Ready condition at all must never block Ready")
+}
+
+// TestReconcileCustomAddonCountsTowardReady covers a fully custom
+// (non-built-in) Addon counting toward TalosCluster's own Ready
+// aggregation exactly like a built-in — no special treatment.
+func TestReconcileCustomAddonCountsTowardReady(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	cluster.Status.Conditions = []metav1.Condition{
+		{Type: taloscluster.ControlPlaneReadyConditionType, Status: metav1.ConditionTrue, Reason: "Healthy"},
+	}
+	cluster.Spec.Workers = nil
+
+	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", "10.0.0.1")
+	cilium := readyAddon("cilium", metav1.ConditionTrue, "Healthy")
+	certManager := readyAddon("cert-manager", metav1.ConditionTrue, "Healthy")
+	custom := readyAddon("my-addon", metav1.ConditionFalse, "NotHealthy")
+
+	fakeClient := newFakeClient(t, cluster, cpInstance, cilium, certManager, custom)
+
+	reconciler := newReconciler(fakeClient, &fakeBootstrapper{})
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "eu-1a"},
+	})
+	require.NoError(t, err)
 
 	var got v1alpha2.TalosCluster
 
 	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a"}, &got))
 
-	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, taloscluster.ControlPlaneReadyConditionType),
-		"an addon install failure must never block ControlPlaneReady")
-	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, taloscluster.BootstrappedConditionType))
-
 	cond := meta.FindStatusCondition(got.Status.Conditions, taloscluster.ReadyConditionType)
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
-	assert.Equal(t, "AddonInstallFailed", cond.Reason)
+	assert.Contains(t, cond.Message, "my-addon")
 }
 
 // TestReconcileFullSequence is the issue's own milestone: workers are
 // never touched until the control plane is ready — checked at the START
 // of a reconcile, so becoming ready mid-pass doesn't count and a second
-// reconcile is still needed for that. Addons install in parallel with no
-// ordering between them and can both converge within the very first
-// reconcile once their pods report healthy — they don't need to wait for
-// the full control-plane health check either (see reconcileAddons' own
-// doc for why).
+// reconcile is still needed for that. Addon installation/health-probing
+// itself is pkg/domain/addon's own asynchronous concern now (see
+// Reconciler) — this only confirms TalosCluster's own reconciler
+// seeds both built-ins as part of reaching ControlPlaneReady, without
+// waiting for them to actually become healthy first.
 func TestReconcileFullSequence(t *testing.T) {
 	t.Parallel()
 
@@ -600,33 +410,28 @@ func TestReconcileFullSequence(t *testing.T) {
 	fakeClient := newFakeClient(t, cluster, cpInstance, workerInstance)
 
 	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig")}
-	installer := &fakeAddonInstaller{}
-	prober := &fakePodProber{}
-	reconciler := newReconciler(fakeClient, bootstrapper, installer, prober)
+	reconciler := newReconciler(fakeClient, bootstrapper)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "eu-1a"}}
 
 	result, err := reconciler.Reconcile(context.Background(), req)
 	require.NoError(t, err)
-	assert.Zero(t, result, "control plane and both addons becoming ready in one pass needs no requeue")
+	assert.Equal(t, testRetryInterval, result.RequeueAfter, "freshly-seeded addons have no Ready condition yet")
 	assert.Equal(t, []string{"10.0.0.1"}, bootstrapper.applyConfigCalls,
 		"only the control-plane member is touched before ControlPlaneReady")
 
-	require.Len(t, installer.calls, 2, "both built-in addons install in parallel, in the same reconcile")
-	cilium := findCall(installer.calls, "cilium")
-	assert.Equal(t, "https://helm.cilium.io", cilium.RepoURL)
-	assert.Equal(t, "kube-system", cilium.Namespace)
+	var cilium, certManager v1alpha2.Addon
 
-	certManager := findCall(installer.calls, "cert-manager")
-	assert.Equal(t, "https://charts.jetstack.io", certManager.RepoURL)
-	assert.Equal(t, "kontinuum-system", certManager.Namespace)
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a-cilium"}, &cilium))
+	require.NoError(t, fakeClient.Get(context.Background(),
+		types.NamespacedName{Name: "eu-1a-cert-manager"}, &certManager))
 
 	var afterFirst v1alpha2.TalosCluster
 
 	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a"}, &afterFirst))
 	assert.True(t, meta.IsStatusConditionTrue(afterFirst.Status.Conditions, taloscluster.ControlPlaneReadyConditionType))
 	assert.True(t, meta.IsStatusConditionTrue(afterFirst.Status.Conditions, taloscluster.BootstrappedConditionType))
-	assert.True(t, meta.IsStatusConditionTrue(afterFirst.Status.Conditions, taloscluster.ReadyConditionType))
+	assert.False(t, meta.IsStatusConditionTrue(afterFirst.Status.Conditions, taloscluster.ReadyConditionType))
 	require.NotEmpty(t, afterFirst.Status.SecretRef.Name)
 
 	var secret corev1.Secret
@@ -638,61 +443,16 @@ func TestReconcileFullSequence(t *testing.T) {
 
 	result, err = reconciler.Reconcile(context.Background(), req)
 	require.NoError(t, err)
-	assert.Zero(t, result, "the worker joining needs no requeue")
+	assert.Equal(t, testRetryInterval, result.RequeueAfter)
 	assert.Equal(t, []string{"10.0.0.1", "10.0.0.2"}, bootstrapper.applyConfigCalls,
 		"the worker is only touched on the reconcile after ControlPlaneReady")
-	assert.Len(t, installer.calls, 2, "addons already ready, so the second reconcile never reinstalls them")
-}
-
-func TestReconcileAddonInstallFailureSetsReadyFalse(t *testing.T) {
-	t.Parallel()
-
-	cluster := testCluster()
-	cluster.Status.Conditions = []metav1.Condition{
-		{Type: taloscluster.ControlPlaneReadyConditionType, Status: metav1.ConditionTrue, Reason: "Healthy"},
-	}
-	cluster.Status.SecretRef = v1alpha2.SecretReference{
-		Name: "taloscluster-eu-1a", Namespace: v1alpha2.DefaultSecretNamespace,
-	}
-	cluster.Spec.Workers = nil
-
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "taloscluster-eu-1a", Namespace: v1alpha2.DefaultSecretNamespace},
-		Data:       map[string][]byte{"secrets-bundle": []byte("{}"), "kubeconfig": []byte("fake-kubeconfig")},
-	}
-
-	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", "10.0.0.1")
-
-	fakeClient := newFakeClient(t, cluster, cpInstance, secret)
-
-	bootstrapper := &fakeBootstrapper{}
-	installer := &fakeAddonInstaller{err: assert.AnError}
-	prober := &fakePodProber{}
-	reconciler := newReconciler(fakeClient, bootstrapper, installer, prober)
-
-	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "eu-1a"},
-	})
-	require.NoError(t, err)
-	assert.Equal(t, testRetryInterval, result.RequeueAfter)
-	assert.Empty(t, bootstrapper.applyConfigCalls, "control plane is already ready, so it's never re-touched")
-	require.Len(t, installer.calls, 2)
-
-	var got v1alpha2.TalosCluster
-
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a"}, &got))
-
-	cond := meta.FindStatusCondition(got.Status.Conditions, taloscluster.ReadyConditionType)
-	require.NotNil(t, cond)
-	assert.Equal(t, metav1.ConditionFalse, cond.Status)
-	assert.Equal(t, "AddonInstallFailed", cond.Reason)
 }
 
 func TestReconcileIgnoresMissingCluster(t *testing.T) {
 	t.Parallel()
 
 	fakeClient := newFakeClient(t)
-	reconciler := newReconciler(fakeClient, &fakeBootstrapper{}, &fakeAddonInstaller{}, &fakePodProber{})
+	reconciler := newReconciler(fakeClient, &fakeBootstrapper{})
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "missing"},

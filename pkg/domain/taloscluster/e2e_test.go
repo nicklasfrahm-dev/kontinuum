@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/addon"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/taloscluster"
 )
 
@@ -61,9 +62,9 @@ func TestE2ETalosClusterBootstrapsAndWorkerJoins(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), e2eOverallTimeout)
 	defer cancel()
 
-	fakeClient, reconciler, req := setupE2ECluster(ctx, t)
+	fakeClient, talosReconciler, addonReconciler, req := setupE2ECluster(ctx, t)
 
-	reconcileUntilReady(ctx, t, fakeClient, reconciler, req, e2eOverallTimeout-2*time.Minute)
+	reconcileUntilReady(ctx, t, fakeClient, talosReconciler, addonReconciler, req, e2eOverallTimeout-2*time.Minute)
 
 	var got v1alpha2.TalosCluster
 
@@ -73,18 +74,18 @@ func TestE2ETalosClusterBootstrapsAndWorkerJoins(t *testing.T) {
 
 	kubeconfig := fetchKubeconfig(ctx, t, fakeClient, got.Status.SecretRef)
 
-	// The reconciler itself already gates ControlPlaneReady/Ready on Cilium
-	// and cert-manager both being healthy (see probeAddonHealthy) — but
-	// only as of the control-plane node's own pods, checked before the
-	// worker ever joins. assertWorkerJoins runs first, deliberately, so the
-	// worker's own Cilium DaemonSet pod — a brand-new pod that starts its
-	// own Pending→Init→Running→Ready cycle the moment the worker node
+	// TalosCluster's own reconciler already gates Ready on every Addon's
+	// own Ready condition (see reconcileAddons) — but only as of the
+	// control-plane node's own pods, checked before the worker ever joins.
+	// assertWorkerJoins runs first, deliberately, so the worker's own
+	// Cilium DaemonSet pod — a brand-new pod that starts its own
+	// Pending→Init→Running→Ready cycle the moment the worker node
 	// registers, entirely independent of the control-plane pod's already-
 	// healthy one — has actually been scheduled before this checks
 	// kube-system at all. assertNamespaceHealthy still polls rather than
 	// checking once, since "worker just joined" only bounds when that pod
 	// starts existing, not how long it then takes to converge.
-	podProber := taloscluster.NewPodProber()
+	podProber := addon.NewPodProber()
 
 	assertWorkerJoins(ctx, t, kubeconfig)
 
@@ -94,15 +95,15 @@ func TestE2ETalosClusterBootstrapsAndWorkerJoins(t *testing.T) {
 
 // assertNamespaceHealthy fails the test if not every pod in namespace
 // becomes healthy within e2eAddonHealthTimeout — see
-// taloscluster.PodProber.NamespaceHealthy's own doc for what "healthy"
-// means. Polls instead of checking once: a namespace can legitimately
-// contain a freshly-scheduled, not-yet-healthy pod whenever cluster
-// membership changes (see TestE2ETalosClusterBootstrapsAndWorkerJoins' own
-// doc on assertWorkerJoins running first) — that's expected convergence,
-// not a failure, and deserves a chance to settle rather than being judged
-// on a single instant.
+// addon.PodProber.NamespaceHealthy's own doc for what "healthy" means.
+// Polls instead of checking once: a namespace can legitimately contain a
+// freshly-scheduled, not-yet-healthy pod whenever cluster membership
+// changes (see TestE2ETalosClusterBootstrapsAndWorkerJoins' own doc on
+// assertWorkerJoins running first) — that's expected convergence, not a
+// failure, and deserves a chance to settle rather than being judged on a
+// single instant.
 func assertNamespaceHealthy(
-	ctx context.Context, t *testing.T, podProber taloscluster.PodProber, kubeconfig []byte, namespace string,
+	ctx context.Context, t *testing.T, podProber addon.PodProber, kubeconfig []byte, namespace string,
 ) {
 	t.Helper()
 
@@ -124,32 +125,38 @@ func assertNamespaceHealthy(
 	assert.True(t, converged, "pods in %q never became healthy: %s", namespace, reason)
 }
 
-// reconcileUntilReady calls reconciler.Reconcile sequentially — waiting for
-// each call to return before deciding whether to retry — until
+// reconcileUntilReady calls talosReconciler.Reconcile, then reconciles
+// every currently-existing Addon (see reconcileAddonsOnce — simulating
+// Reconciler's own watch-driven reconciliation, since a real
+// controller-runtime manager isn't running here), sequentially — waiting
+// for each call to return before deciding whether to retry — until
 // ReadyConditionType is true or timeout elapses. This is deliberately not
 // require.Eventually: that helper fires its condition function in a new
 // goroutine on every tick regardless of whether the previous one has
-// returned yet, and Reconcile here can legitimately block for minutes at a
-// time (a real Helm install) — far longer than e2eReconcileTick. Against a
-// blocking condition function like that, Eventually ends up running
-// multiple overlapping Reconcile calls concurrently: redundant Helm
-// installs racing each other, and concurrent access to fakeClient, which
-// isn't guaranteed goroutine-safe. A real controller-runtime manager never
-// runs two reconciles for the same object concurrently either — this
-// loop's strictly sequential shape matches that guarantee.
+// returned yet, and either Reconcile here can legitimately block for
+// minutes at a time (a real Helm install) — far longer than
+// e2eReconcileTick. Against a blocking condition function like that,
+// Eventually ends up running multiple overlapping Reconcile calls
+// concurrently: redundant Helm installs racing each other, and concurrent
+// access to fakeClient, which isn't guaranteed goroutine-safe. A real
+// controller-runtime manager never runs two reconciles for the same
+// object concurrently either — this loop's strictly sequential shape
+// matches that guarantee.
 func reconcileUntilReady(
-	ctx context.Context, t *testing.T, fakeClient client.Client, reconciler *taloscluster.Reconciler,
-	req ctrl.Request, timeout time.Duration,
+	ctx context.Context, t *testing.T, fakeClient client.Client, talosReconciler *taloscluster.Reconciler,
+	addonReconciler *addon.Reconciler, req ctrl.Request, timeout time.Duration,
 ) {
 	t.Helper()
 
 	deadline := time.Now().Add(timeout)
 
 	for {
-		_, err := reconciler.Reconcile(ctx, req)
+		_, err := talosReconciler.Reconcile(ctx, req)
 		if err != nil {
-			t.Logf("reconcile error (may be transient while bootstrapping): %v", err)
+			t.Logf("taloscluster reconcile error (may be transient while bootstrapping): %v", err)
 		}
+
+		reconcileAddonsOnce(ctx, t, fakeClient, addonReconciler)
 
 		var got v1alpha2.TalosCluster
 
@@ -174,10 +181,37 @@ func reconcileUntilReady(
 	}
 }
 
+// reconcileAddonsOnce reconciles every Addon that currently exists — see
+// reconcileUntilReady's own doc for why this test drives both reconcilers
+// by hand instead of running a real controller-runtime manager.
+func reconcileAddonsOnce(
+	ctx context.Context, t *testing.T, fakeClient client.Client, addonReconciler *addon.Reconciler,
+) {
+	t.Helper()
+
+	var addons v1alpha2.AddonList
+
+	err := fakeClient.List(ctx, &addons)
+	if err != nil {
+		t.Logf("failed to list addons (may be transient): %v", err)
+
+		return
+	}
+
+	for _, a := range addons.Items {
+		_, err := addonReconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: a.Name}})
+		if err != nil {
+			t.Logf("addon %q reconcile error (may be transient while bootstrapping): %v", a.Name, err)
+		}
+	}
+}
+
 // setupE2ECluster boots the two real Talos containers and seeds a fake
 // client with the TalosCluster/Instance objects a production Reconciler
 // needs to bootstrap them for real.
-func setupE2ECluster(ctx context.Context, t *testing.T) (client.Client, *taloscluster.Reconciler, ctrl.Request) {
+func setupE2ECluster(
+	ctx context.Context, t *testing.T,
+) (client.Client, *taloscluster.Reconciler, *addon.Reconciler, ctrl.Request) {
 	t.Helper()
 
 	controlPlaneIP := startTalosContainer(ctx, t)
@@ -207,19 +241,25 @@ func setupE2ECluster(ctx context.Context, t *testing.T) (client.Client, *taloscl
 	// context-deadline-exceeded once HealthCheckTimeout elapses.
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	reconciler := &taloscluster.Reconciler{
+	talosReconciler := &taloscluster.Reconciler{
 		Client:             fakeClient,
 		Bootstrapper:       taloscluster.NewTalosBootstrapper(logger),
-		AddonInstaller:     taloscluster.NewHelmInstaller(),
-		PodProber:          taloscluster.NewPodProber(),
 		HealthCheckTimeout: e2eHealthCheckTimeout,
 		RetryInterval:      e2eRetryInterval,
 		Logger:             logger,
 	}
 
+	addonReconciler := &addon.Reconciler{
+		Client:        fakeClient,
+		Installer:     addon.NewHelmInstaller(),
+		PodProber:     addon.NewPodProber(),
+		RetryInterval: e2eRetryInterval,
+		Logger:        logger,
+	}
+
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "e2e-cluster"}}
 
-	return fakeClient, reconciler, req
+	return fakeClient, talosReconciler, addonReconciler, req
 }
 
 // fetchKubeconfig reads the kubeconfig reconciler.Reconcile stored on

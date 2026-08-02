@@ -1,4 +1,4 @@
-package taloscluster
+package addon
 
 import (
 	"context"
@@ -11,12 +11,12 @@ import (
 )
 
 // PodProber checks whether every pod in a namespace is healthy — the seam
-// this package's controller gates ControlPlaneReady/Ready through once an
-// addon's manifests have been applied (see installRelease's own doc for
-// why that apply is non-blocking, leaving pod health as a separate,
-// probed-later step). podProber is the production implementation,
-// building a real client-go clientset from a kubeconfig; tests inject a
-// fake to avoid a real cluster dependency.
+// Reconciler gates an addon's own Ready condition through once its
+// manifests have been applied (see installRelease's own doc for why that
+// apply is non-blocking, leaving pod health as a separate, probed-later
+// step). podProber is the production implementation, building a real
+// client-go clientset from a kubeconfig; tests inject a fake to avoid a
+// real cluster dependency.
 type PodProber interface {
 	// NamespaceHealthy reports whether every pod in namespace is healthy —
 	// Running with its PodReady condition true, or Succeeded (a completed
@@ -31,7 +31,7 @@ type podProber struct{}
 
 // NewPodProber returns the production PodProber, which checks real pods in
 // a real cluster. PodProber is this package's own seam for injecting a
-// fake in tests — mirrors NewTalosBootstrapper's identical rationale.
+// fake in tests.
 //
 //nolint:ireturn // see doc above
 func NewPodProber() PodProber {

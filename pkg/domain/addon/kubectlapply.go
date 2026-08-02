@@ -1,4 +1,4 @@
-package taloscluster
+package addon
 
 import (
 	"context"
@@ -33,7 +33,7 @@ const yamlDecoderBufferSize = 4096
 // equivalent) — no Helm release record is created, unlike installViaHelm,
 // so the same manifests can later be adopted by a GitOps tool like ArgoCD
 // without it needing to understand a pre-existing Helm release.
-func (helmInstaller) installViaKubectlApply(ctx context.Context, kubeconfig []byte, req AddonInstallRequest) error {
+func (helmInstaller) installViaKubectlApply(ctx context.Context, kubeconfig []byte, req InstallRequest) error {
 	manifest, err := renderChart(req)
 	if err != nil {
 		return err
@@ -52,7 +52,7 @@ func (helmInstaller) installViaKubectlApply(ctx context.Context, kubeconfig []by
 // Hooks are deliberately excluded from the result: a GitOps-adoptable
 // manifest set shouldn't include Helm hook Jobs meant to run once during
 // an imperative install.
-func renderChart(req AddonInstallRequest) (string, error) {
+func renderChart(req InstallRequest) (string, error) {
 	chrt, err := loadChart(req.ChartName, req.RepoURL, req.Version)
 	if err != nil {
 		return "", err

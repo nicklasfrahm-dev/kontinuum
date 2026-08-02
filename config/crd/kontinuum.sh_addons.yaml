@@ -4,27 +4,36 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.17.3
-  name: talosclusters.kontinuum.sh
+  name: addons.kontinuum.sh
 spec:
   group: kontinuum.sh
   names:
-    kind: TalosCluster
-    listKind: TalosClusterList
-    plural: talosclusters
-    singular: taloscluster
+    kind: Addon
+    listKind: AddonList
+    plural: addons
+    singular: addon
   scope: Cluster
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.controlPlane.poolRef.name
-      name: ControlPlanePool
+    - jsonPath: .spec.talosClusterRef.name
+      name: Cluster
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].reason
+      name: Reason
       type: string
     name: v1alpha2
     schema:
       openAPIV3Schema:
         description: |-
-          TalosCluster represents one zone's real, Talos-bootstrapped Kubernetes
-          cluster — see issue #24's architecture decision 1/5. No controller is
-          implemented yet; this phase only introduces the type.
+          Addon represents one addon belonging to a TalosCluster, installed and
+          health-probed by pkg/domain/addon's own AddonReconciler — an
+          independent, owned resource: TalosCluster's own reconciler only seeds
+          the two built-ins (see pkg/domain/addon's EnsureBuiltinSeeds) and
+          aggregates Ready across whatever Addons reference it, built-in or
+          fully custom alike.
         properties:
           apiVersion:
             description: |-
@@ -45,101 +54,104 @@ spec:
             type: object
           spec:
             description: |-
-              TalosClusterSpec describes the control-plane and worker pools that make
-              up one zone's Talos-managed Kubernetes cluster — see issue #24's
-              architecture decisions 1/5 (one cluster per zone) and 3/5 (control
-              plane/worker split, replica counts owned by InstancePool, not here).
+              AddonSpec configures one addon. Enabled is a pointer, not a plain bool,
+              so a hand-built Go value (e.g. a unit test's fake-client object, which
+              bypasses CRD admission defaulting) can still distinguish "unset" from
+              "explicitly false" — nil is treated as enabled, matching the effective
+              behavior +kubebuilder:default=true gives any real Create/Update through
+              the apiserver.
             properties:
-              controlPlane:
+              chart:
                 description: |-
-                  ControlPlane is this cluster's control-plane member pool. A
-                  replicas: 1 InstancePool (no etcd quorum) is a valid, supported
-                  configuration — not an edge case to guard against — see decision
-                  3/5.
+                  Chart identifies the Helm chart to install. Optional for the
+                  built-in addons, whose own default applies unless overridden here;
+                  required for any other ReleaseName.
                 properties:
-                  poolRef:
-                    description: |-
-                      PoolRef names the InstancePool this member sizes from — see
-                      InstancePoolReference's doc for why TalosCluster never carries its
-                      own replicas field.
+                  name:
+                    description: Name is the chart's own name within Repo.
+                    maxLength: 63
+                    type: string
+                  repo:
+                    description: Repo is the Helm chart repository URL.
+                    maxLength: 256
+                    type: string
+                  version:
+                    description: Version pins the chart version to install.
+                    maxLength: 32
+                    type: string
+                type: object
+              enabled:
+                default: true
+                description: |-
+                  Enabled controls whether this addon is installed at all. Defaults to
+                  true; set to false when something else (e.g. ArgoCD) already owns
+                  this addon's lifecycle.
+                type: boolean
+              lifecycle:
+                description: |-
+                  AddonLifecycleSpec configures how an addon is provisioned and, in the
+                  future, kept up to date.
+                properties:
+                  provisioning:
+                    description: AddonProvisioningSpec configures how an addon's manifests
+                      are applied.
                     properties:
-                      name:
-                        description: Name is the referenced InstancePool's name.
+                      method:
+                        default: HelmUpgradeInstall
+                        description: Method selects HelmUpgradeInstall (the default)
+                          or KubectlApply.
+                        enum:
+                        - HelmUpgradeInstall
+                        - KubectlApply
                         type: string
-                    required:
-                    - name
                     type: object
+                type: object
+              namespace:
+                description: Namespace configures the namespace this addon installs
+                  into.
+                properties:
+                  name:
+                    description: |-
+                      Name is the namespace's own name. Empty means the built-in's own
+                      default (for cilium/cert-manager) or an error (for any other
+                      ReleaseName).
+                    type: string
+                type: object
+              releaseName:
+                description: |-
+                  ReleaseName identifies this addon — also its Helm release name.
+                  "cilium" and "cert-manager" are built-in: leaving Chart/Namespace/
+                  Values unset falls back to this addon's own embedded defaults — see
+                  resolveAddon in pkg/domain/addon. Any other ReleaseName has no
+                  built-in fallback — Chart must be set.
+                maxLength: 63
+                type: string
+              talosClusterRef:
+                description: TalosClusterRef names the TalosCluster this addon belongs
+                  to.
+                properties:
+                  name:
+                    description: Name is the referenced TalosCluster's name.
+                    type: string
                 required:
-                - poolRef
+                - name
                 type: object
-              kubernetes:
+              values:
                 description: |-
-                  Kubernetes pins this cluster's Kubernetes version — see
-                  KubernetesSpec's own doc for why this isn't per-pool.
-                properties:
-                  version:
-                    description: |-
-                      Version is the Kubernetes version this cluster runs (e.g. "v1.32.0").
-                      Empty means the reconciler's own pinned default.
-                    maxLength: 32
-                    type: string
-                type: object
-              talos:
-                description: |-
-                  Talos pins this cluster's Talos version — one version for the whole
-                  cluster, see TalosSpec's own doc.
-                properties:
-                  version:
-                    description: |-
-                      Version is the Talos version this cluster's members run (e.g.
-                      "v1.13.0"). Empty means the reconciler's own pinned default.
-                    maxLength: 32
-                    type: string
-                type: object
-              workers:
-                description: |-
-                  Workers lists this cluster's worker pools. The controller bootstraps
-                  ControlPlane first and only starts reconciling Workers once the
-                  control plane reports healthy — a worker attempting to join before
-                  etcd exists must block, not race.
-                items:
-                  description: |-
-                    TalosClusterWorkerSpec is one entry in TalosCluster.spec.workers — a
-                    named worker pool, so a cluster can run more than one shape of worker
-                    (e.g. a gpu pool alongside the default), each independently sized by its
-                    own InstancePool.
-                  properties:
-                    name:
-                      description: |-
-                        Name identifies this worker pool within the cluster (e.g. "default",
-                        "gpu").
-                      type: string
-                    poolRef:
-                      description: PoolRef names the InstancePool this worker pool
-                        sizes from.
-                      properties:
-                        name:
-                          description: Name is the referenced InstancePool's name.
-                          type: string
-                      required:
-                      - name
-                      type: object
-                  required:
-                  - name
-                  - poolRef
-                  type: object
-                maxItems: 32
-                type: array
+                  Values are user-provided Helm values, merged on top of Kontinuum's
+                  own required values for this addon — user values win on conflict.
+                  Free-form (not a typed struct) since chart values vary per addon and
+                  per chart version.
+                x-kubernetes-preserve-unknown-fields: true
             required:
-            - controlPlane
+            - releaseName
+            - talosClusterRef
             type: object
           status:
-            description: TalosClusterStatus reports this cluster's bootstrap progress.
+            description: AddonStatus reports one addon's install/health state.
             properties:
               conditions:
-                description: |-
-                  Conditions reports this cluster's state, e.g. ControlPlaneReady,
-                  Bootstrapped, Ready.
+                description: Conditions reports this addon's state, e.g. Ready.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -198,27 +210,13 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
-              secretRef:
-                description: |-
-                  SecretRef points to the Secret holding this cluster's generated Talos
-                  secrets bundle (key "secrets-bundle") and, once bootstrapped, its
-                  kubeconfig (key "kubeconfig") — kept out of status directly for the
-                  same reason KontinuumStatus.SecretRef is: a Secret's RBAC can be
-                  restricted independently of who can read this broadly-visible
-                  TalosCluster object.
-                properties:
-                  name:
-                    description: Name is the Secret's name.
-                    type: string
-                  namespace:
-                    description: Namespace is the Secret's namespace.
-                    type: string
-                type: object
             type: object
         required:
         - metadata
         - spec
         type: object
+    selectableFields:
+    - jsonPath: .spec.talosClusterRef.name
     served: true
     storage: true
     subresources:

@@ -1,4 +1,4 @@
-package taloscluster //nolint:testpackage // exercises unexported loadAddonDefaults/builtinAddonNames directly
+package addon //nolint:testpackage // exercises unexported loadAddonDefaults/builtinAddonNames directly
 
 import (
 	"testing"

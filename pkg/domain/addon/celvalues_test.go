@@ -1,4 +1,4 @@
-package taloscluster //nolint:testpackage // exercises unexported celEnv/celContext/evaluateComputedValues directly
+package addon //nolint:testpackage // exercises unexported celEnv/celContext/evaluateComputedValues directly
 
 import (
 	"testing"
