@@ -93,6 +93,7 @@ const testClusterName = "eu-1a"
 
 const (
 	controlPlanePoolName    = "cp-pool"
+	ciliumReleaseName       = "cilium"
 	ciliumAddonResourceName = testClusterName + "-cilium"
 	customAddonResourceName = testClusterName + "-my-addon"
 )
@@ -140,7 +141,7 @@ func builtinAddon() *v1alpha2.Addon {
 		ObjectMeta: metav1.ObjectMeta{Name: testClusterName + "-cilium"},
 		Spec: v1alpha2.AddonSpec{
 			TalosClusterRef: v1alpha2.TalosClusterReference{Name: testClusterName},
-			ReleaseName:     "cilium",
+			ReleaseName:     ciliumReleaseName,
 		},
 	}
 }
@@ -166,7 +167,7 @@ func TestReconcileBuiltinAddonResolvesEmbeddedDefaults(t *testing.T) {
 
 	require.Len(t, installer.calls, 1)
 	req := installer.calls[0]
-	assert.Equal(t, "cilium", req.ReleaseName)
+	assert.Equal(t, ciliumReleaseName, req.ReleaseName)
 	assert.Equal(t, "https://helm.cilium.io", req.RepoURL)
 	assert.Equal(t, "kube-system", req.Namespace)
 	assert.Equal(t, []string{"kube-system"}, prober.calls)
@@ -175,6 +176,37 @@ func TestReconcileBuiltinAddonResolvesEmbeddedDefaults(t *testing.T) {
 
 	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: ciliumAddonResourceName}, &got))
 	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, "Ready"))
+}
+
+// TestReconcileReleaseNameDefaultsToMetadataName covers an Addon that
+// never sets spec.releaseName at all — it must resolve as if
+// releaseName were its own metadata.name, e.g. so an Addon literally
+// named "cilium" is recognized as the built-in without repeating the
+// name in spec too.
+func TestReconcileReleaseNameDefaultsToMetadataName(t *testing.T) {
+	t.Parallel()
+
+	cluster, secret := readyCluster()
+	cpInstance := claimedDiscoveredInstance("cp-node-1")
+	cilium := &v1alpha2.Addon{
+		ObjectMeta: metav1.ObjectMeta{Name: ciliumReleaseName},
+		Spec:       v1alpha2.AddonSpec{TalosClusterRef: v1alpha2.TalosClusterReference{Name: testClusterName}},
+	}
+
+	fakeClient := newFakeClient(t, cluster, secret, cpInstance, cilium)
+
+	installer := &fakeAddonInstaller{}
+	prober := &fakePodProber{}
+	reconciler := newReconciler(fakeClient, installer, prober)
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ciliumReleaseName},
+	})
+	require.NoError(t, err)
+
+	require.Len(t, installer.calls, 1)
+	assert.Equal(t, ciliumReleaseName, installer.calls[0].ReleaseName)
+	assert.Equal(t, "https://helm.cilium.io", installer.calls[0].RepoURL)
 }
 
 func TestReconcileCustomAddonWithChartInstalls(t *testing.T) {

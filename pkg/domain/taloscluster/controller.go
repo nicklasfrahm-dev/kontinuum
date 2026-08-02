@@ -331,7 +331,7 @@ func (r *Reconciler) reconcileAddons(ctx context.Context, cluster *v1alpha2.Talo
 				reason = cond.Reason
 			}
 
-			unhealthy = append(unhealthy, candidate.Spec.ReleaseName+": "+reason)
+			unhealthy = append(unhealthy, addon.ReleaseName(&candidate)+": "+reason)
 		}
 	}
 

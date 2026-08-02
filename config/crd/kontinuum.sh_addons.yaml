@@ -120,10 +120,12 @@ spec:
               releaseName:
                 description: |-
                   ReleaseName identifies this addon — also its Helm release name.
-                  "cilium" and "cert-manager" are built-in: leaving Chart/Namespace/
-                  Values unset falls back to this addon's own embedded defaults — see
-                  resolveAddon in pkg/domain/addon. Any other ReleaseName has no
-                  built-in fallback — Chart must be set.
+                  Defaults to this Addon's own metadata.name when unset (see
+                  addon.ReleaseName in pkg/domain/addon). "cilium" and "cert-manager"
+                  are built-in: leaving Chart/Namespace/Values unset falls back to
+                  this addon's own embedded defaults — see resolveAddon in
+                  pkg/domain/addon. Any other ReleaseName has no built-in fallback —
+                  Chart must be set.
                 maxLength: 63
                 type: string
               talosClusterRef:
@@ -144,7 +146,6 @@ spec:
                   per chart version.
                 x-kubernetes-preserve-unknown-fields: true
             required:
-            - releaseName
             - talosClusterRef
             type: object
           status:

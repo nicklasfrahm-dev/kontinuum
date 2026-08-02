@@ -5,6 +5,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 )
 
 func TestLoadAddonDefaultsReturnsErrorOnMissingFile(t *testing.T) {
@@ -24,4 +27,17 @@ func TestLoadAddonDefaultsBuiltins(t *testing.T) {
 		assert.NotEmpty(t, def.Chart.Repo)
 		assert.NotEmpty(t, def.Namespace)
 	}
+}
+
+func TestReleaseNameDefaultsToMetadataName(t *testing.T) {
+	t.Parallel()
+
+	unset := &v1alpha2.Addon{ObjectMeta: metav1.ObjectMeta{Name: "cilium"}}
+	assert.Equal(t, "cilium", ReleaseName(unset))
+
+	explicit := &v1alpha2.Addon{
+		ObjectMeta: metav1.ObjectMeta{Name: "eu-1a-cilium"},
+		Spec:       v1alpha2.AddonSpec{ReleaseName: "cilium"},
+	}
+	assert.Equal(t, "cilium", ReleaseName(explicit))
 }

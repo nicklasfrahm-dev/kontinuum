@@ -115,6 +115,18 @@ func Enabled(spec v1alpha2.AddonSpec) bool {
 	return spec.Enabled == nil || *spec.Enabled
 }
 
+// ReleaseName returns addon's own effective release name — spec.ReleaseName
+// when set, defaulting to the Addon's own metadata.name otherwise, so a
+// user creating e.g. an Addon named "cilium" doesn't need to repeat the
+// name in spec.releaseName too.
+func ReleaseName(addon *v1alpha2.Addon) string {
+	if addon.Spec.ReleaseName != "" {
+		return addon.Spec.ReleaseName
+	}
+
+	return addon.Name
+}
+
 // addonMethod returns spec's own provisioning method, defaulting to
 // HelmUpgradeInstall when unset.
 func addonMethod(spec v1alpha2.AddonSpec) v1alpha2.AddonProvisioningMethod {

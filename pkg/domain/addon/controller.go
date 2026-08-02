@@ -146,6 +146,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, fmt.Errorf("failed to get addon %q: %w", req.Name, err)
 	}
 
+	addon.Spec.ReleaseName = ReleaseName(&addon)
+
 	if !Enabled(addon.Spec) {
 		return ctrl.Result{}, nil // disabled — nothing to do; TalosCluster's own aggregation skips it too
 	}

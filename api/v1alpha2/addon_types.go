@@ -83,13 +83,15 @@ type AddonSpec struct {
 	// TalosClusterRef names the TalosCluster this addon belongs to.
 	TalosClusterRef TalosClusterReference `json:"talosClusterRef"`
 	// ReleaseName identifies this addon — also its Helm release name.
-	// "cilium" and "cert-manager" are built-in: leaving Chart/Namespace/
-	// Values unset falls back to this addon's own embedded defaults — see
-	// resolveAddon in pkg/domain/addon. Any other ReleaseName has no
-	// built-in fallback — Chart must be set.
-	// +kubebuilder:validation:Required
+	// Defaults to this Addon's own metadata.name when unset (see
+	// addon.ReleaseName in pkg/domain/addon). "cilium" and "cert-manager"
+	// are built-in: leaving Chart/Namespace/Values unset falls back to
+	// this addon's own embedded defaults — see resolveAddon in
+	// pkg/domain/addon. Any other ReleaseName has no built-in fallback —
+	// Chart must be set.
+	// +optional
 	// +kubebuilder:validation:MaxLength=63
-	ReleaseName string `json:"releaseName"`
+	ReleaseName string `json:"releaseName,omitempty"`
 	// Enabled controls whether this addon is installed at all. Defaults to
 	// true; set to false when something else (e.g. ArgoCD) already owns
 	// this addon's lifecycle.
