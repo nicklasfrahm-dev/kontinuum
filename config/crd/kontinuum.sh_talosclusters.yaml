@@ -124,10 +124,15 @@ spec:
                       maxLength: 63
                       type: string
                     namespace:
-                      description: |-
-                        Namespace this addon installs into. Empty means the built-in's own
-                        default (for cilium/cert-manager) or an error (for any other Name).
-                      type: string
+                      description: Namespace configures the namespace this addon installs
+                        into.
+                      properties:
+                        name:
+                          description: |-
+                            Name is the namespace's own name. Empty means the built-in's own
+                            default (for cilium/cert-manager) or an error (for any other Name).
+                          type: string
+                      type: object
                     values:
                       description: |-
                         Values are user-provided Helm values, merged on top of Kontinuum's

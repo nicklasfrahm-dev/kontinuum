@@ -348,7 +348,7 @@ func TestReconcileAddonNamespaceVersionAndValuesOverride(t *testing.T) {
 	cluster.Spec.Addons = []v1alpha2.AddonSpec{
 		{
 			Name:      "cilium",
-			Namespace: "custom-cilium-ns",
+			Namespace: v1alpha2.AddonNamespaceSpec{Name: "custom-cilium-ns"},
 			Chart:     &v1alpha2.AddonChartSpec{Version: "1.99.0"},
 			Values:    &apiextensionsv1.JSON{Raw: userValues},
 		},
@@ -424,7 +424,7 @@ func TestReconcileCustomAddonInstalls(t *testing.T) {
 	cluster.Spec.Addons = []v1alpha2.AddonSpec{
 		{
 			Name:      "my-addon",
-			Namespace: "my-addon-ns",
+			Namespace: v1alpha2.AddonNamespaceSpec{Name: "my-addon-ns"},
 			Chart:     &v1alpha2.AddonChartSpec{Repo: "https://example.com/charts", Name: "my-chart", Version: "1.0.0"},
 		},
 	}

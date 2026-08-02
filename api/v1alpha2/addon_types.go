@@ -60,6 +60,17 @@ type AddonChartSpec struct {
 	Version string `json:"version,omitempty"`
 }
 
+// AddonNamespaceSpec configures the namespace an addon installs into. A
+// struct rather than a bare string so it can later grow labels (e.g. the
+// pod-security-standard labels Cilium's own namespace needs to run
+// privileged) without another breaking field-shape change.
+type AddonNamespaceSpec struct {
+	// Name is the namespace's own name. Empty means the built-in's own
+	// default (for cilium/cert-manager) or an error (for any other Name).
+	// +optional
+	Name string `json:"name,omitempty"`
+}
+
 // AddonSpec configures one addon this TalosCluster installs. Enabled is a
 // pointer, not a plain bool, so a hand-built Go value (e.g. a unit test's
 // fake-client object, which bypasses CRD admission defaulting) can still
@@ -90,10 +101,9 @@ type AddonSpec struct {
 	Chart *AddonChartSpec `json:"chart,omitempty"`
 	// +optional
 	Lifecycle AddonLifecycleSpec `json:"lifecycle,omitempty"`
-	// Namespace this addon installs into. Empty means the built-in's own
-	// default (for cilium/cert-manager) or an error (for any other Name).
+	// Namespace configures the namespace this addon installs into.
 	// +optional
-	Namespace string `json:"namespace,omitempty"`
+	Namespace AddonNamespaceSpec `json:"namespace,omitempty"`
 	// Values are user-provided Helm values, merged on top of Kontinuum's
 	// own required values for this addon — user values win on conflict.
 	// Free-form (not a typed struct) since chart values vary per addon and

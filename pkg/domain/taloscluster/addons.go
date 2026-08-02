@@ -286,8 +286,8 @@ func resolveAddon(spec v1alpha2.AddonSpec, def addonDefaults, celCtx map[string]
 	}
 
 	namespace := def.Namespace
-	if spec.Namespace != "" {
-		namespace = spec.Namespace
+	if spec.Namespace.Name != "" {
+		namespace = spec.Namespace.Name
 	}
 
 	if namespace == "" {
