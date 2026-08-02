@@ -10,6 +10,12 @@
 - If the Makefile is modified, the README.md make targets section must be updated with the output of `make help`.
 - All enums must be PascalCase, with abbreviations capitalized, following Kubernetes conventions (e.g. `ClusterIP`).
 
+## Documentation
+
+- All features must be documented in the `docs/` MkDocs site (see `mkdocs.yml`), not only in code comments.
+- A new CRD, controller, CLI command, or config option must land in the same PR as the docs page (or section) describing it — extend an existing page under `docs/` (e.g. `docs/architecture.md`, `docs/quickstart.md`) or add a new one and wire it into `mkdocs.yml`'s `nav`.
+- Preview docs changes locally with `make docs` before opening a PR.
+
 ## Commits
 
 - Follow [Conventional Commits](https://www.conventionalcommits.org/).

@@ -118,9 +118,24 @@ tidy: ## Download and tidy dependencies
 	$(GOMOD) download
 	$(GOMOD) tidy
 
+##@ Documentation
+
+DOCSVENV := .venv/docs
+
+.PHONY: docs
+docs: ## Serve documentation locally with live-reload (http://127.0.0.1:8000)
+	@printf '$(CYAN)Installing documentation dependencies...$(RESET)\n'
+	@python3 -m venv $(DOCSVENV)
+	@$(DOCSVENV)/bin/pip install --quiet -r docs/requirements.txt
+	$(DOCSVENV)/bin/mkdocs serve
+
 ##@ Cleanup
 
 .PHONY: clean
 clean: ## Remove build artifacts
 	rm -rf $(BINDIR) pkg/ui/assets/vendor
 	$(GOCMD) clean
+
+.PHONY: docs-clean
+docs-clean: ## Remove the documentation virtualenv and built site
+	rm -rf $(DOCSVENV) site

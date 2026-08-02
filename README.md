@@ -2,6 +2,8 @@
 
 A Kubernetes-style API server built on [kommodity](https://github.com/kommodity-io/kommodity)'s `libkapi` package. It embeds a generic apiserver + apiextensions (CRD) server + aggregation layer, backed by pluggable storage (SQLite, PostgreSQL, etcd, ...).
 
+Full documentation: **[nicklasfrahm-dev.github.io/kontinuum](https://nicklasfrahm-dev.github.io/kontinuum/)**
+
 > **Warning:** The server ships with no TLS and no authentication by default. Put a TLS-terminating, authenticating proxy in front before exposing it outside a trusted network.
 
 <p align="center">
@@ -106,13 +108,18 @@ Development
 
 Quality
   test           Run tests
+  test-e2e       Run gated end-to-end tests (requires Docker; boots real containers)
   vet            Run go vet
   lint           Run golangci-lint
   lint-fix       Run golangci-lint and fix issues
   tidy           Download and tidy dependencies
 
+Documentation
+  docs           Serve documentation locally with live-reload (http://127.0.0.1:8000)
+
 Cleanup
   clean          Remove build artifacts
+  docs-clean     Remove the documentation virtualenv and built site
 ```
 
 ## Container
