@@ -846,6 +846,106 @@ func TestHandleSettingsUsesForwardedProtoForKubeconfigOrigin(t *testing.T) {
 	assert.NotContains(t, string(body), "insecure-skip-tls-verify")
 }
 
+func TestHandleIAMShowsAdminGroupBindings(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	cfg := config.Config{}
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+	cfg.OIDC.AdminGroups = "platform-admins, sre "
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, true, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/iam"))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), "Role bindings")
+	assert.Contains(t, string(body), "platform-admins")
+	assert.Contains(t, string(body), "sre")
+	assert.Contains(t, string(body), "system:masters")
+	assert.NotContains(t, string(body), "No admin groups are configured")
+}
+
+func TestHandleIAMShowsNoticeWhenOIDCDisabled(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/iam"))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), "OIDC is not configured")
+	assert.NotContains(t, string(body), "Role bindings")
+}
+
+func TestHandleIAMShowsNoBindingsMessageWhenAdminGroupsEmpty(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	cfg := config.Config{}
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, true, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/iam"))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), "Role bindings")
+	assert.Contains(t, string(body), "No admin groups are configured")
+}
+
 func TestRegisterRoutesDefaultsToUnconditionalAppRedirect(t *testing.T) {
 	t.Parallel()
 

@@ -39,24 +39,6 @@ const (
 	podProbeTimeout = 15 * time.Second
 )
 
-// TalosClusterRefField is the controller-runtime cache index name for
-// Addon.spec.talosClusterRef.name — registered once in
-// Controller.SetupWithManager. pkg/domain/taloscluster's own
-// reconcileAddons relies on it via ListForCluster (there's no other way
-// to discover which Addons belong to a TalosCluster now that
-// spec.addons[] is gone), and it's reusable by tests via
-// fake.NewClientBuilder().WithIndex(...).
-const TalosClusterRefField = "spec.talosClusterRef.name"
-
-func indexByTalosClusterRef(obj client.Object) []string {
-	addon, ok := obj.(*v1alpha2.Addon)
-	if !ok {
-		return nil
-	}
-
-	return []string{addon.Spec.TalosClusterRef.Name}
-}
-
 // Config configures a Controller.
 type Config struct {
 	// Logger receives the controller's log output.
@@ -103,19 +85,15 @@ func NewController(cfg Config) *Controller {
 	return &Controller{Config: cfg}
 }
 
-// SetupWithManager registers the field index Addon's own field selector
-// (see api/v1alpha2's own +kubebuilder:selectablefield marker) and this
-// package's List calls both rely on, then the Addon reconciler itself.
-// The addons.kontinuum.sh CRD is ensured separately, via
-// instance.EnsureCRDs (see pkg/cli/serve.go) — not here, for the same
-// reason instance.Controller.SetupWithManager's own doc gives.
+// SetupWithManager registers the Addon reconciler on mgr. The
+// addons.kontinuum.sh CRD is ensured separately, via instance.EnsureCRDs
+// (see pkg/cli/serve.go) — not here, for the same reason
+// instance.Controller.SetupWithManager's own doc gives: SetupWithManager
+// runs before the listener is bound, so ListForCluster deliberately lists
+// and filters client-side instead of relying on a cache field index built
+// here (which would force a discovery call against that not-yet-listening
+// server).
 func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
-	err := mgr.GetFieldIndexer().IndexField(
-		context.Background(), &v1alpha2.Addon{}, TalosClusterRefField, indexByTalosClusterRef)
-	if err != nil {
-		return fmt.Errorf("failed to index addons by talosClusterRef: %w", err)
-	}
-
 	reconciler := &Reconciler{
 		Client:        mgr.GetClient(),
 		Installer:     c.Config.Installer,
@@ -125,7 +103,7 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		Logger:        c.Config.Logger,
 	}
 
-	err = ctrl.NewControllerManagedBy(mgr).For(&v1alpha2.Addon{}).Complete(reconciler)
+	err := ctrl.NewControllerManagedBy(mgr).For(&v1alpha2.Addon{}).Complete(reconciler)
 	if err != nil {
 		return fmt.Errorf("failed to register addon controller: %w", err)
 	}

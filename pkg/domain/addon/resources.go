@@ -93,18 +93,28 @@ func ensureBuiltinAddonSeed(
 
 // ListForCluster returns every Addon referencing clusterName — the only
 // way to discover a TalosCluster's own addons now that TalosCluster.spec
-// carries no addon list of its own. Relies on the field index
-// Controller.SetupWithManager registers on the manager's cached client; a
-// caller using a client without that index registered (e.g. a hand-built
-// fake in a test lacking WithIndex) gets a clear error, not silent empty
-// results.
+// carries no addon list of its own. Lists every Addon and filters
+// client-side rather than through a cache field index: Controller.
+// SetupWithManager runs before the server's own listener is bound (see its
+// own doc), and registering a field index there would force an immediate
+// discovery call against that not-yet-listening server. Addon counts per
+// cluster are small, so the extra client-side pass costs nothing that
+// matters.
 func ListForCluster(ctx context.Context, kubeClient client.Client, clusterName string) (v1alpha2.AddonList, error) {
-	var addons v1alpha2.AddonList
+	var all v1alpha2.AddonList
 
-	err := kubeClient.List(ctx, &addons, client.MatchingFields{TalosClusterRefField: clusterName})
+	err := kubeClient.List(ctx, &all)
 	if err != nil {
 		return v1alpha2.AddonList{}, fmt.Errorf("failed to list addons for %q: %w", clusterName, err)
 	}
 
-	return addons, nil
+	matched := v1alpha2.AddonList{}
+
+	for _, item := range all.Items {
+		if item.Spec.TalosClusterRef.Name == clusterName {
+			matched.Items = append(matched.Items, item)
+		}
+	}
+
+	return matched, nil
 }
