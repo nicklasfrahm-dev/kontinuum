@@ -27,8 +27,13 @@ const (
 	// addonInstallTimeout bounds every Helm install/upgrade call on the
 	// client side — mirrors pkg/domain/taloscluster's own identical
 	// rationale (a stalled chart fetch shouldn't block a reconcile
-	// indefinitely).
-	addonInstallTimeout = 30 * time.Second
+	// indefinitely). 90s, not 30s: with three addons now installing
+	// concurrently (gateway-api-crds, cilium, cert-manager, up from two),
+	// real chart-repo fetch + apply latency for a single install can
+	// exceed 30s under that combined load — observed via a real e2e run
+	// where cert-manager's own install hit exactly this timeout three
+	// reconciles in a row before finally landing within it on the fourth.
+	addonInstallTimeout = 90 * time.Second
 
 	// podProbeTimeout bounds each PodProber.NamespaceHealthy call.
 	podProbeTimeout = 15 * time.Second
@@ -62,6 +67,9 @@ type Config struct {
 	// PodProber checks whether an installed addon's pods are actually
 	// healthy. Defaults to NewPodProber() when nil.
 	PodProber PodProber
+	// CRDChecker checks whether an installed addon's own CRDs are
+	// Established and discoverable. Defaults to NewCRDChecker() when nil.
+	CRDChecker CRDChecker
 	// RetryInterval is how long Reconcile waits before retrying a step
 	// that hasn't converged yet. Defaults to fifteen seconds when zero.
 	RetryInterval time.Duration
@@ -82,6 +90,10 @@ func NewController(cfg Config) *Controller {
 
 	if cfg.PodProber == nil {
 		cfg.PodProber = NewPodProber()
+	}
+
+	if cfg.CRDChecker == nil {
+		cfg.CRDChecker = NewCRDChecker()
 	}
 
 	if cfg.RetryInterval == 0 {
@@ -108,6 +120,7 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		Client:        mgr.GetClient(),
 		Installer:     c.Config.Installer,
 		PodProber:     c.Config.PodProber,
+		CRDChecker:    c.Config.CRDChecker,
 		RetryInterval: c.Config.RetryInterval,
 		Logger:        c.Config.Logger,
 	}
@@ -129,6 +142,7 @@ type Reconciler struct {
 	Client        client.Client
 	Installer     Installer
 	PodProber     PodProber
+	CRDChecker    CRDChecker
 	RetryInterval time.Duration
 	Logger        *slog.Logger
 }
@@ -152,6 +166,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil // disabled — nothing to do; TalosCluster's own aggregation skips it too
 	}
 
+	result, ready, err := r.waitForEarlierWaves(ctx, &addon)
+	if err != nil || !ready {
+		return result, err
+	}
+
 	kubeconfig, result, ready, err := r.readyKubeconfig(ctx, addon.Spec.TalosClusterRef.Name)
 	if err != nil || !ready {
 		return result, err
@@ -162,26 +181,83 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return r.setReady(ctx, &addon, metav1.ConditionFalse, "InstallFailed", err.Error())
 	}
 
+	return r.installAndVerify(ctx, &addon, kubeconfig, installReq)
+}
+
+// installAndVerify installs installReq's chart, then gates addon's own
+// Ready condition behind two checks: installReq's own CRDs (if any) are
+// Established and discoverable, then its pods are healthy.
+func (r *Reconciler) installAndVerify(
+	ctx context.Context, addon *v1alpha2.Addon, kubeconfig []byte, installReq InstallRequest,
+) (ctrl.Result, error) {
 	installCtx, cancel := context.WithTimeout(ctx, addonInstallTimeout)
 	defer cancel()
 
-	err = r.Installer.Install(installCtx, kubeconfig, installReq)
+	err := r.Installer.Install(installCtx, kubeconfig, installReq)
 	if err != nil {
 		r.Logger.Warn("failed to install addon", "addon", addon.Name, "error", err)
 
-		return r.setReady(ctx, &addon, metav1.ConditionFalse, "InstallFailed", err.Error())
+		return r.setReady(ctx, addon, metav1.ConditionFalse, "InstallFailed", err.Error())
 	}
 
-	healthy, reason, err := r.probeHealthy(ctx, kubeconfig, installReq.Namespace)
+	crdsOK, crdReason, err := r.CRDChecker.ChartCRDsReady(ctx, kubeconfig, installReq)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to check crd readiness for addon %q: %w", addon.Name, err)
+	}
+
+	if !crdsOK {
+		return r.setReady(ctx, addon, metav1.ConditionFalse, "CRDsNotReady", crdReason)
+	}
+
+	healthy, reason, err := r.probeHealthy(ctx, kubeconfig, installReq)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
 	if !healthy {
-		return r.setReady(ctx, &addon, metav1.ConditionFalse, "NotHealthy", reason)
+		return r.setReady(ctx, addon, metav1.ConditionFalse, "NotHealthy", reason)
 	}
 
-	return r.setReady(ctx, &addon, metav1.ConditionTrue, "Healthy", "installed and healthy")
+	return r.setReady(ctx, addon, metav1.ConditionTrue, "Healthy", "installed and healthy")
+}
+
+// waitForEarlierWaves requeues until every other enabled Addon sharing
+// addon's own cluster with a strictly lower EffectivePriority (i.e. an
+// earlier install "wave") is already Ready — see
+// AddonLifecycleSpec.Priority's own doc. Addons sharing the same
+// priority never wait on each other, installing fully in parallel, same
+// as if this didn't exist at all.
+func (r *Reconciler) waitForEarlierWaves(ctx context.Context, addon *v1alpha2.Addon) (ctrl.Result, bool, error) {
+	myPriority, err := EffectivePriority(addon)
+	if err != nil {
+		return ctrl.Result{}, false, err
+	}
+
+	siblings, err := ListForCluster(ctx, r.Client, addon.Spec.TalosClusterRef.Name)
+	if err != nil {
+		return ctrl.Result{}, false, err
+	}
+
+	for _, sibling := range siblings.Items {
+		if sibling.Name == addon.Name || !Enabled(sibling.Spec) {
+			continue
+		}
+
+		siblingPriority, err := EffectivePriority(&sibling)
+		if err != nil {
+			return ctrl.Result{}, false, err
+		}
+
+		if siblingPriority >= myPriority {
+			continue
+		}
+
+		if !meta.IsStatusConditionTrue(sibling.Status.Conditions, addonReadyConditionType) {
+			return ctrl.Result{RequeueAfter: r.RetryInterval}, false, nil
+		}
+	}
+
+	return ctrl.Result{}, true, nil
 }
 
 // readyKubeconfig resolves clusterName's own stored kubeconfig, folding
@@ -258,17 +334,22 @@ func (r *Reconciler) resolveInstallRequest(ctx context.Context, spec v1alpha2.Ad
 	return resolveAddon(spec, celCtx)
 }
 
-// probeHealthy checks namespace's pods via PodProber — installRelease/
+// probeHealthy checks installReq's own pods via PodProber — installRelease/
 // upgradeRelease only apply manifests, they don't wait for rollout, so
 // this is the step that actually confirms an addon is usable, not just
 // applied.
-func (r *Reconciler) probeHealthy(ctx context.Context, kubeconfig []byte, namespace string) (bool, string, error) {
+func (r *Reconciler) probeHealthy(
+	ctx context.Context, kubeconfig []byte, installReq InstallRequest,
+) (bool, string, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, podProbeTimeout)
 	defer cancel()
 
-	healthy, reason, err := r.PodProber.NamespaceHealthy(probeCtx, kubeconfig, namespace)
+	chartLabel := helmChartLabel(installReq.ChartName, installReq.Version)
+
+	healthy, reason, err := r.PodProber.NamespaceHealthy(
+		probeCtx, kubeconfig, installReq.Namespace, installReq.ReleaseName, chartLabel)
 	if err != nil {
-		return false, "", fmt.Errorf("failed to probe pod health in %q: %w", namespace, err)
+		return false, "", fmt.Errorf("failed to probe pod health in %q: %w", installReq.Namespace, err)
 	}
 
 	return healthy, reason, nil

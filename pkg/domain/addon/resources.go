@@ -20,13 +20,11 @@ func addonResourceName(clusterName, releaseName string) string {
 	return clusterName + "-" + releaseName
 }
 
-// EnsureBuiltinSeeds creates cilium's and cert-manager's Addon CRs for
-// cluster with a minimal spec (TalosClusterRef + ReleaseName only —
-// Chart/Namespace/Values left unset, so resolveAddon's own built-in
-// fallback applies), one per name, only if each doesn't already exist.
-// Deliberately create-only — see this package's own doc for why
-// continuously re-asserting a desired spec here would fight a user's own
-// edits (enabled: false, a customized values, a pinned chart version).
+// EnsureBuiltinSeeds creates every built-in's own Addon CR for cluster,
+// one per name, only if it doesn't already exist. Deliberately
+// create-only — see this package's own doc for why continuously
+// re-asserting a desired spec here would fight a user's own edits
+// (enabled: false, a customized values, a pinned chart version).
 func EnsureBuiltinSeeds(ctx context.Context, kubeClient client.Client, cluster *v1alpha2.TalosCluster) error {
 	for _, releaseName := range builtinAddonNames() {
 		err := ensureBuiltinAddonSeed(ctx, kubeClient, cluster, releaseName)
@@ -38,7 +36,20 @@ func EnsureBuiltinSeeds(ctx context.Context, kubeClient client.Client, cluster *
 	return nil
 }
 
-// ensureBuiltinAddonSeed is EnsureBuiltinSeeds' own per-addon body.
+// ensureBuiltinAddonSeed is EnsureBuiltinSeeds' own per-addon body. The
+// seeded spec bakes in this built-in's own default namespace/priority
+// explicitly (read once, at creation time, from its embedded
+// values/<name>.yaml) rather than leaving spec.namespace/spec.lifecycle
+// empty and relying on resolveAddon's own invisible fallback — so
+// `kubectl get addon -o yaml` is self-documenting instead of requiring a
+// reader to know the built-in fallback exists at all. Chart/Values are
+// still left unset: unlike namespace/priority, they're not something a
+// reader benefits from seeing spelled out redundantly, and leaving them
+// unset is what lets resolveAddon's own chart-version fallback keep
+// tracking a bumped default (e.g. a chart version bump in
+// values/cilium.yaml) after this seed was first created — namespace and
+// priority essentially never change post-creation, so baking those in
+// costs nothing.
 func ensureBuiltinAddonSeed(
 	ctx context.Context, kubeClient client.Client, cluster *v1alpha2.TalosCluster, releaseName string,
 ) error {
@@ -53,9 +64,18 @@ func ensureBuiltinAddonSeed(
 		return fmt.Errorf("failed to check for existing addon %q: %w", seed.Name, err)
 	}
 
+	def, err := loadAddonDefaults(releaseName)
+	if err != nil {
+		return fmt.Errorf("failed to load built-in defaults for addon %q: %w", releaseName, err)
+	}
+
+	priority := def.Lifecycle.Priority
+
 	seed.Spec = v1alpha2.AddonSpec{
 		TalosClusterRef: v1alpha2.TalosClusterReference{Name: cluster.Name},
 		ReleaseName:     releaseName,
+		Namespace:       def.Namespace,
+		Lifecycle:       v1alpha2.AddonLifecycleSpec{Priority: &priority},
 	}
 
 	err = controllerutil.SetControllerReference(cluster, seed, kubeClient.Scheme())

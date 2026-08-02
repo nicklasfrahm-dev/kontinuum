@@ -1,0 +1,34 @@
+# Gateway API CRDs — a required prerequisite for enabling Gateway API
+# support in cilium's and cert-manager's own charts (see their own
+# values files' gatewayAPI/enableGatewayAPI toggles): both assume the
+# Gateway API CRDs already exist, neither chart installs them itself.
+# priority is lower than the default (100) so this addon's own
+# Reconciler blocks cilium/cert-manager from installing until these
+# CRDs exist — see EffectivePriority and Reconciler's own priority-wave
+# gating. This chart installs no pods of its own at all — PodProber's
+# own "no pods" gate (see its own doc) checks for exactly that instead
+# of vacuously passing. provisioning.method is KubectlApply, not the
+# default HelmUpgradeInstall: the full standard Gateway API CRD set is
+# large enough that a Helm release record (a single Secret, capped at
+# 1MiB) can't hold it — see installViaKubectlApply's own doc for why
+# that path exists. Only the standard Gateway API CRDs are enabled —
+# not Envoy Gateway's own extension CRDs (gateway.envoyproxy.io/*),
+# which are irrelevant here since Cilium implements Gateway API itself,
+# not Envoy Gateway. namespace is shared with cert-manager's own —
+# harmless, since PodProber's own health probe filters by this addon's
+# own release/chart label, not every pod in the namespace (see that
+# package's own doc).
+chart:
+  name: "oci://docker.io/envoyproxy/gateway-crds-helm"
+  version: 1.8.3
+namespace:
+  name: kontinuum-system
+lifecycle:
+  priority: 50
+  provisioning:
+    method: KubectlApply
+values:
+  crds:
+    gatewayAPI:
+      enabled: true
+      channel: standard

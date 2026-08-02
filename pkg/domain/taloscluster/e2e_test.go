@@ -2,8 +2,10 @@ package taloscluster_test
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,32 +87,31 @@ func TestE2ETalosClusterBootstrapsAndWorkerJoins(t *testing.T) {
 	// kube-system at all. assertNamespaceHealthy still polls rather than
 	// checking once, since "worker just joined" only bounds when that pod
 	// starts existing, not how long it then takes to converge.
-	podProber := addon.NewPodProber()
-
 	assertWorkerJoins(ctx, t, kubeconfig)
 
-	assertNamespaceHealthy(ctx, t, podProber, kubeconfig, "kube-system")
-	assertNamespaceHealthy(ctx, t, podProber, kubeconfig, "kontinuum-system")
+	assertNamespaceHealthy(ctx, t, kubeconfig, "kube-system")
+	assertNamespaceHealthy(ctx, t, kubeconfig, "kontinuum-system")
 }
 
 // assertNamespaceHealthy fails the test if not every pod in namespace
 // becomes healthy within e2eAddonHealthTimeout — see
-// addon.PodProber.NamespaceHealthy's own doc for what "healthy" means.
-// Polls instead of checking once: a namespace can legitimately contain a
-// freshly-scheduled, not-yet-healthy pod whenever cluster membership
-// changes (see TestE2ETalosClusterBootstrapsAndWorkerJoins' own doc on
-// assertWorkerJoins running first) — that's expected convergence, not a
-// failure, and deserves a chance to settle rather than being judged on a
-// single instant.
-func assertNamespaceHealthy(
-	ctx context.Context, t *testing.T, podProber addon.PodProber, kubeconfig []byte, namespace string,
-) {
+// addon.AllPodsHealthy's own doc for what "healthy" means (this checks
+// every pod in namespace, not scoped to any one addon's own release —
+// deliberately, since a just-joined worker's own kube-system, and
+// coredns/kube-proxy in particular, aren't any single addon's own
+// pods). Polls instead of checking once: a namespace can legitimately
+// contain a freshly-scheduled, not-yet-healthy pod whenever cluster
+// membership changes (see TestE2ETalosClusterBootstrapsAndWorkerJoins'
+// own doc on assertWorkerJoins running first) — that's expected
+// convergence, not a failure, and deserves a chance to settle rather
+// than being judged on a single instant.
+func assertNamespaceHealthy(ctx context.Context, t *testing.T, kubeconfig []byte, namespace string) {
 	t.Helper()
 
 	var reason string
 
 	converged := assert.Eventually(t, func() bool {
-		healthy, probeReason, err := podProber.NamespaceHealthy(ctx, kubeconfig, namespace)
+		healthy, probeReason, err := addon.AllPodsHealthy(ctx, kubeconfig, namespace)
 		if err != nil {
 			t.Logf("failed to probe %q pod health (may be transient): %v", namespace, err)
 
@@ -149,19 +150,24 @@ func reconcileUntilReady(
 	t.Helper()
 
 	deadline := time.Now().Add(timeout)
+	logger := talosReconciler.Logger
 
 	for {
 		_, err := talosReconciler.Reconcile(ctx, req)
 		if err != nil {
-			t.Logf("taloscluster reconcile error (may be transient while bootstrapping): %v", err)
+			logger.Warn("taloscluster reconcile error (may be transient while bootstrapping)", "error", err)
 		}
 
 		reconcileAddonsOnce(ctx, t, fakeClient, addonReconciler)
+		logInstanceStatuses(ctx, logger, fakeClient)
 
 		var got v1alpha2.TalosCluster
 
 		getErr := fakeClient.Get(ctx, req.NamespacedName, &got)
-		if getErr == nil && meta.IsStatusConditionTrue(got.Status.Conditions, taloscluster.ReadyConditionType) {
+		logger.Info("progress: cluster status", "getErr", getErr, "conditions", conditionsSummary(got.Status.Conditions))
+
+		cond := meta.FindStatusCondition(got.Status.Conditions, taloscluster.ReadyConditionType)
+		if getErr == nil && cond != nil && cond.Status == metav1.ConditionTrue {
 			return
 		}
 
@@ -181,19 +187,41 @@ func reconcileUntilReady(
 	}
 }
 
-// reconcileAddonsOnce reconciles every Addon that currently exists — see
-// reconcileUntilReady's own doc for why this test drives both reconcilers
-// by hand instead of running a real controller-runtime manager.
+// conditionsSummary formats every one of conds onto a single log line —
+// "<none>" when there are none at all (e.g. before the first reconcile
+// reaches whatever sets the first one).
+func conditionsSummary(conds []metav1.Condition) string {
+	if len(conds) == 0 {
+		return "<none>"
+	}
+
+	parts := make([]string, 0, len(conds))
+	for _, cond := range conds {
+		parts = append(parts, fmt.Sprintf("%s=%s(%s: %s)", cond.Type, cond.Status, cond.Reason, cond.Message))
+	}
+
+	return strings.Join(parts, "; ")
+}
+
+// reconcileAddonsOnce reconciles every Addon that currently exists, then
+// logs each one's own conditions — see reconcileUntilReady's own doc for
+// why this test drives both reconcilers by hand instead of running a
+// real controller-runtime manager. Logs via addonReconciler's own
+// slog.Logger, not t.Logf: t.Log output is buffered until the test
+// completes, so it wouldn't actually stream live during a run that can
+// take minutes — logger writes straight to stdout as each line happens.
 func reconcileAddonsOnce(
 	ctx context.Context, t *testing.T, fakeClient client.Client, addonReconciler *addon.Reconciler,
 ) {
 	t.Helper()
 
+	logger := addonReconciler.Logger
+
 	var addons v1alpha2.AddonList
 
 	err := fakeClient.List(ctx, &addons)
 	if err != nil {
-		t.Logf("failed to list addons (may be transient): %v", err)
+		logger.Warn("failed to list addons (may be transient)", "error", err)
 
 		return
 	}
@@ -201,8 +229,49 @@ func reconcileAddonsOnce(
 	for _, a := range addons.Items {
 		_, err := addonReconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: a.Name}})
 		if err != nil {
-			t.Logf("addon %q reconcile error (may be transient while bootstrapping): %v", a.Name, err)
+			logger.Warn("addon reconcile error (may be transient while bootstrapping)", "addon", a.Name, "error", err)
 		}
+	}
+
+	logAddonStatuses(ctx, logger, fakeClient, addons)
+}
+
+// logAddonStatuses re-fetches each addon (reconcileAddonsOnce's own loop
+// mutated their status server-side, not the stale local copies in
+// addons) and logs a one-line-per-addon progress summary.
+func logAddonStatuses(ctx context.Context, logger *slog.Logger, fakeClient client.Client, addons v1alpha2.AddonList) {
+	for _, addonItem := range addons.Items {
+		var got v1alpha2.Addon
+
+		err := fakeClient.Get(ctx, types.NamespacedName{Name: addonItem.Name}, &got)
+		if err != nil {
+			logger.Warn("progress: failed to refetch addon status", "addon", addonItem.Name, "error", err)
+
+			continue
+		}
+
+		logger.Info("progress: addon status", "addon", addonItem.Name, "conditions", conditionsSummary(got.Status.Conditions))
+	}
+}
+
+// logInstanceStatuses logs every currently-existing Instance's own
+// conditions (e.g. Discovered) — the control-plane/worker Instance
+// fixtures setupE2ECluster seeds, watched the same way addon/cluster
+// conditions are, since worker-join and control-plane-health both
+// depend on Instance discovery state.
+func logInstanceStatuses(ctx context.Context, logger *slog.Logger, fakeClient client.Client) {
+	var instances v1alpha2.InstanceList
+
+	err := fakeClient.List(ctx, &instances)
+	if err != nil {
+		logger.Warn("progress: failed to list instances", "error", err)
+
+		return
+	}
+
+	for _, instanceItem := range instances.Items {
+		logger.Info("progress: instance status",
+			"instance", instanceItem.Name, "conditions", conditionsSummary(instanceItem.Status.Conditions))
 	}
 }
 
@@ -253,6 +322,7 @@ func setupE2ECluster(
 		Client:        fakeClient,
 		Installer:     addon.NewHelmInstaller(),
 		PodProber:     addon.NewPodProber(),
+		CRDChecker:    addon.NewCRDChecker(),
 		RetryInterval: e2eRetryInterval,
 		Logger:        logger,
 	}

@@ -16,43 +16,68 @@ import (
 	"maps"
 	"slices"
 
+	"helm.sh/helm/v3/pkg/registry"
 	"sigs.k8s.io/yaml"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 )
 
-// Addon names — each is also the embedded values/<name>.yaml filename, and
-// the Helm release/chart name for a built-in (see loadAddonDefaults and
-// resolveAddon, which infer both from this same string).
+// Addon names — each is also the embedded values/<name>.yaml filename (see
+// loadAddonDefaults). Also the Helm release name and, unless the embedded
+// file's own chart.name overrides it (see resolveAddonChart), the chart
+// name too.
 const (
-	ciliumAddonName      = "cilium"
-	certManagerAddonName = "cert-manager"
+	ciliumAddonName         = "cilium"
+	certManagerAddonName    = "cert-manager"
+	gatewayAPICRDsAddonName = "gateway-api-crds"
+	defaultAddonPriority    = int32(100)
 )
 
 //go:embed values/*.yaml
 var defaultValuesFS embed.FS
 
 // addonDefaults is one embedded values/<name>.yaml file's shape — chart
-// identity/version, install namespace, and Helm values all live together
-// so there's a single place to update when e.g. bumping a chart version.
-// The chart's own name is the embedded file's own name (see
-// loadAddonDefaults) — only Repo/Version live here. An Addon's own spec
-// can override each of these fields individually — see AddonSpec's own
-// doc.
+// identity/version, install namespace, lifecycle, and Helm values all
+// live together so there's a single place to update when e.g. bumping a
+// chart version. Namespace/Lifecycle deliberately mirror AddonSpec's own
+// field shapes (AddonNamespaceSpec, AddonLifecycleSpec) rather than a
+// flattened ad-hoc one, so a built-in's own defaults read like a real
+// spec fragment. The chart's own name defaults to the embedded file's
+// own name (see loadAddonDefaults) unless Chart.Name overrides it —
+// needed for an OCI chart reference (e.g. gateway-api-crds' own
+// "oci://..." chart name, which differs from its release name). An
+// Addon's own spec can override each of these fields individually — see
+// AddonSpec's own doc.
 type addonDefaults struct {
 	Chart struct {
 		Repo    string `json:"repo"`
+		Name    string `json:"name"`
 		Version string `json:"version"`
 	} `json:"chart"`
-	Namespace string         `json:"namespace"`
-	Values    map[string]any `json:"values"`
+	Namespace v1alpha2.AddonNamespaceSpec `json:"namespace"`
+	Lifecycle struct {
+		// Provisioning.Method is this built-in's own default
+		// provisioning method — see AddonProvisioningSpec.Method's own
+		// doc. Empty means "no built-in default", i.e. the global
+		// default (HelmUpgradeInstall) applies. gateway-api-crds' own
+		// embedded default sets this to KubectlApply: its own CRDs are
+		// large enough that a Helm release record (a single Secret,
+		// capped at 1MiB) can't hold them.
+		Provisioning v1alpha2.AddonProvisioningSpec `json:"provisioning"`
+		// Priority is this built-in's own default install-ordering
+		// priority — see AddonLifecycleSpec.Priority's own doc. Zero
+		// means "no built-in default", i.e. the global default (100)
+		// applies.
+		Priority int32 `json:"priority"`
+	} `json:"lifecycle"`
+	Values map[string]any `json:"values"`
 }
 
 // loadAddonDefaults reads and parses name's embedded values/<name>.yaml —
 // see that directory's own files for what each addon's required/functional
 // defaults are and why. Kept as real YAML files rather than Go literals
 // purely for readability/diffability. Returns an error, not a panic: only
-// the two built-in names (see builtinAddonNames) are ever expected to
+// the built-in names (see builtinAddonNames) are ever expected to
 // resolve to a real embedded file, but a generic addon system shouldn't
 // have a function's safety depend on every call site getting that
 // discipline right by convention.
@@ -127,14 +152,19 @@ func ReleaseName(addon *v1alpha2.Addon) string {
 	return addon.Name
 }
 
-// addonMethod returns spec's own provisioning method, defaulting to
-// HelmUpgradeInstall when unset.
-func addonMethod(spec v1alpha2.AddonSpec) v1alpha2.AddonProvisioningMethod {
-	if spec.Lifecycle.Provisioning.Method == "" {
-		return v1alpha2.AddonProvisioningMethodHelmUpgradeInstall
+// addonMethod returns spec's own provisioning method, falling back to
+// def's own built-in default (see addonDefaults.Lifecycle.Provisioning's
+// own doc), or HelmUpgradeInstall when neither sets one.
+func addonMethod(spec v1alpha2.AddonSpec, def addonDefaults) v1alpha2.AddonProvisioningMethod {
+	if spec.Lifecycle.Provisioning.Method != "" {
+		return spec.Lifecycle.Provisioning.Method
 	}
 
-	return spec.Lifecycle.Provisioning.Method
+	if def.Lifecycle.Provisioning.Method != "" {
+		return def.Lifecycle.Provisioning.Method
+	}
+
+	return v1alpha2.AddonProvisioningMethodHelmUpgradeInstall
 }
 
 // addonUserValues parses spec.Values into a plain map — nil (not an
@@ -168,14 +198,20 @@ var (
 // entry anywhere at all — see EnsureBuiltinSeeds. A function, not a
 // package-level slice, so nothing can mutate the shared backing array.
 func builtinAddonNames() []string {
-	return []string{ciliumAddonName, certManagerAddonName}
+	return []string{gatewayAPICRDsAddonName, ciliumAddonName, certManagerAddonName}
 }
 
 // resolveAddonChart resolves repo/chartName/version against def.Chart
 // (empty for a non-built-in addon), each overridden by the matching
-// spec.Chart field when set.
+// spec.Chart field when set. repo is required only when chartName isn't
+// itself an OCI reference (e.g. "oci://docker.io/..." — see
+// gateway-api-crds' own embedded default) — an OCI chart is addressed
+// entirely by its own name, with no separate repo URL.
 func resolveAddonChart(spec v1alpha2.AddonSpec, def addonDefaults) (string, string, string, error) {
 	repo, chartName, version := def.Chart.Repo, spec.ReleaseName, def.Chart.Version
+	if def.Chart.Name != "" {
+		chartName = def.Chart.Name
+	}
 
 	if spec.Chart != nil {
 		if spec.Chart.Repo != "" {
@@ -191,11 +227,39 @@ func resolveAddonChart(spec v1alpha2.AddonSpec, def addonDefaults) (string, stri
 		}
 	}
 
-	if repo == "" || chartName == "" {
+	if chartName == "" || (repo == "" && !registry.IsOCI(chartName)) {
 		return "", "", "", fmt.Errorf("%q: %w", spec.ReleaseName, errAddonMissingChart)
 	}
 
 	return repo, chartName, version, nil
+}
+
+// EffectivePriority resolves addon's own install-ordering priority (see
+// AddonLifecycleSpec.Priority's own doc): its spec value when set, this
+// addon's built-in default otherwise (see values/*.yaml's own priority
+// field), or the global default (100) for anything else — including a
+// non-built-in ReleaseName, which has no default of its own to fall back
+// on.
+func EffectivePriority(addon *v1alpha2.Addon) (int32, error) {
+	if addon.Spec.Lifecycle.Priority != nil {
+		return *addon.Spec.Lifecycle.Priority, nil
+	}
+
+	releaseName := ReleaseName(addon)
+	if !slices.Contains(builtinAddonNames(), releaseName) {
+		return defaultAddonPriority, nil
+	}
+
+	def, err := loadAddonDefaults(releaseName)
+	if err != nil {
+		return 0, err
+	}
+
+	if def.Lifecycle.Priority != 0 {
+		return def.Lifecycle.Priority, nil
+	}
+
+	return defaultAddonPriority, nil
 }
 
 // resolveAddon resolves one addon's chart/namespace/values into an
@@ -222,7 +286,7 @@ func resolveAddon(spec v1alpha2.AddonSpec, celCtx map[string]any) (InstallReques
 		return InstallRequest{}, err
 	}
 
-	namespace := def.Namespace
+	namespace := def.Namespace.Name
 	if spec.Namespace.Name != "" {
 		namespace = spec.Namespace.Name
 	}
@@ -247,7 +311,7 @@ func resolveAddon(spec v1alpha2.AddonSpec, celCtx map[string]any) (InstallReques
 		ChartName:   chartName,
 		Version:     version,
 		Namespace:   namespace,
-		Method:      addonMethod(spec),
+		Method:      addonMethod(spec, def),
 		Values:      mergeValues(resolvedDefaults, userValues),
 	}, nil
 }

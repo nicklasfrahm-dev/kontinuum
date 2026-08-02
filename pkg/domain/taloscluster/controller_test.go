@@ -290,10 +290,11 @@ func TestReconcileAggregatesReadyAcrossAddons(t *testing.T) {
 	cluster.Spec.Workers = nil
 
 	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", controlPlaneInstanceAddress)
+	gatewayCRDs := readyAddon("gateway-api-crds", metav1.ConditionTrue, "Healthy")
 	cilium := readyAddon("cilium", metav1.ConditionTrue, "Healthy")
 	certManager := readyAddon("cert-manager", metav1.ConditionFalse, "NotHealthy")
 
-	fakeClient := newFakeClient(t, cluster, cpInstance, cilium, certManager)
+	fakeClient := newFakeClient(t, cluster, cpInstance, gatewayCRDs, cilium, certManager)
 
 	reconciler := newReconciler(fakeClient, &fakeBootstrapper{})
 
@@ -343,6 +344,7 @@ func TestReconcileDisabledAddonSkippedInAggregation(t *testing.T) {
 	cluster.Spec.Workers = nil
 
 	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", controlPlaneInstanceAddress)
+	gatewayCRDs := readyAddon("gateway-api-crds", metav1.ConditionTrue, "Healthy")
 	certManager := readyAddon("cert-manager", metav1.ConditionTrue, "Healthy")
 	cilium := &v1alpha2.Addon{
 		ObjectMeta: metav1.ObjectMeta{Name: ciliumAddonResourceName},
@@ -353,7 +355,7 @@ func TestReconcileDisabledAddonSkippedInAggregation(t *testing.T) {
 		},
 	}
 
-	fakeClient := newFakeClient(t, cluster, cpInstance, cilium, certManager)
+	fakeClient := newFakeClient(t, cluster, cpInstance, gatewayCRDs, cilium, certManager)
 
 	reconciler := newReconciler(fakeClient, &fakeBootstrapper{})
 
@@ -385,11 +387,12 @@ func TestReconcileCustomAddonCountsTowardReady(t *testing.T) {
 	cluster.Spec.Workers = nil
 
 	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", controlPlaneInstanceAddress)
+	gatewayCRDs := readyAddon("gateway-api-crds", metav1.ConditionTrue, "Healthy")
 	cilium := readyAddon("cilium", metav1.ConditionTrue, "Healthy")
 	certManager := readyAddon("cert-manager", metav1.ConditionTrue, "Healthy")
 	custom := readyAddon("my-addon", metav1.ConditionFalse, "NotHealthy")
 
-	fakeClient := newFakeClient(t, cluster, cpInstance, cilium, certManager, custom)
+	fakeClient := newFakeClient(t, cluster, cpInstance, gatewayCRDs, cilium, certManager, custom)
 
 	reconciler := newReconciler(fakeClient, &fakeBootstrapper{})
 

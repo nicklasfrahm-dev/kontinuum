@@ -11,6 +11,7 @@ import (
 	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/cli"
 	"helm.sh/helm/v3/pkg/kube"
+	"helm.sh/helm/v3/pkg/registry"
 	"helm.sh/helm/v3/pkg/storage/driver"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
@@ -68,7 +69,12 @@ func (helmInstaller) installViaHelm(ctx context.Context, kubeconfig []byte, req 
 		return fmt.Errorf("failed to init helm action configuration for %q: %w", req.ReleaseName, err)
 	}
 
-	chrt, err := loadChart(req.ChartName, req.RepoURL, req.Version)
+	actionConfig.RegistryClient, err = registry.NewClient()
+	if err != nil {
+		return fmt.Errorf("failed to create helm registry client: %w", err)
+	}
+
+	chrt, err := loadChart(actionConfig, req.ChartName, req.RepoURL, req.Version)
 	if err != nil {
 		return err
 	}
@@ -85,9 +91,17 @@ func (helmInstaller) installViaHelm(ctx context.Context, kubeconfig []byte, req 
 	}
 }
 
-// loadChart locates and loads chartName@version from repoURL.
-func loadChart(chartName, repoURL, version string) (*chart.Chart, error) {
-	chartPathOptions := action.ChartPathOptions{RepoURL: repoURL, Version: version}
+// loadChart locates and loads chartName@version from repoURL — or, when
+// chartName is itself an OCI reference (e.g. "oci://..."), pulls it
+// directly, ignoring repoURL. actionConfig must already have
+// RegistryClient set (see installViaHelm/renderChart, its only two
+// callers) — LocateChart hard-errors on an OCI chartName otherwise; its
+// own ChartPathOptions is the only way to reach the unexported field a
+// registry client lives on.
+func loadChart(actionConfig *action.Configuration, chartName, repoURL, version string) (*chart.Chart, error) {
+	chartPathOptions := action.NewInstall(actionConfig).ChartPathOptions
+	chartPathOptions.RepoURL = repoURL
+	chartPathOptions.Version = version
 
 	chartPath, err := chartPathOptions.LocateChart(chartName, cli.New())
 	if err != nil {

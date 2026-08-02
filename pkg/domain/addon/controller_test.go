@@ -50,7 +50,7 @@ type fakePodProber struct {
 	calls   []string
 }
 
-func (f *fakePodProber) NamespaceHealthy(_ context.Context, _ []byte, namespace string) (bool, string, error) {
+func (f *fakePodProber) NamespaceHealthy(_ context.Context, _ []byte, namespace, _, _ string) (bool, string, error) {
 	f.calls = append(f.calls, namespace)
 
 	result, ok := f.results[namespace]
@@ -59,6 +59,34 @@ func (f *fakePodProber) NamespaceHealthy(_ context.Context, _ []byte, namespace 
 	}
 
 	return result.healthy, result.reason, result.err
+}
+
+// fakeCRDChecker is addon.CRDChecker's test double — always reports
+// ready unless a test explicitly configures otherwise, matching the
+// overwhelmingly common case of a chart with no CRDs to wait on at all.
+type fakeCRDChecker struct {
+	ready  bool
+	reason string
+	err    error
+}
+
+func (f *fakeCRDChecker) ChartCRDsReady(context.Context, []byte, addon.InstallRequest) (bool, string, error) {
+	return f.ready, f.reason, f.err
+}
+
+// indexAddonByTalosClusterRef mirrors the addon package's own unexported
+// indexer — duplicated here since the real one isn't reachable from an
+// external test package, and the manager's own field indexer
+// registration (Controller.SetupWithManager) never runs in these
+// fake-client-only tests. Reconciler's own waitForEarlierWaves relies on
+// this being registered — it lists siblings via ListForCluster.
+func indexAddonByTalosClusterRef(obj client.Object) []string {
+	a, ok := obj.(*v1alpha2.Addon)
+	if !ok {
+		return nil
+	}
+
+	return []string{a.Spec.TalosClusterRef.Name}
 }
 
 func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
@@ -72,6 +100,7 @@ func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&v1alpha2.Addon{}).
+		WithIndex(&v1alpha2.Addon{}, addon.TalosClusterRefField, indexAddonByTalosClusterRef).
 		WithObjects(objects...).
 		Build()
 }
@@ -81,6 +110,7 @@ func newReconciler(fakeClient client.Client, installer *fakeAddonInstaller, prob
 		Client:        fakeClient,
 		Installer:     installer,
 		PodProber:     prober,
+		CRDChecker:    &fakeCRDChecker{ready: true},
 		RetryInterval: testRetryInterval,
 		Logger:        slog.Default(),
 	}
@@ -94,8 +124,9 @@ const testClusterName = "eu-1a"
 const (
 	controlPlanePoolName    = "cp-pool"
 	ciliumReleaseName       = "cilium"
+	customReleaseName       = "my-addon"
 	ciliumAddonResourceName = testClusterName + "-cilium"
-	customAddonResourceName = testClusterName + "-my-addon"
+	customAddonResourceName = testClusterName + "-" + customReleaseName
 )
 
 // readyCluster builds a TalosCluster fixture that's already bootstrapped
@@ -218,7 +249,7 @@ func TestReconcileCustomAddonWithChartInstalls(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: customAddonResourceName},
 		Spec: v1alpha2.AddonSpec{
 			TalosClusterRef: v1alpha2.TalosClusterReference{Name: testClusterName},
-			ReleaseName:     "my-addon",
+			ReleaseName:     customReleaseName,
 			Namespace:       v1alpha2.AddonNamespaceSpec{Name: "my-addon-ns"},
 			Chart:           &v1alpha2.AddonChartSpec{Repo: "https://example.com/charts", Name: "my-chart", Version: "1.0.0"},
 		},
@@ -252,7 +283,7 @@ func TestReconcileCustomAddonWithoutChartFails(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: customAddonResourceName},
 		Spec: v1alpha2.AddonSpec{
 			TalosClusterRef: v1alpha2.TalosClusterReference{Name: testClusterName},
-			ReleaseName:     "my-addon",
+			ReleaseName:     customReleaseName,
 		},
 	}
 
@@ -438,4 +469,140 @@ func TestReconcileOperatorReplicasScaleWithControlPlaneCount(t *testing.T) {
 	operator, ok := installer.calls[0].Values["operator"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, int64(2), operator["replicas"], "two control-plane nodes must scale cilium-operator to 2 replicas")
+}
+
+// gatewayAPICRDsAddon builds the gateway-api-crds built-in fixture —
+// same minimal-seed shape as builtinAddon, just a different release.
+func gatewayAPICRDsAddon() *v1alpha2.Addon {
+	return &v1alpha2.Addon{
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName + "-gateway-api-crds"},
+		Spec: v1alpha2.AddonSpec{
+			TalosClusterRef: v1alpha2.TalosClusterReference{Name: testClusterName},
+			ReleaseName:     "gateway-api-crds",
+		},
+	}
+}
+
+// TestReconcileWaitsForEarlierPriorityWave covers cilium (priority 100,
+// its own built-in default) never installing while gateway-api-crds
+// (priority 50) hasn't reached Ready yet — the whole reason priority
+// exists: cilium's own Gateway API support assumes those CRDs already
+// exist.
+func TestReconcileWaitsForEarlierPriorityWave(t *testing.T) {
+	t.Parallel()
+
+	cluster, secret := readyCluster()
+	cpInstance := claimedDiscoveredInstance("cp-node-1")
+	cilium := builtinAddon()
+	gatewayCRDs := gatewayAPICRDsAddon() // no Ready condition yet — still installing
+
+	fakeClient := newFakeClient(t, cluster, secret, cpInstance, cilium, gatewayCRDs)
+
+	installer := &fakeAddonInstaller{}
+	prober := &fakePodProber{}
+	reconciler := newReconciler(fakeClient, installer, prober)
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, testRetryInterval, result.RequeueAfter)
+	assert.Empty(t, installer.calls, "cilium must never install before its lower-priority prerequisite is Ready")
+}
+
+// TestReconcileProceedsOnceEarlierWaveReady covers the other half of
+// TestReconcileWaitsForEarlierPriorityWave: once gateway-api-crds
+// reports Ready, cilium's own reconcile proceeds normally.
+func TestReconcileProceedsOnceEarlierWaveReady(t *testing.T) {
+	t.Parallel()
+
+	cluster, secret := readyCluster()
+	cpInstance := claimedDiscoveredInstance("cp-node-1")
+	cilium := builtinAddon()
+	gatewayCRDs := gatewayAPICRDsAddon()
+	gatewayCRDs.Status.Conditions = []metav1.Condition{
+		{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Installed"},
+	}
+
+	fakeClient := newFakeClient(t, cluster, secret, cpInstance, cilium, gatewayCRDs)
+
+	installer := &fakeAddonInstaller{}
+	prober := &fakePodProber{}
+	reconciler := newReconciler(fakeClient, installer, prober)
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName},
+	})
+	require.NoError(t, err)
+	assert.Len(t, installer.calls, 1)
+}
+
+// TestReconcileSamePriorityAddonsInstallInParallel covers cilium and
+// cert-manager — both priority 100, neither Ready yet — never blocking
+// each other: only a strictly lower priority number gates.
+func TestReconcileSamePriorityAddonsInstallInParallel(t *testing.T) {
+	t.Parallel()
+
+	cluster, secret := readyCluster()
+	cpInstance := claimedDiscoveredInstance("cp-node-1")
+	cilium := builtinAddon()
+	certManager := &v1alpha2.Addon{
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName + "-cert-manager"},
+		Spec: v1alpha2.AddonSpec{
+			TalosClusterRef: v1alpha2.TalosClusterReference{Name: testClusterName},
+			ReleaseName:     "cert-manager",
+		},
+	}
+
+	fakeClient := newFakeClient(t, cluster, secret, cpInstance, cilium, certManager)
+
+	installer := &fakeAddonInstaller{}
+	prober := &fakePodProber{}
+	reconciler := newReconciler(fakeClient, installer, prober)
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName},
+	})
+	require.NoError(t, err)
+	assert.Zero(t, result)
+	assert.Len(t, installer.calls, 1, "same-priority siblings must never gate each other")
+}
+
+// TestReconcileNoPodsIsVacuouslyHealthy covers an addon whose namespace
+// has no pods at all (e.g. a CRD-only chart) reaching Ready right after
+// install — fakePodProber's own doc already says a namespace with no
+// configured result defaults to healthy, matching PodProber's real
+// production semantics (see podhealth.go's own NamespaceHealthy doc):
+// there's nothing unhealthy to find in an empty namespace.
+func TestReconcileNoPodsIsVacuouslyHealthy(t *testing.T) {
+	t.Parallel()
+
+	cluster, secret := readyCluster()
+	cpInstance := claimedDiscoveredInstance("cp-node-1")
+	custom := &v1alpha2.Addon{
+		ObjectMeta: metav1.ObjectMeta{Name: customAddonResourceName},
+		Spec: v1alpha2.AddonSpec{
+			TalosClusterRef: v1alpha2.TalosClusterReference{Name: testClusterName},
+			ReleaseName:     customReleaseName,
+			Namespace:       v1alpha2.AddonNamespaceSpec{Name: "my-addon-ns"},
+			Chart:           &v1alpha2.AddonChartSpec{Repo: "https://example.com/charts", Name: "my-chart", Version: "1.0.0"},
+		},
+	}
+
+	fakeClient := newFakeClient(t, cluster, secret, cpInstance, custom)
+
+	installer := &fakeAddonInstaller{}
+	prober := &fakePodProber{}
+	reconciler := newReconciler(fakeClient, installer, prober)
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: customAddonResourceName},
+	})
+	require.NoError(t, err)
+	assert.Zero(t, result)
+
+	var got v1alpha2.Addon
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: customAddonResourceName}, &got))
+	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, "Ready"))
 }

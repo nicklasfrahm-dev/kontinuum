@@ -38,14 +38,26 @@ type AddonProvisioningSpec struct {
 type AddonLifecycleSpec struct {
 	// +optional
 	Provisioning AddonProvisioningSpec `json:"provisioning,omitempty"`
+	// Priority controls install ordering relative to this addon's own
+	// cluster's other addons — addons install in ascending priority
+	// "waves": every enabled addon at a lower priority must be Ready
+	// before a higher-priority one starts installing, while addons
+	// sharing the same priority install fully in parallel, same as if
+	// this field didn't exist. Defaults to 100. Lower it for a
+	// prerequisite addon other addons' own charts assume already exists
+	// (e.g. a CRD-only chart another chart's templates reference) —
+	// see the built-in gateway-api-crds addon, which installs at a lower
+	// priority than cilium/cert-manager for exactly this reason.
+	// +optional
+	// +kubebuilder:default=100
+	Priority *int32 `json:"priority,omitempty"`
 }
 
 // AddonChartSpec identifies the Helm chart an addon installs from.
-// Optional for the built-in addons (cilium, cert-manager — see
-// AddonSpec.ReleaseName's own doc), whose own chart identity/version is
-// baked into pkg/domain/addon and only needs a field here to override one
-// piece of it; required for any other ReleaseName, since there's no
-// built-in to fall back on.
+// Optional for the built-in addons (see AddonSpec.ReleaseName's own
+// doc), whose own chart identity/version is baked into pkg/domain/addon
+// and only needs a field here to override one piece of it; required for
+// any other ReleaseName, since there's no built-in to fall back on.
 type AddonChartSpec struct {
 	// Repo is the Helm chart repository URL.
 	// +optional
@@ -67,8 +79,8 @@ type AddonChartSpec struct {
 // privileged) without another breaking field-shape change.
 type AddonNamespaceSpec struct {
 	// Name is the namespace's own name. Empty means the built-in's own
-	// default (for cilium/cert-manager) or an error (for any other
-	// ReleaseName).
+	// default (see AddonSpec.ReleaseName's own doc) or an error (for any
+	// other ReleaseName).
 	// +optional
 	Name string `json:"name,omitempty"`
 }

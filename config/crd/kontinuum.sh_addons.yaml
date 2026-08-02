@@ -92,6 +92,21 @@ spec:
                   AddonLifecycleSpec configures how an addon is provisioned and, in the
                   future, kept up to date.
                 properties:
+                  priority:
+                    default: 100
+                    description: |-
+                      Priority controls install ordering relative to this addon's own
+                      cluster's other addons — addons install in ascending priority
+                      "waves": every enabled addon at a lower priority must be Ready
+                      before a higher-priority one starts installing, while addons
+                      sharing the same priority install fully in parallel, same as if
+                      this field didn't exist. Defaults to 100. Lower it for a
+                      prerequisite addon other addons' own charts assume already exists
+                      (e.g. a CRD-only chart another chart's templates reference) —
+                      see the built-in gateway-api-crds addon, which installs at a lower
+                      priority than cilium/cert-manager for exactly this reason.
+                    format: int32
+                    type: integer
                   provisioning:
                     description: AddonProvisioningSpec configures how an addon's manifests
                       are applied.
@@ -113,8 +128,8 @@ spec:
                   name:
                     description: |-
                       Name is the namespace's own name. Empty means the built-in's own
-                      default (for cilium/cert-manager) or an error (for any other
-                      ReleaseName).
+                      default (see AddonSpec.ReleaseName's own doc) or an error (for any
+                      other ReleaseName).
                     type: string
                 type: object
               releaseName:

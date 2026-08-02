@@ -4,8 +4,14 @@
 # spec.values for an Addon named "cert-manager".
 chart:
   repo: https://charts.jetstack.io
-  version: v1.17.2
-namespace: kontinuum-system
+  version: v1.21.1
+namespace:
+  name: kontinuum-system
+lifecycle:
+  priority: 100
 values:
   crds:
     enabled: true
+  config:
+    gatewayAPI:
+      enabled: true

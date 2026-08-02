@@ -8,11 +8,14 @@ import (
 	"strings"
 
 	"helm.sh/helm/v3/pkg/action"
+	"helm.sh/helm/v3/pkg/chartutil"
+	"helm.sh/helm/v3/pkg/registry"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	k8syaml "k8s.io/apimachinery/pkg/util/yaml"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -34,7 +37,7 @@ const yamlDecoderBufferSize = 4096
 // so the same manifests can later be adopted by a GitOps tool like ArgoCD
 // without it needing to understand a pre-existing Helm release.
 func (helmInstaller) installViaKubectlApply(ctx context.Context, kubeconfig []byte, req InstallRequest) error {
-	manifest, err := renderChart(req)
+	manifest, err := renderChart(kubeconfig, req)
 	if err != nil {
 		return err
 	}
@@ -47,13 +50,19 @@ func (helmInstaller) installViaKubectlApply(ctx context.Context, kubeconfig []by
 	return nil
 }
 
-// renderChart loads req's chart and renders it client-side, with no
-// cluster contact at all (ClientOnly) — the `helm template` equivalent.
-// Hooks are deliberately excluded from the result: a GitOps-adoptable
-// manifest set shouldn't include Helm hook Jobs meant to run once during
-// an imperative install.
-func renderChart(req InstallRequest) (string, error) {
-	chrt, err := loadChart(req.ChartName, req.RepoURL, req.Version)
+// renderChart loads req's chart and renders it client-side (ClientOnly —
+// the `helm template` equivalent, no create/apply/upgrade against the
+// cluster) — but does look up the target cluster's own real Kubernetes
+// version first (a single read-only discovery call) and passes it as
+// KubeVersion: ClientOnly rendering otherwise falls back to Helm's own
+// hardcoded chartutil.DefaultCapabilities.KubeVersion, which is old
+// enough that a chart declaring a recent minimum kubeVersion (e.g.
+// Cilium 1.20's own Chart.yaml) fails Helm's own compatibility check
+// before a single template even renders. Hooks are deliberately excluded
+// from the result: a GitOps-adoptable manifest set shouldn't include
+// Helm hook Jobs meant to run once during an imperative install.
+func renderChart(kubeconfig []byte, req InstallRequest) (string, error) {
+	kubeVersion, err := targetKubeVersion(kubeconfig)
 	if err != nil {
 		return "", err
 	}
@@ -65,10 +74,21 @@ func renderChart(req InstallRequest) (string, error) {
 		return "", fmt.Errorf("failed to init helm action configuration for %q: %w", req.ReleaseName, err)
 	}
 
+	actionConfig.RegistryClient, err = registry.NewClient()
+	if err != nil {
+		return "", fmt.Errorf("failed to create helm registry client: %w", err)
+	}
+
+	chrt, err := loadChart(actionConfig, req.ChartName, req.RepoURL, req.Version)
+	if err != nil {
+		return "", err
+	}
+
 	installAction := action.NewInstall(actionConfig)
 	installAction.DryRun = true
 	installAction.DryRunOption = "true"
 	installAction.ClientOnly = true
+	installAction.KubeVersion = kubeVersion
 	installAction.ReleaseName = req.ReleaseName
 	installAction.Replace = true
 	installAction.Namespace = req.Namespace
@@ -80,6 +100,31 @@ func renderChart(req InstallRequest) (string, error) {
 	}
 
 	return rel.Manifest, nil
+}
+
+// targetKubeVersion queries kubeconfig's own cluster for its real
+// Kubernetes version — a single read-only discovery call, not a create/
+// apply/upgrade — for renderChart's own ClientOnly render to pass as
+// KubeVersion (see that function's own doc for why).
+func targetKubeVersion(kubeconfig []byte) (*chartutil.KubeVersion, error) {
+	restConfig, err := clientcmd.RESTConfigFromKubeConfig(kubeconfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build rest config from kubeconfig: %w", err)
+	}
+
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(restConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build discovery client: %w", err)
+	}
+
+	serverVersion, err := discoveryClient.ServerVersion()
+	if err != nil {
+		return nil, fmt.Errorf("failed to query cluster kubernetes version: %w", err)
+	}
+
+	return &chartutil.KubeVersion{
+		Version: serverVersion.GitVersion, Major: serverVersion.Major, Minor: serverVersion.Minor,
+	}, nil
 }
 
 // applyManifest splits manifest into individual documents and applies

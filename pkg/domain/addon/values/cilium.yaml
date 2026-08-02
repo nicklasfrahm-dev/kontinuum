@@ -11,8 +11,11 @@
 # for the ctx variable they evaluate against.
 chart:
   repo: https://helm.cilium.io
-  version: 1.16.5
-namespace: kube-system
+  version: 1.20.0
+namespace:
+  name: kube-system
+lifecycle:
+  priority: 100
 values:
   kubeProxyReplacement: true
   k8sServiceHost: localhost
@@ -22,6 +25,12 @@ values:
     enabled: true
   gatewayAPI:
     enabled: true
+    # Both required for an HTTPRoute backendRef to name a Service whose
+    # own port declares appProtocol (ALPN needs the actual protocol
+    # negotiated over TLS; without appProtocol on the port, Cilium has
+    # no way to tell HTTP/1.1 backends from HTTP/2 wire-format ones).
+    enableAlpn: true
+    enableAppProtocol: true
   l2announcements:
     enabled: true
   nodeIPAM:
