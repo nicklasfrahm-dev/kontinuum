@@ -91,6 +91,12 @@ func newReconciler(fakeClient client.Client, installer *fakeAddonInstaller, prob
 // since no test in this file needs more than one cluster.
 const testClusterName = "eu-1a"
 
+const (
+	controlPlanePoolName    = "cp-pool"
+	ciliumAddonResourceName = testClusterName + "-cilium"
+	customAddonResourceName = testClusterName + "-my-addon"
+)
+
 // readyCluster builds a TalosCluster fixture that's already bootstrapped
 // far enough to have a stored kubeconfig — what Reconciler needs to
 // install anything at all.
@@ -99,7 +105,7 @@ func readyCluster() (*v1alpha2.TalosCluster, *corev1.Secret) {
 		ObjectMeta: metav1.ObjectMeta{Name: testClusterName},
 		Spec: v1alpha2.TalosClusterSpec{
 			ControlPlane: v1alpha2.TalosClusterMemberSpec{
-				PoolRef: v1alpha2.InstancePoolReference{Name: "cp-pool"},
+				PoolRef: v1alpha2.InstancePoolReference{Name: controlPlanePoolName},
 			},
 		},
 		Status: v1alpha2.TalosClusterStatus{
@@ -119,7 +125,7 @@ func readyCluster() (*v1alpha2.TalosCluster, *corev1.Secret) {
 
 func claimedDiscoveredInstance(name string) *v1alpha2.Instance {
 	return &v1alpha2.Instance{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{v1alpha2.LabelClaimedBy: "cp-pool"}},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{v1alpha2.LabelClaimedBy: controlPlanePoolName}},
 		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{"10.0.0.1"}},
 		Status: v1alpha2.InstanceStatus{
 			Conditions: []metav1.Condition{
@@ -153,7 +159,7 @@ func TestReconcileBuiltinAddonResolvesEmbeddedDefaults(t *testing.T) {
 	reconciler := newReconciler(fakeClient, installer, prober)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "eu-1a-cilium"},
+		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName},
 	})
 	require.NoError(t, err)
 	assert.Zero(t, result)
@@ -167,7 +173,7 @@ func TestReconcileBuiltinAddonResolvesEmbeddedDefaults(t *testing.T) {
 
 	var got v1alpha2.Addon
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a-cilium"}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: ciliumAddonResourceName}, &got))
 	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, "Ready"))
 }
 
@@ -177,9 +183,9 @@ func TestReconcileCustomAddonWithChartInstalls(t *testing.T) {
 	cluster, secret := readyCluster()
 	cpInstance := claimedDiscoveredInstance("cp-node-1")
 	custom := &v1alpha2.Addon{
-		ObjectMeta: metav1.ObjectMeta{Name: "eu-1a-my-addon"},
+		ObjectMeta: metav1.ObjectMeta{Name: customAddonResourceName},
 		Spec: v1alpha2.AddonSpec{
-			TalosClusterRef: v1alpha2.TalosClusterReference{Name: "eu-1a"},
+			TalosClusterRef: v1alpha2.TalosClusterReference{Name: testClusterName},
 			ReleaseName:     "my-addon",
 			Namespace:       v1alpha2.AddonNamespaceSpec{Name: "my-addon-ns"},
 			Chart:           &v1alpha2.AddonChartSpec{Repo: "https://example.com/charts", Name: "my-chart", Version: "1.0.0"},
@@ -193,7 +199,7 @@ func TestReconcileCustomAddonWithChartInstalls(t *testing.T) {
 	reconciler := newReconciler(fakeClient, installer, prober)
 
 	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "eu-1a-my-addon"},
+		NamespacedName: types.NamespacedName{Name: customAddonResourceName},
 	})
 	require.NoError(t, err)
 
@@ -211,9 +217,9 @@ func TestReconcileCustomAddonWithoutChartFails(t *testing.T) {
 	cluster, secret := readyCluster()
 	cpInstance := claimedDiscoveredInstance("cp-node-1")
 	custom := &v1alpha2.Addon{
-		ObjectMeta: metav1.ObjectMeta{Name: "eu-1a-my-addon"},
+		ObjectMeta: metav1.ObjectMeta{Name: customAddonResourceName},
 		Spec: v1alpha2.AddonSpec{
-			TalosClusterRef: v1alpha2.TalosClusterReference{Name: "eu-1a"},
+			TalosClusterRef: v1alpha2.TalosClusterReference{Name: testClusterName},
 			ReleaseName:     "my-addon",
 		},
 	}
@@ -225,7 +231,7 @@ func TestReconcileCustomAddonWithoutChartFails(t *testing.T) {
 	reconciler := newReconciler(fakeClient, installer, prober)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "eu-1a-my-addon"},
+		NamespacedName: types.NamespacedName{Name: customAddonResourceName},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, testRetryInterval, result.RequeueAfter)
@@ -233,7 +239,7 @@ func TestReconcileCustomAddonWithoutChartFails(t *testing.T) {
 
 	var got v1alpha2.Addon
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a-my-addon"}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: customAddonResourceName}, &got))
 
 	cond := meta.FindStatusCondition(got.Status.Conditions, "Ready")
 	require.NotNil(t, cond)
@@ -256,7 +262,7 @@ func TestReconcileDisabledAddonSkipsInstall(t *testing.T) {
 	reconciler := newReconciler(fakeClient, installer, prober)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "eu-1a-cilium"},
+		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName},
 	})
 	require.NoError(t, err)
 	assert.Zero(t, result)
@@ -278,7 +284,7 @@ func TestReconcileInstallFailureSetsReadyFalse(t *testing.T) {
 	reconciler := newReconciler(fakeClient, installer, prober)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "eu-1a-cilium"},
+		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, testRetryInterval, result.RequeueAfter)
@@ -286,7 +292,7 @@ func TestReconcileInstallFailureSetsReadyFalse(t *testing.T) {
 
 	var got v1alpha2.Addon
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a-cilium"}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: ciliumAddonResourceName}, &got))
 
 	cond := meta.FindStatusCondition(got.Status.Conditions, "Ready")
 	require.NotNil(t, cond)
@@ -310,14 +316,14 @@ func TestReconcileUnhealthyProbeSetsReadyFalse(t *testing.T) {
 	reconciler := newReconciler(fakeClient, installer, prober)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "eu-1a-cilium"},
+		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, testRetryInterval, result.RequeueAfter)
 
 	var got v1alpha2.Addon
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a-cilium"}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: ciliumAddonResourceName}, &got))
 
 	cond := meta.FindStatusCondition(got.Status.Conditions, "Ready")
 	require.NotNil(t, cond)
@@ -338,7 +344,7 @@ func TestReconcileMissingTalosClusterIsNoOp(t *testing.T) {
 	reconciler := newReconciler(fakeClient, installer, prober)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "eu-1a-cilium"},
+		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName},
 	})
 	require.NoError(t, err)
 	assert.Zero(t, result)
@@ -349,9 +355,9 @@ func TestReconcileKubeconfigNotStoredRequeuesWithoutError(t *testing.T) {
 	t.Parallel()
 
 	cluster := &v1alpha2.TalosCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "eu-1a"},
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName},
 		Spec: v1alpha2.TalosClusterSpec{
-			ControlPlane: v1alpha2.TalosClusterMemberSpec{PoolRef: v1alpha2.InstancePoolReference{Name: "cp-pool"}},
+			ControlPlane: v1alpha2.TalosClusterMemberSpec{PoolRef: v1alpha2.InstancePoolReference{Name: controlPlanePoolName}},
 		},
 	}
 	cilium := builtinAddon()
@@ -363,7 +369,7 @@ func TestReconcileKubeconfigNotStoredRequeuesWithoutError(t *testing.T) {
 	reconciler := newReconciler(fakeClient, installer, prober)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "eu-1a-cilium"},
+		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, testRetryInterval, result.RequeueAfter)
@@ -391,7 +397,7 @@ func TestReconcileOperatorReplicasScaleWithControlPlaneCount(t *testing.T) {
 	reconciler := newReconciler(fakeClient, installer, prober)
 
 	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "eu-1a-cilium"},
+		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName},
 	})
 	require.NoError(t, err)
 

@@ -44,7 +44,7 @@ func TestEvaluateComputedValuesEvaluatesCelField(t *testing.T) {
 	t.Parallel()
 
 	values := map[string]any{
-		"replicas": map[string]any{"$cel": "ctx.taloscluster.status.controlPlane.replicas > 1 ? 2 : 1"},
+		"replicas": map[string]any{celFieldKey: "ctx.taloscluster.status.controlPlane.replicas > 1 ? 2 : 1"},
 	}
 
 	single, err := evaluateComputedValues(values, testCelCtx(t, 1))
@@ -60,7 +60,7 @@ func TestEvaluateComputedValuesAccessesTalosClusterResource(t *testing.T) {
 	t.Parallel()
 
 	values := map[string]any{
-		"clusterName": map[string]any{"$cel": "ctx.taloscluster.metadata.name"},
+		"clusterName": map[string]any{celFieldKey: "ctx.taloscluster.metadata.name"},
 	}
 
 	resolved, err := evaluateComputedValues(values, testCelCtx(t, 1))
@@ -72,7 +72,7 @@ func TestEvaluateComputedValuesAccessesTalosNamespace(t *testing.T) {
 	t.Parallel()
 
 	values := map[string]any{
-		"port": map[string]any{"$cel": "ctx.talos.kubePrism.port"},
+		"port": map[string]any{celFieldKey: "ctx.talos.kubePrism.port"},
 	}
 
 	resolved, err := evaluateComputedValues(values, testCelCtx(t, 1))
@@ -86,7 +86,7 @@ func TestEvaluateComputedValuesPreservesNestedStructure(t *testing.T) {
 	values := map[string]any{
 		"outer": map[string]any{
 			"inner": []any{
-				map[string]any{"$cel": "ctx.talos.kubePrism.port"},
+				map[string]any{celFieldKey: "ctx.talos.kubePrism.port"},
 				"literal",
 			},
 		},
@@ -109,7 +109,7 @@ func TestEvaluateComputedValuesReturnsErrorOnMalformedExpression(t *testing.T) {
 	t.Parallel()
 
 	values := map[string]any{
-		"broken": map[string]any{"$cel": "ctx.taloscluster.status.controlPlane.replicas +"},
+		"broken": map[string]any{celFieldKey: "ctx.taloscluster.status.controlPlane.replicas +"},
 	}
 
 	_, err := evaluateComputedValues(values, testCelCtx(t, 1))

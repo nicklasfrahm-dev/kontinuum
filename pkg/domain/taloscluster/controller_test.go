@@ -114,6 +114,12 @@ func claimedDiscoveredInstance(name, poolName, addr string) *v1alpha2.Instance {
 // since no test in this file needs more than one cluster.
 const testClusterName = "eu-1a"
 
+const (
+	controlPlaneInstanceAddress = "10.0.0.1"
+	readyConditionReasonHealthy = "Healthy"
+	ciliumAddonResourceName     = testClusterName + "-cilium"
+)
+
 func testCluster() *v1alpha2.TalosCluster {
 	return &v1alpha2.TalosCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: testClusterName},
@@ -164,7 +170,7 @@ func TestReconcileWaitsForControlPlaneInstances(t *testing.T) {
 	reconciler := newReconciler(fakeClient, bootstrapper)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "eu-1a"},
+		NamespacedName: types.NamespacedName{Name: testClusterName},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, testRetryInterval, result.RequeueAfter)
@@ -172,7 +178,7 @@ func TestReconcileWaitsForControlPlaneInstances(t *testing.T) {
 
 	var got v1alpha2.TalosCluster
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a"}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: testClusterName}, &got))
 
 	cond := meta.FindStatusCondition(got.Status.Conditions, taloscluster.ControlPlaneReadyConditionType)
 	require.NotNil(t, cond)
@@ -184,7 +190,7 @@ func TestReconcileControlPlaneNotYetHealthy(t *testing.T) {
 	t.Parallel()
 
 	cluster := testCluster()
-	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", "10.0.0.1")
+	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", controlPlaneInstanceAddress)
 
 	fakeClient := newFakeClient(t, cluster, cpInstance)
 
@@ -192,16 +198,16 @@ func TestReconcileControlPlaneNotYetHealthy(t *testing.T) {
 	reconciler := newReconciler(fakeClient, bootstrapper)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "eu-1a"},
+		NamespacedName: types.NamespacedName{Name: testClusterName},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, testRetryInterval, result.RequeueAfter)
-	assert.Equal(t, []string{"10.0.0.1"}, bootstrapper.applyConfigCalls)
-	assert.Equal(t, []string{"10.0.0.1"}, bootstrapper.bootstrapCalls)
+	assert.Equal(t, []string{controlPlaneInstanceAddress}, bootstrapper.applyConfigCalls)
+	assert.Equal(t, []string{controlPlaneInstanceAddress}, bootstrapper.bootstrapCalls)
 
 	var got v1alpha2.TalosCluster
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a"}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: testClusterName}, &got))
 
 	cond := meta.FindStatusCondition(got.Status.Conditions, taloscluster.ControlPlaneReadyConditionType)
 	require.NotNil(t, cond)
@@ -220,7 +226,7 @@ func TestReconcileSeedsBuiltinAddonsOnlyWhenMissing(t *testing.T) {
 	t.Parallel()
 
 	cluster := testCluster()
-	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", "10.0.0.1")
+	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", controlPlaneInstanceAddress)
 
 	fakeClient := newFakeClient(t, cluster, cpInstance)
 
@@ -228,18 +234,18 @@ func TestReconcileSeedsBuiltinAddonsOnlyWhenMissing(t *testing.T) {
 	reconciler := newReconciler(fakeClient, bootstrapper)
 
 	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "eu-1a"},
+		NamespacedName: types.NamespacedName{Name: testClusterName},
 	})
 	require.NoError(t, err)
 
 	var cilium v1alpha2.Addon
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a-cilium"}, &cilium))
-	assert.Equal(t, "eu-1a", cilium.Spec.TalosClusterRef.Name)
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: ciliumAddonResourceName}, &cilium))
+	assert.Equal(t, testClusterName, cilium.Spec.TalosClusterRef.Name)
 	assert.Equal(t, "cilium", cilium.Spec.ReleaseName)
 	assert.Nil(t, cilium.Spec.Chart, "a built-in seed leaves Chart unset — resolveAddon supplies the fallback")
 	require.Len(t, cilium.OwnerReferences, 1)
-	assert.Equal(t, "eu-1a", cilium.OwnerReferences[0].Name)
+	assert.Equal(t, testClusterName, cilium.OwnerReferences[0].Name)
 	assert.Equal(t, "TalosCluster", cilium.OwnerReferences[0].Kind)
 
 	var certManager v1alpha2.Addon
@@ -253,13 +259,14 @@ func TestReconcileSeedsBuiltinAddonsOnlyWhenMissing(t *testing.T) {
 	require.NoError(t, fakeClient.Update(context.Background(), &cilium))
 
 	_, err = reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "eu-1a"},
+		NamespacedName: types.NamespacedName{Name: testClusterName},
 	})
 	require.NoError(t, err)
 
 	var afterSecond v1alpha2.Addon
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a-cilium"}, &afterSecond))
+	afterSecondKey := types.NamespacedName{Name: ciliumAddonResourceName}
+	require.NoError(t, fakeClient.Get(context.Background(), afterSecondKey, &afterSecond))
 	require.NotNil(t, afterSecond.Spec.Enabled)
 	assert.False(t, *afterSecond.Spec.Enabled, "a second reconcile must never re-enable a user-disabled built-in")
 }
@@ -275,11 +282,14 @@ func TestReconcileAggregatesReadyAcrossAddons(t *testing.T) {
 
 	cluster := testCluster()
 	cluster.Status.Conditions = []metav1.Condition{
-		{Type: taloscluster.ControlPlaneReadyConditionType, Status: metav1.ConditionTrue, Reason: "Healthy"},
+		{
+			Type:   taloscluster.ControlPlaneReadyConditionType,
+			Status: metav1.ConditionTrue, Reason: readyConditionReasonHealthy,
+		},
 	}
 	cluster.Spec.Workers = nil
 
-	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", "10.0.0.1")
+	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", controlPlaneInstanceAddress)
 	cilium := readyAddon("cilium", metav1.ConditionTrue, "Healthy")
 	certManager := readyAddon("cert-manager", metav1.ConditionFalse, "NotHealthy")
 
@@ -288,14 +298,14 @@ func TestReconcileAggregatesReadyAcrossAddons(t *testing.T) {
 	reconciler := newReconciler(fakeClient, &fakeBootstrapper{})
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "eu-1a"},
+		NamespacedName: types.NamespacedName{Name: testClusterName},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, testRetryInterval, result.RequeueAfter)
 
 	var got v1alpha2.TalosCluster
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a"}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: testClusterName}, &got))
 
 	cond := meta.FindStatusCondition(got.Status.Conditions, taloscluster.ReadyConditionType)
 	require.NotNil(t, cond)
@@ -308,11 +318,11 @@ func TestReconcileAggregatesReadyAcrossAddons(t *testing.T) {
 	require.NoError(t, fakeClient.Status().Update(context.Background(), certManager))
 
 	_, err = reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "eu-1a"},
+		NamespacedName: types.NamespacedName{Name: testClusterName},
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a"}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: testClusterName}, &got))
 	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, taloscluster.ReadyConditionType))
 }
 
@@ -325,16 +335,19 @@ func TestReconcileDisabledAddonSkippedInAggregation(t *testing.T) {
 
 	cluster := testCluster()
 	cluster.Status.Conditions = []metav1.Condition{
-		{Type: taloscluster.ControlPlaneReadyConditionType, Status: metav1.ConditionTrue, Reason: "Healthy"},
+		{
+			Type:   taloscluster.ControlPlaneReadyConditionType,
+			Status: metav1.ConditionTrue, Reason: readyConditionReasonHealthy,
+		},
 	}
 	cluster.Spec.Workers = nil
 
-	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", "10.0.0.1")
+	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", controlPlaneInstanceAddress)
 	certManager := readyAddon("cert-manager", metav1.ConditionTrue, "Healthy")
 	cilium := &v1alpha2.Addon{
-		ObjectMeta: metav1.ObjectMeta{Name: "eu-1a-cilium"},
+		ObjectMeta: metav1.ObjectMeta{Name: ciliumAddonResourceName},
 		Spec: v1alpha2.AddonSpec{
-			TalosClusterRef: v1alpha2.TalosClusterReference{Name: "eu-1a"},
+			TalosClusterRef: v1alpha2.TalosClusterReference{Name: testClusterName},
 			ReleaseName:     "cilium",
 			Enabled:         new(bool),
 		},
@@ -345,13 +358,13 @@ func TestReconcileDisabledAddonSkippedInAggregation(t *testing.T) {
 	reconciler := newReconciler(fakeClient, &fakeBootstrapper{})
 
 	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "eu-1a"},
+		NamespacedName: types.NamespacedName{Name: testClusterName},
 	})
 	require.NoError(t, err)
 
 	var got v1alpha2.TalosCluster
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a"}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: testClusterName}, &got))
 	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, taloscluster.ReadyConditionType),
 		"a disabled addon with no Ready condition at all must never block Ready")
 }
@@ -364,11 +377,14 @@ func TestReconcileCustomAddonCountsTowardReady(t *testing.T) {
 
 	cluster := testCluster()
 	cluster.Status.Conditions = []metav1.Condition{
-		{Type: taloscluster.ControlPlaneReadyConditionType, Status: metav1.ConditionTrue, Reason: "Healthy"},
+		{
+			Type:   taloscluster.ControlPlaneReadyConditionType,
+			Status: metav1.ConditionTrue, Reason: readyConditionReasonHealthy,
+		},
 	}
 	cluster.Spec.Workers = nil
 
-	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", "10.0.0.1")
+	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", controlPlaneInstanceAddress)
 	cilium := readyAddon("cilium", metav1.ConditionTrue, "Healthy")
 	certManager := readyAddon("cert-manager", metav1.ConditionTrue, "Healthy")
 	custom := readyAddon("my-addon", metav1.ConditionFalse, "NotHealthy")
@@ -378,13 +394,13 @@ func TestReconcileCustomAddonCountsTowardReady(t *testing.T) {
 	reconciler := newReconciler(fakeClient, &fakeBootstrapper{})
 
 	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "eu-1a"},
+		NamespacedName: types.NamespacedName{Name: testClusterName},
 	})
 	require.NoError(t, err)
 
 	var got v1alpha2.TalosCluster
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a"}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: testClusterName}, &got))
 
 	cond := meta.FindStatusCondition(got.Status.Conditions, taloscluster.ReadyConditionType)
 	require.NotNil(t, cond)
@@ -404,7 +420,7 @@ func TestReconcileFullSequence(t *testing.T) {
 	t.Parallel()
 
 	cluster := testCluster()
-	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", "10.0.0.1")
+	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", controlPlaneInstanceAddress)
 	workerInstance := claimedDiscoveredInstance("worker-node-1", "worker-pool", "10.0.0.2")
 
 	fakeClient := newFakeClient(t, cluster, cpInstance, workerInstance)
@@ -412,23 +428,23 @@ func TestReconcileFullSequence(t *testing.T) {
 	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig")}
 	reconciler := newReconciler(fakeClient, bootstrapper)
 
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "eu-1a"}}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName}}
 
 	result, err := reconciler.Reconcile(context.Background(), req)
 	require.NoError(t, err)
 	assert.Equal(t, testRetryInterval, result.RequeueAfter, "freshly-seeded addons have no Ready condition yet")
-	assert.Equal(t, []string{"10.0.0.1"}, bootstrapper.applyConfigCalls,
+	assert.Equal(t, []string{controlPlaneInstanceAddress}, bootstrapper.applyConfigCalls,
 		"only the control-plane member is touched before ControlPlaneReady")
 
 	var cilium, certManager v1alpha2.Addon
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a-cilium"}, &cilium))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: ciliumAddonResourceName}, &cilium))
 	require.NoError(t, fakeClient.Get(context.Background(),
 		types.NamespacedName{Name: "eu-1a-cert-manager"}, &certManager))
 
 	var afterFirst v1alpha2.TalosCluster
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "eu-1a"}, &afterFirst))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: testClusterName}, &afterFirst))
 	assert.True(t, meta.IsStatusConditionTrue(afterFirst.Status.Conditions, taloscluster.ControlPlaneReadyConditionType))
 	assert.True(t, meta.IsStatusConditionTrue(afterFirst.Status.Conditions, taloscluster.BootstrappedConditionType))
 	assert.False(t, meta.IsStatusConditionTrue(afterFirst.Status.Conditions, taloscluster.ReadyConditionType))
@@ -444,7 +460,7 @@ func TestReconcileFullSequence(t *testing.T) {
 	result, err = reconciler.Reconcile(context.Background(), req)
 	require.NoError(t, err)
 	assert.Equal(t, testRetryInterval, result.RequeueAfter)
-	assert.Equal(t, []string{"10.0.0.1", "10.0.0.2"}, bootstrapper.applyConfigCalls,
+	assert.Equal(t, []string{controlPlaneInstanceAddress, "10.0.0.2"}, bootstrapper.applyConfigCalls,
 		"the worker is only touched on the reconcile after ControlPlaneReady")
 }
 
