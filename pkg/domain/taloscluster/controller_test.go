@@ -19,7 +19,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
-	"github.com/nicklasfrahm/kontinuum/pkg/domain/addon"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/taloscluster"
 )
@@ -67,20 +66,6 @@ func (f *fakeBootstrapper) Kubeconfig(_ context.Context, _ string, _ *clientconf
 	return f.kubeconfig, nil
 }
 
-// indexAddonByTalosClusterRef mirrors the addon package's own unexported
-// indexer — duplicated here since the real one isn't reachable from an
-// external test package, and the manager's own field indexer registration
-// (Controller.SetupWithManager) never runs in these fake-client-only
-// tests.
-func indexAddonByTalosClusterRef(obj client.Object) []string {
-	a, ok := obj.(*v1alpha2.Addon)
-	if !ok {
-		return nil
-	}
-
-	return []string{a.Spec.TalosClusterRef.Name}
-}
-
 func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
 	t.Helper()
 
@@ -92,7 +77,6 @@ func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&v1alpha2.TalosCluster{}, &v1alpha2.Addon{}).
-		WithIndex(&v1alpha2.Addon{}, addon.TalosClusterRefField, indexAddonByTalosClusterRef).
 		WithObjects(objects...).
 		Build()
 }
