@@ -408,11 +408,26 @@ func startTalosContainer(ctx context.Context, t *testing.T) string {
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
-		require.NoError(t, talosContainer.Terminate(context.WithoutCancel(ctx)))
+		err := talosContainer.Terminate(context.WithoutCancel(ctx))
+		if err != nil && !isContainerAlreadyRemoving(err) {
+			require.NoError(t, err)
+		}
 	})
 
 	containerIP, err := talosContainer.ContainerIP(ctx)
 	require.NoError(t, err)
 
 	return containerIP
+}
+
+// isContainerAlreadyRemoving reports whether err is Docker's own "removal
+// of container ... is already in progress" response — a benign race
+// between this test's own explicit Terminate call and testcontainers'
+// Ryuk reaper sidecar concurrently cleaning up the same container at
+// session end, not a real cleanup failure. Seen intermittently in CI:
+// by the time this fires, every real test assertion has already passed,
+// so failing the whole test on it (the effect of an unchecked
+// require.NoError here) would be a false negative, not a caught bug.
+func isContainerAlreadyRemoving(err error) bool {
+	return strings.Contains(err.Error(), "is already in progress")
 }
