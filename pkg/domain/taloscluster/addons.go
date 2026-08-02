@@ -29,53 +29,65 @@ import (
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 )
 
-// Addon chart identity/version pins — see the implementation plan's "Chart
-// sourcing" decision: fetched at reconcile time from each project's own
-// Helm repo, not vendored. Versions are pinned explicitly rather than left
-// to float, same as e2eTalosImage's own pinned-version rationale. A
-// TalosCluster's own spec.addons.<name>.version overrides these defaults
-// — see AddonSpec.Version's own doc.
+// Addon names — each is also the embedded values/<name>.yaml filename, and
+// the Helm release/chart name (see loadAddonDefaults and buildAddonRequest,
+// which infer both from this same string, so there's exactly one place
+// that spells an addon's name).
 const (
-	ciliumReleaseName         = "cilium"
-	ciliumRepoURL             = "https://helm.cilium.io"
-	ciliumChartName           = "cilium"
-	defaultCiliumChartVersion = "1.16.5"
-	defaultCiliumNamespace    = "kube-system"
-
-	certManagerReleaseName         = "cert-manager"
-	certManagerRepoURL             = "https://charts.jetstack.io"
-	certManagerChartName           = "cert-manager"
-	defaultCertManagerChartVersion = "v1.17.2"
-	defaultCertManagerNamespace    = "kontinuum-system"
+	ciliumAddonName      = "cilium"
+	certManagerAddonName = "cert-manager"
 )
 
 //go:embed values/*.yaml
 var defaultValuesFS embed.FS
 
-// loadDefaultValues reads and parses filename (e.g. "cilium.yaml") out of
-// the values/ directory embedded alongside this package — see that
-// directory's own files for what each addon's required/functional
-// defaults are and why. Kept as real YAML files rather than Go map
-// literals purely for readability/diffability; a corrupt or missing
-// embedded file can only mean a build-time bug, not a condition callers
-// could meaningfully recover from — hence the panic instead of a returned
-// error, mirroring pkg/crd.Build's identical reasoning for its own
-// embedded manifests.
-func loadDefaultValues(filename string) map[string]any {
-	data, err := defaultValuesFS.ReadFile("values/" + filename)
-	if err != nil {
-		panic(fmt.Sprintf("failed to read embedded %s: %v", filename, err))
-	}
-
-	var values map[string]any
-
-	err = yaml.Unmarshal(data, &values)
-	if err != nil {
-		panic(fmt.Sprintf("failed to parse embedded %s: %v", filename, err))
-	}
-
-	return values
+// addonDefaults is one embedded values/<name>.yaml file's shape — chart
+// identity/version, install namespace, and Helm values all live together
+// so there's a single place to update when e.g. bumping a chart version. A
+// TalosCluster's own spec.addons.<name>.version/.namespace/.values
+// override these — see AddonSpec's own doc.
+type addonDefaults struct {
+	Chart struct {
+		Repo    string `json:"repo"`
+		Version string `json:"version"`
+	} `json:"chart"`
+	Namespace string         `json:"namespace"`
+	Values    map[string]any `json:"values"`
 }
+
+// loadAddonDefaults reads and parses name's embedded values/<name>.yaml —
+// see that directory's own files for what each addon's required/functional
+// defaults are and why. Kept as real YAML files rather than Go literals
+// purely for readability/diffability; a corrupt or missing embedded file
+// can only mean a build-time bug, not a condition callers could
+// meaningfully recover from — hence the panic instead of a returned error,
+// mirroring pkg/crd.Build's identical reasoning for its own embedded
+// manifests.
+func loadAddonDefaults(name string) addonDefaults {
+	data, err := defaultValuesFS.ReadFile("values/" + name + ".yaml")
+	if err != nil {
+		panic(fmt.Sprintf("failed to read embedded %s.yaml: %v", name, err))
+	}
+
+	var defaults addonDefaults
+
+	err = yaml.Unmarshal(data, &defaults)
+	if err != nil {
+		panic(fmt.Sprintf("failed to parse embedded %s.yaml: %v", name, err))
+	}
+
+	return defaults
+}
+
+// multiControlPlaneOperatorReplicas is cilium-operator's replica count once
+// a cluster has more than one control-plane node — high-availability
+// without over-provisioning, since the operator itself is a leader-elected
+// singleton (more replicas past 2 add standby capacity, not throughput).
+// values/cilium.yaml's own default (1) covers the single-control-plane
+// case, where a second replica could never even schedule with
+// hostNetwork: true (see this file's own history for the deadlock that
+// caused).
+const multiControlPlaneOperatorReplicas = 2
 
 // ciliumValues builds the Helm values for the Cilium install — see
 // values/cilium.yaml for the full set and why each diverges from the
@@ -83,11 +95,20 @@ func loadDefaultValues(filename string) map[string]any {
 // Cilium install (docs.siderolabs.com/kubernetes-guides/cni/deploying-cilium).
 // k8sServicePort is overlaid at runtime from kubePrismPort (config.go),
 // rather than living in the YAML file, since it's derived from a Go
-// constant, not a static default. userValues, when non-nil, are merged on
-// top — user values win on conflict, see mergeValues.
-func ciliumValues(userValues map[string]any) map[string]any {
-	values := loadDefaultValues("cilium.yaml")
+// constant, not a static default. controlPlaneCount scales
+// operator.replicas up once there's more than one control-plane node to
+// spread across — see multiControlPlaneOperatorReplicas. userValues, when
+// non-nil, are merged on top last — user values win on conflict, see
+// mergeValues.
+func ciliumValues(controlPlaneCount int, userValues map[string]any) map[string]any {
+	values := loadAddonDefaults(ciliumAddonName).Values
 	values["k8sServicePort"] = kubePrismPort
+
+	if controlPlaneCount > 1 {
+		values = mergeValues(values, map[string]any{
+			"operator": map[string]any{"replicas": multiControlPlaneOperatorReplicas},
+		})
+	}
 
 	return mergeValues(values, userValues)
 }
@@ -96,7 +117,7 @@ func ciliumValues(userValues map[string]any) map[string]any {
 // see values/cert-manager.yaml. userValues, when non-nil, are merged on
 // top — user values win on conflict, see mergeValues.
 func certManagerValues(userValues map[string]any) map[string]any {
-	return mergeValues(loadDefaultValues("cert-manager.yaml"), userValues)
+	return mergeValues(loadAddonDefaults(certManagerAddonName).Values, userValues)
 }
 
 // mergeValues recursively merges overlay onto base, returning a new map —
@@ -171,14 +192,18 @@ func addonUserValues(spec v1alpha2.AddonSpec) (map[string]any, error) {
 }
 
 // buildAddonRequest resolves spec's namespace/version/method/values
-// overrides against this addon's own defaults and merges baseValues'
-// required/functional defaults with any user-supplied values — see
-// ciliumValues/certManagerValues, and mergeValues's own "user values win
-// on conflict" doc.
+// overrides against name's own embedded defaults (see loadAddonDefaults)
+// and merges baseValues' required/functional defaults with any
+// user-supplied values — see ciliumValues/certManagerValues, and
+// mergeValues's own "user values win on conflict" doc. name is both the
+// Helm release/chart name and the embedded values/<name>.yaml this addon's
+// defaults come from — see ciliumAddonName/certManagerAddonName's own doc.
 func buildAddonRequest(
-	spec v1alpha2.AddonSpec, releaseName, repoURL, chartName, defaultVersion, defaultNamespace string,
+	name string, spec v1alpha2.AddonSpec,
 	baseValues func(userValues map[string]any) map[string]any,
 ) (AddonInstallRequest, error) {
+	defaults := loadAddonDefaults(name)
+
 	userValues, err := addonUserValues(spec)
 	if err != nil {
 		return AddonInstallRequest{}, err
@@ -186,18 +211,18 @@ func buildAddonRequest(
 
 	version := spec.Version
 	if version == "" {
-		version = defaultVersion
+		version = defaults.Chart.Version
 	}
 
 	namespace := spec.Namespace
 	if namespace == "" {
-		namespace = defaultNamespace
+		namespace = defaults.Namespace
 	}
 
 	return AddonInstallRequest{
-		ReleaseName: releaseName,
-		RepoURL:     repoURL,
-		ChartName:   chartName,
+		ReleaseName: name,
+		RepoURL:     defaults.Chart.Repo,
+		ChartName:   name,
 		Version:     version,
 		Namespace:   namespace,
 		Method:      addonMethod(spec),

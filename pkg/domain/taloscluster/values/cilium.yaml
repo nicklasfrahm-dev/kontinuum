@@ -1,40 +1,54 @@
-# Default Cilium install values — see ciliumValues' own doc in addons.go
-# for why each of these diverges from the chart's own defaults. Merged
-# with (and overridden by) any user-supplied spec.addons.cilium.values —
-# see mergeValues in addons.go.
-kubeProxyReplacement: true
-k8sServiceHost: localhost
-# k8sServicePort is set at runtime from kubePrismPort (config.go) — see
-# ciliumValues, which overlays it onto what's loaded from this file.
-envoy:
-  enabled: true
-l2announcements:
-  enabled: true
-nodeIPAM:
-  enabled: true
-operator:
-  replicas: 1
-ipam:
-  mode: kubernetes
-cgroup:
-  autoMount:
-    enabled: false
-  hostRoot: /sys/fs/cgroup
-securityContext:
-  capabilities:
-    ciliumAgent:
-      - CHOWN
-      - KILL
-      - NET_ADMIN
-      - NET_RAW
-      - IPC_LOCK
-      - SYS_ADMIN
-      - SYS_RESOURCE
-      - DAC_OVERRIDE
-      - FOWNER
-      - SETGID
-      - SETUID
-    cleanCiliumState:
-      - NET_ADMIN
-      - SYS_ADMIN
-      - SYS_RESOURCE
+# Default Cilium install — chart identity/version, namespace, and Helm
+# values all live together here so there's one place to update when e.g.
+# bumping a chart version. The release/chart name itself is inferred from
+# this file's own name ("cilium") — see loadAddonDefaults in addons.go.
+# values are merged with (and overridden by) any user-supplied
+# spec.addons.cilium.values — see mergeValues in addons.go. Every value
+# below diverges from the chart's own default for a reason — see
+# ciliumValues' own doc — following Talos's own documented Cilium install
+# (docs.siderolabs.com/kubernetes-guides/cni/deploying-cilium).
+chart:
+  repo: https://helm.cilium.io
+  version: 1.16.5
+namespace: kube-system
+values:
+  kubeProxyReplacement: true
+  k8sServiceHost: localhost
+  # k8sServicePort is set at runtime from kubePrismPort (config.go) — see
+  # ciliumValues, which overlays it onto what's loaded from this file.
+  envoy:
+    enabled: true
+  gatewayAPI:
+    enabled: true
+  l2announcements:
+    enabled: true
+  nodeIPAM:
+    enabled: true
+  operator:
+    # replicas is overridden to 2 at runtime when the cluster has more than
+    # one control-plane node — see ciliumValues in addons.go.
+    replicas: 1
+  ipam:
+    mode: kubernetes
+  cgroup:
+    autoMount:
+      enabled: false
+    hostRoot: /sys/fs/cgroup
+  securityContext:
+    capabilities:
+      ciliumAgent:
+        - CHOWN
+        - KILL
+        - NET_ADMIN
+        - NET_RAW
+        - IPC_LOCK
+        - SYS_ADMIN
+        - SYS_RESOURCE
+        - DAC_OVERRIDE
+        - FOWNER
+        - SETGID
+        - SETUID
+      cleanCiliumState:
+        - NET_ADMIN
+        - SYS_ADMIN
+        - SYS_RESOURCE

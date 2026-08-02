@@ -259,7 +259,7 @@ func (r *Reconciler) bootstrapAndCheckHealth(
 			"cluster", cluster.Name, "address", controlPlaneAddr, "error", err)
 	}
 
-	result, ready, err := r.installCiliumEarly(ctx, cluster, controlPlaneAddr, talosCfg)
+	result, ready, err := r.installCiliumEarly(ctx, cluster, controlPlaneAddr, len(controlPlaneNodes), talosCfg)
 	if err != nil || !ready {
 		return result, err
 	}
@@ -289,9 +289,11 @@ func (r *Reconciler) bootstrapAndCheckHealth(
 // network in the first place (see generateConfigs' own doc for why
 // Talos's default flannel CNI is disabled instead of racing it against
 // Cilium). Returns ready=false whenever the caller should requeue instead
-// of proceeding to the health check.
+// of proceeding to the health check. controlPlaneCount scales
+// cilium-operator's replicas — see ciliumValues.
 func (r *Reconciler) installCiliumEarly(
-	ctx context.Context, cluster *v1alpha2.TalosCluster, controlPlaneAddr string, talosCfg *clientconfig.Config,
+	ctx context.Context, cluster *v1alpha2.TalosCluster, controlPlaneAddr string, controlPlaneCount int,
+	talosCfg *clientconfig.Config,
 ) (ctrl.Result, bool, error) {
 	kubeconfig, err := r.Bootstrapper.Kubeconfig(ctx, controlPlaneAddr, talosCfg)
 	if err != nil {
@@ -313,8 +315,10 @@ func (r *Reconciler) installCiliumEarly(
 		return ctrl.Result{}, true, nil
 	}
 
-	req, err := buildAddonRequest(cluster.Spec.Addons.Cilium, ciliumReleaseName, ciliumRepoURL, ciliumChartName,
-		defaultCiliumChartVersion, defaultCiliumNamespace, ciliumValues)
+	req, err := buildAddonRequest(ciliumAddonName, cluster.Spec.Addons.Cilium,
+		func(userValues map[string]any) map[string]any {
+			return ciliumValues(controlPlaneCount, userValues)
+		})
 	if err != nil {
 		return ctrl.Result{}, false, err
 	}
@@ -332,7 +336,7 @@ func (r *Reconciler) installCiliumEarly(
 		return result, false, condErr
 	}
 
-	healthy, reason, err := r.probeAddonHealthy(ctx, cluster, kubeconfig, "cilium", req.Namespace)
+	healthy, reason, err := r.probeAddonHealthy(ctx, cluster, kubeconfig, ciliumAddonName, req.Namespace)
 	if err != nil {
 		return ctrl.Result{}, false, err
 	}
@@ -452,8 +456,7 @@ func (r *Reconciler) reconcileAddons(ctx context.Context, cluster *v1alpha2.Talo
 		return ctrl.Result{}, err
 	}
 
-	req, err := buildAddonRequest(cluster.Spec.Addons.CertManager, certManagerReleaseName, certManagerRepoURL,
-		certManagerChartName, defaultCertManagerChartVersion, defaultCertManagerNamespace, certManagerValues)
+	req, err := buildAddonRequest(certManagerAddonName, cluster.Spec.Addons.CertManager, certManagerValues)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -469,7 +472,7 @@ func (r *Reconciler) reconcileAddons(ctx context.Context, cluster *v1alpha2.Talo
 			"cert-manager install failed: "+err.Error())
 	}
 
-	healthy, reason, err := r.probeAddonHealthy(ctx, cluster, kubeconfig, "cert-manager", req.Namespace)
+	healthy, reason, err := r.probeAddonHealthy(ctx, cluster, kubeconfig, certManagerAddonName, req.Namespace)
 	if err != nil {
 		return ctrl.Result{}, err
 	}

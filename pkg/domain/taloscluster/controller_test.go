@@ -341,6 +341,38 @@ func TestReconcileAddonNamespaceVersionAndValuesOverride(t *testing.T) {
 	assert.Equal(t, true, envoy["enabled"])
 }
 
+// TestReconcileCiliumOperatorReplicasScaleWithControlPlaneCount covers
+// ciliumValues' control-plane-count-based operator.replicas override: a
+// single-control-plane cluster keeps values/cilium.yaml's own default (1,
+// since a second replica could never even schedule with hostNetwork: true
+// — see multiControlPlaneOperatorReplicas' own doc), while a
+// multi-control-plane cluster gets bumped to 2.
+func TestReconcileCiliumOperatorReplicasScaleWithControlPlaneCount(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	cpInstance1 := claimedDiscoveredInstance("cp-node-1", "cp-pool", "10.0.0.1")
+	cpInstance2 := claimedDiscoveredInstance("cp-node-2", "cp-pool", "10.0.0.2")
+
+	fakeClient := newFakeClient(t, cluster, cpInstance1, cpInstance2)
+
+	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig")}
+	installer := &fakeAddonInstaller{}
+	prober := &fakePodProber{}
+	reconciler := newReconciler(fakeClient, bootstrapper, installer, prober)
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "eu-1a"},
+	})
+	require.NoError(t, err)
+
+	require.Len(t, installer.calls, 1)
+
+	operator, ok := installer.calls[0].Values["operator"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, 2, operator["replicas"], "two control-plane nodes must scale cilium-operator to 2 replicas")
+}
+
 // TestReconcileCertManagerNotHealthyBlocksReady is
 // TestReconcileCiliumNotHealthyBlocksControlPlaneReady's counterpart for
 // cert-manager/Ready — control plane already ready, cert-manager's Install
