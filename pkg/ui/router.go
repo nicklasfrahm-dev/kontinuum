@@ -15,6 +15,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -23,6 +24,7 @@ import (
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/auth"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/adminrbac"
 )
 
 // NamespaceLister is the subset of the Kubernetes API the UI needs to list
@@ -529,25 +531,34 @@ func secretDataToYAML(data map[string][]byte) (string, error) {
 }
 
 // binding is a group-to-role grant rendered as a row on the IAM page — see
-// handleIAM. Kontinuum's authorization model today only has one role
-// (system:masters-equivalent, full read/write on every resource) bound to
-// whichever OIDC groups are configured as admins; there is no notion yet of
-// scoping a binding to less than that.
+// handleIAM. It reflects a live rbacv1.ClusterRoleBinding kontinuum's
+// admin-group controller manages (see pkg/domain/adminrbac): Subject is the
+// OIDC group, read back from the binding's adminrbac.AdminGroupAnnotation
+// rather than its name, since OIDC group names aren't always valid
+// Kubernetes object names — see adminrbac's own doc. Name and Age identify
+// the underlying ClusterRoleBinding object itself.
 type binding struct {
+	Name    string
 	Subject string
 	Role    string
+	Age     string
 }
 
-// adminSystemMastersRole is the role every binding on the IAM page currently
-// shows — see binding's doc for why there is only ever this one.
-const adminSystemMastersRole = "system:masters"
+// handleIAM is GET /app/iam's handler. When OIDC is configured, it lists
+// the live ClusterRoleBindings kontinuum's admin-group controller manages
+// (see pkg/domain/adminrbac) — real RBAC objects a cluster-admin can also
+// inspect with `kubectl get clusterrolebindings`, rather than rows
+// recomputed from cfg.OIDC.AdminGroups.
+func (r *Router) handleIAM(writer http.ResponseWriter, request *http.Request) {
+	var bindings []binding
 
-func (r *Router) handleIAM(writer http.ResponseWriter, _ *http.Request) {
-	groups := parseAdminGroups(r.cfg.OIDC.AdminGroups)
+	if r.authEnabled {
+		var err error
 
-	bindings := make([]binding, 0, len(groups))
-	for _, group := range groups {
-		bindings = append(bindings, binding{Subject: group, Role: adminSystemMastersRole})
+		bindings, err = r.listAdminGroupBindings(writer, request)
+		if err != nil {
+			return
+		}
 	}
 
 	r.render(writer, pageIAM, map[string]any{
@@ -559,22 +570,52 @@ func (r *Router) handleIAM(writer http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-// parseAdminGroups splits cfg.OIDC.AdminGroups's comma-delimited list into
-// trimmed, non-empty group names — mirrors libkapi's own unexported
-// parseAdminGroups (github.com/kommodity-io/kommodity/pkg/libkapi/auth) so
-// the IAM page lists exactly the groups the running authorizer actually
-// grants access to.
-func parseAdminGroups(raw string) []string {
-	var groups []string
+// listAdminGroupBindings lists the ClusterRoleBindings labeled as managed by
+// adminrbac.ManagedByValue and maps them to binding rows, sorted by
+// subject. On error, it writes the appropriate HTTP response itself (same
+// as renderRegistry) and returns a non-nil error so the caller knows not to
+// render the page.
+func (r *Router) listAdminGroupBindings(writer http.ResponseWriter, request *http.Request) ([]binding, error) {
+	kontinuums, err := r.kontinuumsFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
 
-	for group := range strings.SplitSeq(raw, ",") {
-		group = strings.TrimSpace(group)
-		if group != "" {
-			groups = append(groups, group)
-		}
+		return nil, err
 	}
 
-	return groups
+	var list rbacv1.ClusterRoleBindingList
+
+	err = kontinuums.List(request.Context(), &list,
+		client.MatchingLabels{v1alpha2.LabelManagedBy: adminrbac.ManagedByValue})
+	if err != nil {
+		// Forbidden means the signed-in identity is authenticated but not
+		// authorized — the session itself isn't the problem, but there's
+		// no reason to keep it either, so send the caller back to sign in
+		// rather than leave them stuck on a page they can't use.
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return nil, fmt.Errorf("forbidden: %w", err)
+		}
+
+		http.Error(writer, "failed to list admin group bindings: "+err.Error(), http.StatusBadGateway)
+
+		return nil, fmt.Errorf("failed to list admin group bindings: %w", err)
+	}
+
+	bindings := make([]binding, 0, len(list.Items))
+	for _, item := range list.Items {
+		bindings = append(bindings, binding{
+			Name:    item.Name,
+			Subject: item.Annotations[adminrbac.AdminGroupAnnotation],
+			Role:    item.RoleRef.Name,
+			Age:     formatAge(item.CreationTimestamp.Time),
+		})
+	}
+
+	sort.Slice(bindings, func(i, j int) bool { return bindings[i].Subject < bindings[j].Subject })
+
+	return bindings, nil
 }
 
 func (r *Router) handleSettings(writer http.ResponseWriter, request *http.Request) {

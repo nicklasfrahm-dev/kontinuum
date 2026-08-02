@@ -16,6 +16,7 @@ import (
 	"github.com/kommodity-io/kommodity/pkg/libkapi"
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -26,6 +27,7 @@ import (
 	"github.com/nicklasfrahm/kontinuum/pkg/auth"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/addon"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/adminrbac"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instancepool"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/registry"
@@ -207,6 +209,16 @@ func buildServer(
 		return nil, fmt.Errorf("failed to register core/v1 scheme: %w", err)
 	}
 
+	// rbac.authorization.k8s.io/v1 is needed for the same reason as core/v1
+	// above: adminrbac.Runnable's client.Client (built off this scheme) and
+	// the UI's own per-request client (kontinuumListerFactory, which the IAM
+	// page also uses to list ClusterRoleBindings — see handleIAM) both
+	// resolve ClusterRole/ClusterRoleBinding's GVKs against it.
+	err = rbacv1.AddToScheme(scheme)
+	if err != nil {
+		return nil, fmt.Errorf("failed to register rbac.authorization.k8s.io/v1 scheme: %w", err)
+	}
+
 	uiRouter := ui.NewRouter(
 		namespaceListerFactory(cfg.Server.Addr), kontinuumListerFactory(cfg.Server.Addr, scheme),
 		version, cfg.Redact(), oidcHandler != nil, invalidateSession)
@@ -222,7 +234,7 @@ func buildServer(
 		libkapi.WithLogger(logger),
 		libkapi.WithServerFactory(customHandlers(uiRouter, oidcHandler)),
 	}, authOpts, registryOpts, instanceOptions(logger), instancePoolOptions(logger), talosClusterOptions(logger),
-		addonOptions(logger))
+		addonOptions(logger), adminRBACOptions(cfg, logger))
 
 	// Storage is resolved against a background context so the backend
 	// is only torn down by Server.Shutdown, not by the signal context
@@ -338,6 +350,27 @@ func talosClusterOptions(logger *slog.Logger) []libkapi.Option {
 // ensured by instanceOptions' own ensureCRDs call.
 func addonOptions(logger *slog.Logger) []libkapi.Option {
 	controller := addon.NewController(addon.Config{Logger: logger.With("component", "addon")})
+
+	return []libkapi.Option{libkapi.WithController(controller)}
+}
+
+// adminRBACOptions builds the libkapi options that wire the admin-group
+// RBAC reconciler (see pkg/domain/adminrbac) onto the Server: it keeps a
+// ClusterRoleBinding for every group in cfg.OIDC.AdminGroups pointing at a
+// cluster-admin-equivalent ClusterRole, so the grant
+// libkapi.WithAdminAuthorizer enforces in-process is also visible as real,
+// inspectable RBAC objects — see issue #41. Only wired when OIDC is
+// configured; with no OIDC there's no notion of an admin group to bind, and
+// libkapi.WithAdminAuthorizer itself isn't wired either (see configureOIDC).
+func adminRBACOptions(cfg *config.Config, logger *slog.Logger) []libkapi.Option {
+	if cfg.OIDC.IssuerURL == "" {
+		return nil
+	}
+
+	controller := adminrbac.NewController(adminrbac.Config{
+		Logger:      logger.With("component", "adminrbac"),
+		AdminGroups: cfg.OIDC.AdminGroups,
+	})
 
 	return []libkapi.Option{libkapi.WithController(controller)}
 }
