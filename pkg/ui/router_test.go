@@ -35,6 +35,10 @@ const (
 	testOIDCClientID  = "kontinuum"
 )
 
+// secretsResource is the corev1 Secret GroupResource used to build fake
+// NotFound/Forbidden errors for the config-secret reveal tests below.
+const secretsResource = "secrets"
+
 // stubNamespaceLister is a fixed-response ui.NamespaceLister for tests.
 type stubNamespaceLister struct {
 	list *corev1.NamespaceList
@@ -51,28 +55,53 @@ type stubKontinuumLister struct {
 	err       error
 	getErr    error
 	deleteErr error
+	// secret and secretGetErr back Get calls for a *corev1.Secret — used by
+	// the config-secret reveal panel on the instance page (see
+	// fetchSecretDataYAML). Kept separate from items/getErr, which only ever
+	// answer for *v1alpha2.Kontinuum, since a single handler request can
+	// issue both kinds of Get and needs to control them independently.
+	secret       *corev1.Secret
+	secretGetErr error
 }
 
-// Get looks up a Kontinuum by name in items, matching a real client's
-// NotFound behavior when no item matches — see
+// Get looks up either a Kontinuum by name in items or, for a *corev1.Secret,
+// the fixed secret field — dispatching on obj's concrete type the same way a
+// real controller-runtime client would. Matches a real client's NotFound
+// behavior when no item/secret matches — see
 // TestHandleInstanceDetailReturnsNotFoundForUnknownInstance.
 func (s stubKontinuumLister) Get(
 	_ context.Context, key client.ObjectKey, obj client.Object, _ ...client.GetOption,
 ) error {
-	if s.getErr != nil {
-		return s.getErr
-	}
+	switch target := obj.(type) {
+	case *corev1.Secret:
+		if s.secretGetErr != nil {
+			return s.secretGetErr
+		}
 
-	for _, item := range s.items {
-		if item.Name == key.Name {
-			// obj is always *v1alpha2.Kontinuum in this package's tests.
-			*obj.(*v1alpha2.Kontinuum) = item //nolint:forcetypeassert // see comment above
+		if s.secret != nil && s.secret.Name == key.Name && s.secret.Namespace == key.Namespace {
+			*target = *s.secret
 
 			return nil
 		}
-	}
 
-	return apierrors.NewNotFound(schema.GroupResource{Group: v1alpha2.GroupName, Resource: "kontinuums"}, key.Name)
+		return apierrors.NewNotFound(schema.GroupResource{Resource: secretsResource}, key.Name)
+	default:
+		if s.getErr != nil {
+			return s.getErr
+		}
+
+		for _, item := range s.items {
+			if item.Name == key.Name {
+				// obj is always *v1alpha2.Kontinuum here — anything else
+				// falls through to the corev1.Secret case above.
+				*obj.(*v1alpha2.Kontinuum) = item //nolint:forcetypeassert // see comment above
+
+				return nil
+			}
+		}
+
+		return apierrors.NewNotFound(schema.GroupResource{Group: v1alpha2.GroupName, Resource: "kontinuums"}, key.Name)
+	}
 }
 
 func (s stubKontinuumLister) List(_ context.Context, list client.ObjectList, _ ...client.ListOption) error {
@@ -267,7 +296,9 @@ func TestHandleHomeShowsLogoutLinkOnlyWhenAuthEnabled(t *testing.T) {
 
 // instanceWithConfig builds a Kontinuum fixture carrying the given
 // status.config — shared by the handleInstanceDetail tests below.
-func instanceWithConfig(name string, cfg v1alpha2.KontinuumConfigStatus) v1alpha2.Kontinuum {
+func instanceWithConfig(cfg v1alpha2.KontinuumConfigStatus) v1alpha2.Kontinuum {
+	const name = "worker-1"
+
 	return v1alpha2.Kontinuum{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Status: v1alpha2.KontinuumStatus{
@@ -285,7 +316,7 @@ func TestHandleInstanceDetailRendersInstanceSettings(t *testing.T) {
 		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
 	}
 
-	item := instanceWithConfig("worker-1", v1alpha2.KontinuumConfigStatus{
+	item := instanceWithConfig(v1alpha2.KontinuumConfigStatus{
 		Server: v1alpha2.KontinuumServerConfigStatus{Addr: ":8080", Storage: "postgres://db.internal:5432/kontinuum"},
 		Log:    v1alpha2.KontinuumLogConfigStatus{Level: "info", Format: "json"},
 		OIDC: v1alpha2.KontinuumOIDCConfigStatus{
@@ -328,7 +359,7 @@ func TestHandleInstanceDetailHidesOIDCDetailsWhenInstanceOIDCDisabled(t *testing
 		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
 	}
 
-	item := instanceWithConfig("worker-1", v1alpha2.KontinuumConfigStatus{
+	item := instanceWithConfig(v1alpha2.KontinuumConfigStatus{
 		OIDC: v1alpha2.KontinuumOIDCConfigStatus{Enabled: false, IssuerURL: testOIDCIssuerURL},
 	})
 
@@ -412,6 +443,157 @@ func TestHandleInstanceDetailInvalidatesSessionOnForbidden(t *testing.T) {
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
 		return stubKontinuumLister{getErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
+	}
+
+	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/kontinuums/worker-1"), kontinuumFactory)
+}
+
+func TestHandleInstanceDetailShowsConfigSecretDataReveal(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	item := instanceWithConfig(v1alpha2.KontinuumConfigStatus{})
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker-1", Namespace: v1alpha2.DefaultSecretNamespace},
+		Data:       map[string][]byte{"password": []byte("s3cr3t")},
+	}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{items: []v1alpha2.Kontinuum{item}, secret: secret}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums/worker-1"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "Secrets")
+	assert.Contains(t, string(body), "toggleSecretData")
+	assert.Contains(t, string(body), "password: s3cr3t")
+}
+
+func TestHandleInstanceDetailHidesConfigSecretRevealWhenSecretRefEmpty(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	item := v1alpha2.Kontinuum{ObjectMeta: metav1.ObjectMeta{Name: "worker-1"}}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{items: []v1alpha2.Kontinuum{item}}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums/worker-1"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.NotContains(t, string(body), "toggleSecretData")
+}
+
+func TestHandleInstanceDetailHidesConfigSecretRevealWhenSecretNotFound(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	item := instanceWithConfig(v1alpha2.KontinuumConfigStatus{})
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{
+			items: []v1alpha2.Kontinuum{item},
+			secretGetErr: apierrors.NewNotFound(
+				schema.GroupResource{Resource: secretsResource}, "worker-1"),
+		}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums/worker-1"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "kontinuum-system/worker-1")
+	assert.NotContains(t, string(body), "toggleSecretData")
+}
+
+func TestHandleInstanceDetailReturnsBadGatewayWhenSecretGetFails(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	item := instanceWithConfig(v1alpha2.KontinuumConfigStatus{})
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{items: []v1alpha2.Kontinuum{item}, secretGetErr: errFactory}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums/worker-1"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
+}
+
+func TestHandleInstanceDetailInvalidatesSessionOnForbiddenSecretGet(t *testing.T) {
+	t.Parallel()
+
+	item := instanceWithConfig(v1alpha2.KontinuumConfigStatus{})
+	forbiddenReason := schema.GroupResource{Resource: secretsResource}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{
+			items:        []v1alpha2.Kontinuum{item},
+			secretGetErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden),
+		}, nil
 	}
 
 	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/kontinuums/worker-1"), kontinuumFactory)

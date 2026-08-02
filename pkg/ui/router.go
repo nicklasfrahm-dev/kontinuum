@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"embed"
+	"fmt"
 	"html/template"
 	"net/http"
 	"sort"
@@ -17,6 +18,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/yaml"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/auth"
@@ -121,7 +123,10 @@ func NewRouter(
 			"templates/components/icon_trash.html"),
 		pageInstance: mustParsePage("templates/instance_content.html",
 			"templates/components/icon_server.html", "templates/components/icon_shield.html",
-			"templates/components/icon_chevron_left.html"),
+			"templates/components/icon_chevron_left.html", "templates/components/icon_eye.html",
+			"templates/components/icon_eye_off.html", "templates/components/icon_copy.html",
+			"templates/components/icon_check.html", "templates/components/icon_key.html",
+			"templates/components/icon_info.html"),
 		pageSettings: mustParsePage("templates/settings_content.html",
 			"templates/components/icon_copy.html", "templates/components/icon_download.html",
 			"templates/components/icon_eye.html", "templates/components/icon_eye_off.html",
@@ -402,13 +407,26 @@ func (r *Router) handleInstanceDetail(writer http.ResponseWriter, request *http.
 		return
 	}
 
+	secretDataYAML, ok := r.fetchSecretDataYAML(writer, request, kontinuums, item.Status.SecretRef)
+	if !ok {
+		return
+	}
+
+	r.render(writer, pageInstance, instanceDetailData(item, secretDataYAML, r.version, r.authEnabled))
+}
+
+// instanceDetailData builds handleInstanceDetail's template data from item
+// and its already-fetched secretDataYAML (see fetchSecretDataYAML) —
+// factored out of handleInstanceDetail purely to keep that function short;
+// it has no logic of its own beyond field selection.
+func instanceDetailData(item v1alpha2.Kontinuum, secretDataYAML, version string, authEnabled bool) map[string]any {
 	cfg := item.Status.Config
 
-	r.render(writer, pageInstance, map[string]any{
+	return map[string]any{
 		"Title":           item.Name,
 		"ActiveMenu":      "registry",
-		"Version":         r.version,
-		"AuthEnabled":     r.authEnabled,
+		"Version":         version,
+		"AuthEnabled":     authEnabled,
 		"Name":            item.Name,
 		"Role":            item.Status.Role,
 		"Region":          item.Spec.Region,
@@ -422,6 +440,7 @@ func (r *Router) handleInstanceDetail(writer http.ResponseWriter, request *http.
 		"StorageTarget":   cfg.Server.Storage,
 		"SecretName":      item.Status.SecretRef.Name,
 		"SecretNamespace": item.Status.SecretRef.Namespace,
+		"SecretDataYAML":  secretDataYAML,
 		"LogLevel":        cfg.Log.Level,
 		"LogFormat":       cfg.Log.Format,
 		"OIDCEnabled":     cfg.OIDC.Enabled,
@@ -429,7 +448,79 @@ func (r *Router) handleInstanceDetail(writer http.ResponseWriter, request *http.
 		"OIDCClientID":    cfg.OIDC.ClientID,
 		"OIDCRedirectURL": cfg.OIDC.RedirectURL,
 		"OIDCAdminGroups": cfg.OIDC.AdminGroups,
-	})
+	}
+}
+
+// fetchSecretDataYAML fetches the Secret backing ref (the instance page's
+// status.secretRef) through kontinuums — the same identity-scoped client
+// handleInstanceDetail already used to fetch the Kontinuum object itself, so
+// a viewer sees the config secret's contents exactly when RBAC would let
+// them `kubectl get secret` it directly, with no separate authorization path
+// to keep in sync. Returns ("", true) when there is no secret to show or it
+// can no longer be found, since either just means the instance page renders
+// without a reveal panel rather than that the request failed. The bool
+// result is false when the caller should stop: fetchSecretDataYAML has
+// already written the error (or forbidden-redirect) response itself.
+func (r *Router) fetchSecretDataYAML(
+	writer http.ResponseWriter, request *http.Request,
+	kontinuums KontinuumClient, ref v1alpha2.KontinuumSecretReference,
+) (string, bool) {
+	if ref.Name == "" {
+		return "", true
+	}
+
+	var secret corev1.Secret
+
+	key := client.ObjectKey{Name: ref.Name, Namespace: ref.Namespace}
+
+	err := kontinuums.Get(request.Context(), key, &secret)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", true
+		}
+
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return "", false
+		}
+
+		http.Error(writer, "failed to get kontinuum config secret: "+err.Error(), http.StatusBadGateway)
+
+		return "", false
+	}
+
+	secretDataYAML, err := secretDataToYAML(secret.Data)
+	if err != nil {
+		http.Error(writer, "failed to render kontinuum config secret: "+err.Error(), http.StatusInternalServerError)
+
+		return "", false
+	}
+
+	return secretDataYAML, true
+}
+
+// secretDataToYAML renders a Secret's decoded Data map as sorted YAML
+// key/value pairs. client-go already base64-decodes Data's values on the way
+// in, so this only needs to retype []byte to string before marshaling —
+// sigs.k8s.io/yaml marshals through encoding/json, which sorts map keys, so
+// the output is deterministic without an explicit sort here.
+func secretDataToYAML(data map[string][]byte) (string, error) {
+	if len(data) == 0 {
+		return "", nil
+	}
+
+	strData := make(map[string]string, len(data))
+	for key, value := range data {
+		strData[key] = string(value)
+	}
+
+	out, err := yaml.Marshal(strData)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal secret data as yaml: %w", err)
+	}
+
+	return string(out), nil
 }
 
 func (r *Router) handleSettings(writer http.ResponseWriter, request *http.Request) {
