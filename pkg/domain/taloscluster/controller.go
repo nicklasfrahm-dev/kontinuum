@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
+	"sync"
 	"time"
 
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
@@ -27,8 +29,8 @@ const (
 	// succeeded at least once — see TalosClusterSpec's own doc comment
 	// ("ControlPlaneReady, Bootstrapped, Ready").
 	BootstrappedConditionType = "Bootstrapped"
-	// ReadyConditionType is set true once Cilium and cert-manager are
-	// both installed.
+	// ReadyConditionType is set true once every enabled addon is installed
+	// and healthy — no addon gets special ordering, see reconcileAddons.
 	ReadyConditionType = "Ready"
 
 	reasonWaitingForInstances = "WaitingForInstances"
@@ -36,7 +38,6 @@ const (
 	reasonHealthy             = "Healthy"
 	reasonAddonsInstalled     = "AddonsInstalled"
 	reasonAddonInstallFailed  = "AddonInstallFailed"
-	reasonCiliumInstallFailed = "CiliumInstallFailed"
 	reasonAddonNotHealthy     = "AddonNotHealthy"
 
 	defaultHealthCheckTimeout = 10 * time.Second
@@ -69,8 +70,8 @@ type Config struct {
 	// Bootstrapper drives Talos config-apply/bootstrap/health/kubeconfig.
 	// Defaults to NewTalosBootstrapper(cfg.Logger) when nil.
 	Bootstrapper ClusterBootstrapper
-	// AddonInstaller installs Cilium and cert-manager once the control
-	// plane is healthy. Defaults to NewHelmInstaller() when nil.
+	// AddonInstaller installs every enabled addon (see reconcileAddons).
+	// Defaults to NewHelmInstaller() when nil.
 	AddonInstaller AddonInstaller
 	// PodProber checks whether an installed addon's pods are actually
 	// healthy — installRelease/upgradeRelease only apply manifests, they
@@ -183,7 +184,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	if !meta.IsStatusConditionTrue(cluster.Status.Conditions, ReadyConditionType) {
-		return r.reconcileAddons(ctx, &cluster)
+		kubeconfig, err := r.loadKubeconfig(ctx, &cluster)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		return r.reconcileAddons(ctx, &cluster, kubeconfig)
 	}
 
 	return ctrl.Result{}, nil
@@ -245,10 +251,18 @@ func (r *Reconciler) applyControlPlaneConfig(
 	return controlPlaneNodes
 }
 
-// bootstrapAndCheckHealth triggers etcd bootstrap, installs Cilium as soon
-// as the apiserver is reachable (see installCiliumEarly's own doc for why
-// that can't wait for the health check below), then waits for cluster
-// health and marks ControlPlaneReady/Bootstrapped true.
+// bootstrapAndCheckHealth triggers etcd bootstrap, fetches and stores the
+// kubeconfig, installs every enabled addon in parallel (see
+// reconcileAddons — this can't wait for the health check below: that
+// check waits on CoreDNS reporting ready, which itself needs a working
+// pod network, so installing Cilium only once the cluster already reports
+// "healthy" would deadlock — see generateConfigs' own doc for why Talos's
+// default flannel CNI is disabled instead of racing it against Cilium),
+// then waits for cluster health and marks ControlPlaneReady/Bootstrapped
+// true. Addon health (Ready) and control-plane health (ControlPlaneReady)
+// are deliberately independent conditions — HealthCheck itself already
+// can't pass without Cilium already applied, so nothing is lost by not
+// also gating ControlPlaneReady on Ready in Go.
 func (r *Reconciler) bootstrapAndCheckHealth(
 	ctx context.Context, cluster *v1alpha2.TalosCluster, controlPlaneAddr string, controlPlaneNodes []string,
 	talosCfg *clientconfig.Config,
@@ -259,9 +273,23 @@ func (r *Reconciler) bootstrapAndCheckHealth(
 			"cluster", cluster.Name, "address", controlPlaneAddr, "error", err)
 	}
 
-	result, ready, err := r.installCiliumEarly(ctx, cluster, controlPlaneAddr, len(controlPlaneNodes), talosCfg)
-	if err != nil || !ready {
-		return result, err
+	kubeconfig, err := r.Bootstrapper.Kubeconfig(ctx, controlPlaneAddr, talosCfg)
+	if err != nil {
+		r.Logger.Warn("kubeconfig not yet available, control plane still starting",
+			"cluster", cluster.Name, "error", err)
+
+		return r.setControlPlaneCondition(ctx, cluster, metav1.ConditionFalse, reasonBootstrapping,
+			"waiting for the control plane's apiserver to become reachable")
+	}
+
+	err = storeKubeconfig(ctx, r.Client, cluster, kubeconfig)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	addonsResult, err := r.reconcileAddons(ctx, cluster, kubeconfig)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 
 	err = r.Bootstrapper.HealthCheck(ctx, controlPlaneAddr, talosCfg, controlPlaneNodes, r.HealthCheckTimeout)
@@ -277,78 +305,158 @@ func (r *Reconciler) bootstrapAndCheckHealth(
 		Message: "cluster bootstrapped",
 	})
 
-	return r.setControlPlaneCondition(ctx, cluster, metav1.ConditionTrue, reasonHealthy, "control plane is healthy")
+	controlPlaneResult, err := r.setControlPlaneCondition(ctx, cluster, metav1.ConditionTrue, reasonHealthy,
+		"control plane is healthy")
+	if err != nil {
+		return controlPlaneResult, err
+	}
+
+	// ControlPlaneReady and Ready are independent conditions, each already
+	// persisted by its own Status().Update() above — but if addons aren't
+	// healthy yet, that shouldn't go unattended just because
+	// ControlPlaneReady itself needs no requeue: hand back whichever of
+	// the two wants to be checked again sooner, rather than silently
+	// dropping addonsResult's own requeue signal.
+	if addonsResult.RequeueAfter > controlPlaneResult.RequeueAfter {
+		return addonsResult, nil
+	}
+
+	return controlPlaneResult, nil
 }
 
-// installCiliumEarly fetches and stores the kubeconfig, then installs
-// Cilium — both as soon as the apiserver is reachable, well before the
-// full ClusterHealthCheck bootstrapAndCheckHealth runs afterward can ever
-// pass. That check waits on CoreDNS reporting ready, which itself needs a
-// working pod network — installing Cilium only once the cluster is
-// already "healthy" would deadlock, since nothing would ever provide that
-// network in the first place (see generateConfigs' own doc for why
-// Talos's default flannel CNI is disabled instead of racing it against
-// Cilium). Returns ready=false whenever the caller should requeue instead
-// of proceeding to the health check. controlPlaneCount scales
-// cilium-operator's replicas — see ciliumValues.
-func (r *Reconciler) installCiliumEarly(
-	ctx context.Context, cluster *v1alpha2.TalosCluster, controlPlaneAddr string, controlPlaneCount int,
-	talosCfg *clientconfig.Config,
-) (ctrl.Result, bool, error) {
-	kubeconfig, err := r.Bootstrapper.Kubeconfig(ctx, controlPlaneAddr, talosCfg)
+// reconcileAddons resolves and installs every enabled addon in parallel
+// against kubeconfig, then gates ReadyConditionType on all of them being
+// healthy — no addon gets special ordering. Called both while the control
+// plane is still bootstrapping (see bootstrapAndCheckHealth's own doc)
+// and afterward, from Reconcile, to keep converging (e.g. a user changing
+// spec.addons[].values, or a pod that later crashes).
+func (r *Reconciler) reconcileAddons(
+	ctx context.Context, cluster *v1alpha2.TalosCluster, kubeconfig []byte,
+) (ctrl.Result, error) {
+	controlPlaneCount, err := r.controlPlaneCount(ctx, cluster)
 	if err != nil {
-		r.Logger.Warn("kubeconfig not yet available, control plane still starting",
-			"cluster", cluster.Name, "error", err)
-
-		result, condErr := r.setControlPlaneCondition(ctx, cluster, metav1.ConditionFalse, reasonBootstrapping,
-			"waiting for the control plane's apiserver to become reachable")
-
-		return result, false, condErr
+		return ctrl.Result{}, err
 	}
 
-	err = storeKubeconfig(ctx, r.Client, cluster, kubeconfig)
+	celCtx, err := celContext(cluster, controlPlaneCount)
 	if err != nil {
-		return ctrl.Result{}, false, err
+		return ctrl.Result{}, err
 	}
 
-	if !addonEnabled(cluster.Spec.Addons.Cilium) {
-		return ctrl.Result{}, true, nil
-	}
-
-	req, err := buildAddonRequest(ciliumAddonName, cluster.Spec.Addons.Cilium,
-		func(userValues map[string]any) map[string]any {
-			return ciliumValues(controlPlaneCount, userValues)
-		})
+	requests, err := resolveAddons(cluster, celCtx)
 	if err != nil {
-		return ctrl.Result{}, false, err
+		return r.setReadyCondition(ctx, cluster, metav1.ConditionFalse, reasonAddonInstallFailed, err.Error())
 	}
 
+	outcomes := make([]addonOutcome, len(requests))
+
+	var waitGroup sync.WaitGroup
+
+	for index, req := range requests {
+		waitGroup.Add(1)
+
+		go func(index int, req AddonInstallRequest) {
+			defer waitGroup.Done()
+
+			outcomes[index] = r.installAndProbeAddon(ctx, cluster, kubeconfig, req)
+		}(index, req)
+	}
+
+	waitGroup.Wait()
+
+	return r.applyAddonOutcomes(ctx, cluster, outcomes)
+}
+
+// addonOutcome is one addon's install+health-probe result — see
+// installAndProbeAddon/applyAddonOutcomes.
+type addonOutcome struct {
+	name    string
+	healthy bool
+	reason  string // unhealthy reason, or install error text
+	// installFailed distinguishes Install itself failing from a probe
+	// simply reporting not-yet-healthy — see applyAddonOutcomes, which
+	// picks reasonAddonInstallFailed over reasonAddonNotHealthy whenever
+	// any outcome sets this.
+	installFailed bool
+	err           error // hard error — propagates as a real reconcile error
+}
+
+// installAndProbeAddon installs req, then probes its pods' health —
+// installRelease/upgradeRelease only apply manifests, they don't wait for
+// rollout, so probing is what actually confirms an addon is usable.
+func (r *Reconciler) installAndProbeAddon(
+	ctx context.Context, cluster *v1alpha2.TalosCluster, kubeconfig []byte, req AddonInstallRequest,
+) addonOutcome {
 	installCtx, cancel := context.WithTimeout(ctx, addonInstallTimeout)
 	defer cancel()
 
-	err = r.AddonInstaller.Install(installCtx, kubeconfig, req)
+	err := r.AddonInstaller.Install(installCtx, kubeconfig, req)
 	if err != nil {
-		r.Logger.Warn("failed to install cilium", "cluster", cluster.Name, "error", err)
+		r.Logger.Warn("failed to install addon", "cluster", cluster.Name, "addon", req.ReleaseName, "error", err)
 
-		result, condErr := r.setControlPlaneCondition(ctx, cluster, metav1.ConditionFalse, reasonCiliumInstallFailed,
-			"cilium install failed: "+err.Error())
-
-		return result, false, condErr
+		return addonOutcome{name: req.ReleaseName, reason: err.Error(), installFailed: true}
 	}
 
-	healthy, reason, err := r.probeAddonHealthy(ctx, cluster, kubeconfig, ciliumAddonName, req.Namespace)
+	healthy, reason, err := r.probeAddonHealthy(ctx, cluster, kubeconfig, req.ReleaseName, req.Namespace)
 	if err != nil {
-		return ctrl.Result{}, false, err
+		return addonOutcome{name: req.ReleaseName, err: err}
 	}
 
-	if !healthy {
-		result, condErr := r.setControlPlaneCondition(ctx, cluster, metav1.ConditionFalse, reasonAddonNotHealthy,
-			"Waiting for cilium pods to become healthy: "+reason)
+	return addonOutcome{name: req.ReleaseName, healthy: healthy, reason: reason}
+}
 
-		return result, false, condErr
+// applyAddonOutcomes aggregates every addon's outcome into one Ready
+// condition — true only once every addon is healthy. An Install failure
+// takes precedence over a merely-not-yet-healthy probe result when
+// picking the aggregate reason, since it's the more actionable of the two.
+func (r *Reconciler) applyAddonOutcomes(
+	ctx context.Context, cluster *v1alpha2.TalosCluster, outcomes []addonOutcome,
+) (ctrl.Result, error) {
+	for _, outcome := range outcomes {
+		if outcome.err != nil {
+			return ctrl.Result{}, outcome.err
+		}
 	}
 
-	return ctrl.Result{}, true, nil
+	var unhealthy []string
+
+	installFailed := false
+
+	for _, outcome := range outcomes {
+		if !outcome.healthy {
+			unhealthy = append(unhealthy, outcome.name+": "+outcome.reason)
+
+			if outcome.installFailed {
+				installFailed = true
+			}
+		}
+	}
+
+	if len(unhealthy) > 0 {
+		reason := reasonAddonNotHealthy
+		if installFailed {
+			reason = reasonAddonInstallFailed
+		}
+
+		return r.setReadyCondition(ctx, cluster, metav1.ConditionFalse, reason,
+			"waiting for addons: "+strings.Join(unhealthy, "; "))
+	}
+
+	return r.setReadyCondition(ctx, cluster, metav1.ConditionTrue, reasonAddonsInstalled,
+		"all addons installed and healthy")
+}
+
+// controlPlaneCount reports how many members cluster's control-plane pool
+// has currently claimed and discovered — a fact CEL rules in an embedded
+// values/*.yaml may need (see celContext) that isn't itself a field
+// TalosCluster stores.
+func (r *Reconciler) controlPlaneCount(ctx context.Context, cluster *v1alpha2.TalosCluster) (int, error) {
+	members, err := resolveMembers(ctx, r.Client, cluster.Spec.ControlPlane.PoolRef)
+	if err != nil {
+		return 0, err
+	}
+
+	return len(members), nil
 }
 
 // probeAddonHealthy checks namespace's pods via PodProber — installRelease/
@@ -439,50 +547,6 @@ func (r *Reconciler) reconcileWorkerPool(
 	}
 
 	return nil
-}
-
-// reconcileAddons installs cert-manager against the cluster's stored
-// kubeconfig — only ever called once ControlPlaneReady is true (see
-// Reconcile). Cilium is installed earlier, as part of reaching
-// ControlPlaneReady itself — see installCiliumEarly's own doc for why.
-func (r *Reconciler) reconcileAddons(ctx context.Context, cluster *v1alpha2.TalosCluster) (ctrl.Result, error) {
-	if !addonEnabled(cluster.Spec.Addons.CertManager) {
-		return r.setReadyCondition(ctx, cluster, metav1.ConditionTrue, reasonAddonsInstalled,
-			"cert-manager disabled, nothing to install")
-	}
-
-	kubeconfig, err := r.loadKubeconfig(ctx, cluster)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	req, err := buildAddonRequest(certManagerAddonName, cluster.Spec.Addons.CertManager, certManagerValues)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	installCtx, cancel := context.WithTimeout(ctx, addonInstallTimeout)
-	defer cancel()
-
-	err = r.AddonInstaller.Install(installCtx, kubeconfig, req)
-	if err != nil {
-		r.Logger.Warn("failed to install cert-manager", "cluster", cluster.Name, "error", err)
-
-		return r.setReadyCondition(ctx, cluster, metav1.ConditionFalse, reasonAddonInstallFailed,
-			"cert-manager install failed: "+err.Error())
-	}
-
-	healthy, reason, err := r.probeAddonHealthy(ctx, cluster, kubeconfig, certManagerAddonName, req.Namespace)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	if !healthy {
-		return r.setReadyCondition(ctx, cluster, metav1.ConditionFalse, reasonAddonNotHealthy,
-			"Waiting for cert-manager pods to become healthy: "+reason)
-	}
-
-	return r.setReadyCondition(ctx, cluster, metav1.ConditionTrue, reasonAddonsInstalled, "cert-manager installed")
 }
 
 // loadKubeconfig fetches the kubeconfig reconcileControlPlane already

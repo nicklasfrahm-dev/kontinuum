@@ -78,9 +78,15 @@ type TalosClusterSpec struct {
 	// +kubebuilder:validation:MaxItems=32
 	Workers []TalosClusterWorkerSpec `json:"workers,omitempty"`
 	// Addons configures the addons this cluster installs once its control
-	// plane is healthy — see AddonsSpec's own doc.
+	// plane is healthy — see AddonSpec's own doc. "cilium" and
+	// "cert-manager" are built-in and installed by default even with no
+	// entry here at all; an entry with one of those names overrides that
+	// built-in's own fields, and any other Name is a fully user-defined
+	// addon (its own Chart required).
 	// +optional
-	Addons AddonsSpec `json:"addons,omitempty"`
+	// +listType=map
+	// +listMapKey=name
+	Addons []AddonSpec `json:"addons,omitempty"`
 }
 
 // TalosClusterStatus reports this cluster's bootstrap progress.

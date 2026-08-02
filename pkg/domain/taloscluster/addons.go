@@ -43,9 +43,11 @@ var defaultValuesFS embed.FS
 
 // addonDefaults is one embedded values/<name>.yaml file's shape — chart
 // identity/version, install namespace, and Helm values all live together
-// so there's a single place to update when e.g. bumping a chart version. A
-// TalosCluster's own spec.addons.<name>.version/.namespace/.values
-// override these — see AddonSpec's own doc.
+// so there's a single place to update when e.g. bumping a chart version.
+// The chart's own name is the embedded file's own name (see
+// loadAddonDefaults) — only Repo/Version live here. A TalosCluster's own
+// spec.addons[] entry can override each of these fields individually —
+// see AddonSpec's own doc.
 type addonDefaults struct {
 	Chart struct {
 		Repo    string `json:"repo"`
@@ -58,66 +60,25 @@ type addonDefaults struct {
 // loadAddonDefaults reads and parses name's embedded values/<name>.yaml —
 // see that directory's own files for what each addon's required/functional
 // defaults are and why. Kept as real YAML files rather than Go literals
-// purely for readability/diffability; a corrupt or missing embedded file
-// can only mean a build-time bug, not a condition callers could
-// meaningfully recover from — hence the panic instead of a returned error,
-// mirroring pkg/crd.Build's identical reasoning for its own embedded
-// manifests.
-func loadAddonDefaults(name string) addonDefaults {
+// purely for readability/diffability. Returns an error, not a panic: only
+// the two built-in names (see resolveAddons) are ever expected to resolve
+// to a real embedded file, but a generic addon system shouldn't have a
+// function's safety depend on every call site getting that discipline
+// right by convention.
+func loadAddonDefaults(name string) (addonDefaults, error) {
 	data, err := defaultValuesFS.ReadFile("values/" + name + ".yaml")
 	if err != nil {
-		panic(fmt.Sprintf("failed to read embedded %s.yaml: %v", name, err))
+		return addonDefaults{}, fmt.Errorf("failed to read embedded %s.yaml: %w", name, err)
 	}
 
 	var defaults addonDefaults
 
 	err = yaml.Unmarshal(data, &defaults)
 	if err != nil {
-		panic(fmt.Sprintf("failed to parse embedded %s.yaml: %v", name, err))
+		return addonDefaults{}, fmt.Errorf("failed to parse embedded %s.yaml: %w", name, err)
 	}
 
-	return defaults
-}
-
-// multiControlPlaneOperatorReplicas is cilium-operator's replica count once
-// a cluster has more than one control-plane node — high-availability
-// without over-provisioning, since the operator itself is a leader-elected
-// singleton (more replicas past 2 add standby capacity, not throughput).
-// values/cilium.yaml's own default (1) covers the single-control-plane
-// case, where a second replica could never even schedule with
-// hostNetwork: true (see this file's own history for the deadlock that
-// caused).
-const multiControlPlaneOperatorReplicas = 2
-
-// ciliumValues builds the Helm values for the Cilium install — see
-// values/cilium.yaml for the full set and why each diverges from the
-// chart's own defaults; every value there follows Talos's own documented
-// Cilium install (docs.siderolabs.com/kubernetes-guides/cni/deploying-cilium).
-// k8sServicePort is overlaid at runtime from kubePrismPort (config.go),
-// rather than living in the YAML file, since it's derived from a Go
-// constant, not a static default. controlPlaneCount scales
-// operator.replicas up once there's more than one control-plane node to
-// spread across — see multiControlPlaneOperatorReplicas. userValues, when
-// non-nil, are merged on top last — user values win on conflict, see
-// mergeValues.
-func ciliumValues(controlPlaneCount int, userValues map[string]any) map[string]any {
-	values := loadAddonDefaults(ciliumAddonName).Values
-	values["k8sServicePort"] = kubePrismPort
-
-	if controlPlaneCount > 1 {
-		values = mergeValues(values, map[string]any{
-			"operator": map[string]any{"replicas": multiControlPlaneOperatorReplicas},
-		})
-	}
-
-	return mergeValues(values, userValues)
-}
-
-// certManagerValues builds the Helm values for the cert-manager install —
-// see values/cert-manager.yaml. userValues, when non-nil, are merged on
-// top — user values win on conflict, see mergeValues.
-func certManagerValues(userValues map[string]any) map[string]any {
-	return mergeValues(loadAddonDefaults(certManagerAddonName).Values, userValues)
+	return defaults, nil
 }
 
 // mergeValues recursively merges overlay onto base, returning a new map —
@@ -191,42 +152,166 @@ func addonUserValues(spec v1alpha2.AddonSpec) (map[string]any, error) {
 	return values, nil
 }
 
-// buildAddonRequest resolves spec's namespace/version/method/values
-// overrides against name's own embedded defaults (see loadAddonDefaults)
-// and merges baseValues' required/functional defaults with any
-// user-supplied values — see ciliumValues/certManagerValues, and
-// mergeValues's own "user values win on conflict" doc. name is both the
-// Helm release/chart name and the embedded values/<name>.yaml this addon's
-// defaults come from — see ciliumAddonName/certManagerAddonName's own doc.
-func buildAddonRequest(
-	name string, spec v1alpha2.AddonSpec,
-	baseValues func(userValues map[string]any) map[string]any,
-) (AddonInstallRequest, error) {
-	defaults := loadAddonDefaults(name)
+// errAddonMissingChart and errAddonMissingNamespace are static sentinels
+// — err113 flags a dynamically constructed errors.New/fmt.Errorf call
+// without a wrapped static error, same as controller.go's own
+// errKubeconfigNotStored.
+var (
+	errAddonMissingChart = errors.New(
+		"addon has no chart repo/name — set spec.addons[].chart (no built-in default for this name)")
+	errAddonMissingNamespace = errors.New(
+		"addon has no namespace — set spec.addons[].namespace (no built-in default for this name)")
+)
+
+// builtinAddonNames lists TalosCluster's own default addons — each is
+// also the embedded values/<name>.yaml filename this addon's own defaults
+// come from (see loadAddonDefaults). Installed even with no entry in
+// cluster.Spec.Addons at all — see resolveAddons. A function, not a
+// package-level slice, so nothing can mutate the shared backing array.
+func builtinAddonNames() []string {
+	return []string{ciliumAddonName, certManagerAddonName}
+}
+
+// resolveAddons merges cluster.Spec.Addons against builtinAddonNames' own
+// embedded defaults and returns one AddonInstallRequest per *enabled*
+// addon: a built-in name absent from Spec.Addons installs with its own
+// embedded defaults untouched; a Spec.Addons entry naming a built-in
+// overrides that built-in's fields one at a time (an unset field keeps
+// the built-in's own value); any other Spec.Addons entry is a fully
+// user-defined addon with no built-in default — its own Chart is
+// required. Order is irrelevant — callers install these in parallel.
+func resolveAddons(cluster *v1alpha2.TalosCluster, celCtx map[string]any) ([]AddonInstallRequest, error) {
+	userAddons := make(map[string]v1alpha2.AddonSpec, len(cluster.Spec.Addons))
+	for _, spec := range cluster.Spec.Addons {
+		userAddons[spec.Name] = spec
+	}
+
+	names := builtinAddonNames()
+	seen := make(map[string]bool, len(names))
+	requests := make([]AddonInstallRequest, 0, len(cluster.Spec.Addons)+len(names))
+
+	for _, name := range names {
+		seen[name] = true
+
+		req, enabled, err := resolveBuiltinAddon(name, userAddons, celCtx)
+		if err != nil {
+			return nil, err
+		}
+
+		if enabled {
+			requests = append(requests, req)
+		}
+	}
+
+	for _, spec := range cluster.Spec.Addons {
+		if seen[spec.Name] || !addonEnabled(spec) {
+			continue
+		}
+
+		req, err := resolveAddon(spec, addonDefaults{}, celCtx)
+		if err != nil {
+			return nil, err
+		}
+
+		requests = append(requests, req)
+	}
+
+	return requests, nil
+}
+
+// resolveBuiltinAddon resolves name's own request, applying userAddons'
+// same-named entry (if any) as an override — see resolveAddons' own doc.
+// enabled is false when the addon is disabled; callers should skip it,
+// not append req, in that case.
+func resolveBuiltinAddon(
+	name string, userAddons map[string]v1alpha2.AddonSpec, celCtx map[string]any,
+) (AddonInstallRequest, bool, error) {
+	spec, overridden := userAddons[name]
+	if !overridden {
+		spec = v1alpha2.AddonSpec{Name: name}
+	}
+
+	if !addonEnabled(spec) {
+		return AddonInstallRequest{}, false, nil
+	}
+
+	def, err := loadAddonDefaults(name)
+	if err != nil {
+		return AddonInstallRequest{}, false, err
+	}
+
+	req, err := resolveAddon(spec, def, celCtx)
+	if err != nil {
+		return AddonInstallRequest{}, false, err
+	}
+
+	return req, true, nil
+}
+
+// resolveAddonChart resolves repo/chartName/version against def.Chart
+// (empty for a non-built-in addon), each overridden by the matching
+// spec.Chart field when set.
+func resolveAddonChart(spec v1alpha2.AddonSpec, def addonDefaults) (string, string, string, error) {
+	repo, chartName, version := def.Chart.Repo, spec.Name, def.Chart.Version
+
+	if spec.Chart != nil {
+		if spec.Chart.Repo != "" {
+			repo = spec.Chart.Repo
+		}
+
+		if spec.Chart.Name != "" {
+			chartName = spec.Chart.Name
+		}
+
+		if spec.Chart.Version != "" {
+			version = spec.Chart.Version
+		}
+	}
+
+	if repo == "" || chartName == "" {
+		return "", "", "", fmt.Errorf("%q: %w", spec.Name, errAddonMissingChart)
+	}
+
+	return repo, chartName, version, nil
+}
+
+// resolveAddon resolves one addon's chart/namespace/values against def —
+// the zero value for a non-built-in addon, meaning "no fallback": its own
+// spec.Chart/spec.Namespace must supply everything, or this returns a
+// descriptive error rather than installing something half-configured.
+func resolveAddon(spec v1alpha2.AddonSpec, def addonDefaults, celCtx map[string]any) (AddonInstallRequest, error) {
+	repo, chartName, version, err := resolveAddonChart(spec, def)
+	if err != nil {
+		return AddonInstallRequest{}, err
+	}
+
+	namespace := def.Namespace
+	if spec.Namespace != "" {
+		namespace = spec.Namespace
+	}
+
+	if namespace == "" {
+		return AddonInstallRequest{}, fmt.Errorf("%q: %w", spec.Name, errAddonMissingNamespace)
+	}
 
 	userValues, err := addonUserValues(spec)
 	if err != nil {
 		return AddonInstallRequest{}, err
 	}
 
-	version := spec.Version
-	if version == "" {
-		version = defaults.Chart.Version
-	}
-
-	namespace := spec.Namespace
-	if namespace == "" {
-		namespace = defaults.Namespace
+	resolvedDefaults, err := evaluateComputedValues(def.Values, celCtx)
+	if err != nil {
+		return AddonInstallRequest{}, fmt.Errorf("failed to resolve computed values for addon %q: %w", spec.Name, err)
 	}
 
 	return AddonInstallRequest{
-		ReleaseName: name,
-		RepoURL:     defaults.Chart.Repo,
-		ChartName:   name,
+		ReleaseName: spec.Name,
+		RepoURL:     repo,
+		ChartName:   chartName,
 		Version:     version,
 		Namespace:   namespace,
 		Method:      addonMethod(spec),
-		Values:      baseValues(userValues),
+		Values:      mergeValues(resolvedDefaults, userValues),
 	}, nil
 }
 
@@ -239,9 +324,8 @@ type AddonInstallRequest struct {
 	Version     string
 	Namespace   string
 	Method      v1alpha2.AddonProvisioningMethod
-	// Values are already fully merged (defaults + user overrides) — see
-	// ciliumValues/certManagerValues, called by this package's own
-	// controller.go before building a request.
+	// Values are already fully merged (computed defaults + user overrides)
+	// — see resolveAddon, which builds every AddonInstallRequest.
 	Values map[string]any
 }
 

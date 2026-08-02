@@ -53,110 +53,95 @@ spec:
               addons:
                 description: |-
                   Addons configures the addons this cluster installs once its control
-                  plane is healthy — see AddonsSpec's own doc.
-                properties:
-                  cert-manager:
-                    description: |-
-                      CertManager provisions and renews the cluster's TLS certificates.
-                      The hyphenated JSON key matches the project's own established name
-                      (its chart/release/CLI are all "cert-manager", never "certManager").
-                    properties:
-                      enabled:
-                        default: true
-                        description: |-
-                          Enabled controls whether this addon is installed at all. Defaults to
-                          true; set to false when something else (e.g. ArgoCD) already owns
-                          this addon's lifecycle.
-                        type: boolean
-                      lifecycle:
-                        description: |-
-                          AddonLifecycleSpec configures how an addon is provisioned and, in the
-                          future, kept up to date.
-                        properties:
-                          provisioning:
-                            description: AddonProvisioningSpec configures how an addon's
-                              manifests are applied.
-                            properties:
-                              method:
-                                default: HelmUpgradeInstall
-                                description: Method selects HelmUpgradeInstall (the
-                                  default) or KubectlApply.
-                                enum:
-                                - HelmUpgradeInstall
-                                - KubectlApply
-                                type: string
-                            type: object
-                        type: object
-                      namespace:
-                        description: |-
-                          Namespace this addon installs into. Empty means the reconciler's own
-                          per-addon default.
-                        type: string
-                      values:
-                        description: |-
-                          Values are user-provided Helm values, merged on top of Kontinuum's
-                          own required values for this addon — user values win on conflict.
-                          Free-form (not a typed struct) since chart values vary per addon and
-                          per chart version.
-                        x-kubernetes-preserve-unknown-fields: true
-                      version:
-                        description: |-
-                          Version pins the chart version to install. Empty means the
-                          reconciler's own pinned default for this addon.
-                        maxLength: 32
-                        type: string
-                    type: object
-                  cilium:
-                    description: |-
-                      Cilium is this cluster's CNI — envoy and node LB IPAM enabled,
-                      kube-proxy replaced.
-                    properties:
-                      enabled:
-                        default: true
-                        description: |-
-                          Enabled controls whether this addon is installed at all. Defaults to
-                          true; set to false when something else (e.g. ArgoCD) already owns
-                          this addon's lifecycle.
-                        type: boolean
-                      lifecycle:
-                        description: |-
-                          AddonLifecycleSpec configures how an addon is provisioned and, in the
-                          future, kept up to date.
-                        properties:
-                          provisioning:
-                            description: AddonProvisioningSpec configures how an addon's
-                              manifests are applied.
-                            properties:
-                              method:
-                                default: HelmUpgradeInstall
-                                description: Method selects HelmUpgradeInstall (the
-                                  default) or KubectlApply.
-                                enum:
-                                - HelmUpgradeInstall
-                                - KubectlApply
-                                type: string
-                            type: object
-                        type: object
-                      namespace:
-                        description: |-
-                          Namespace this addon installs into. Empty means the reconciler's own
-                          per-addon default.
-                        type: string
-                      values:
-                        description: |-
-                          Values are user-provided Helm values, merged on top of Kontinuum's
-                          own required values for this addon — user values win on conflict.
-                          Free-form (not a typed struct) since chart values vary per addon and
-                          per chart version.
-                        x-kubernetes-preserve-unknown-fields: true
-                      version:
-                        description: |-
-                          Version pins the chart version to install. Empty means the
-                          reconciler's own pinned default for this addon.
-                        maxLength: 32
-                        type: string
-                    type: object
-                type: object
+                  plane is healthy — see AddonSpec's own doc. "cilium" and
+                  "cert-manager" are built-in and installed by default even with no
+                  entry here at all; an entry with one of those names overrides that
+                  built-in's own fields, and any other Name is a fully user-defined
+                  addon (its own Chart required).
+                items:
+                  description: |-
+                    AddonSpec configures one addon this TalosCluster installs. Enabled is a
+                    pointer, not a plain bool, so a hand-built Go value (e.g. a unit test's
+                    fake-client object, which bypasses CRD admission defaulting) can still
+                    distinguish "unset" from "explicitly false" — nil is treated as enabled,
+                    matching the effective behavior +kubebuilder:default=true gives any real
+                    Create/Update through the apiserver.
+                  properties:
+                    chart:
+                      description: |-
+                        Chart identifies the Helm chart to install. Optional for the
+                        built-in addons, whose own default applies unless overridden here;
+                        required for any other Name.
+                      properties:
+                        name:
+                          description: Name is the chart's own name within Repo.
+                          maxLength: 63
+                          type: string
+                        repo:
+                          description: Repo is the Helm chart repository URL.
+                          maxLength: 256
+                          type: string
+                        version:
+                          description: Version pins the chart version to install.
+                          maxLength: 32
+                          type: string
+                      type: object
+                    enabled:
+                      default: true
+                      description: |-
+                        Enabled controls whether this addon is installed at all. Defaults to
+                        true; set to false when something else (e.g. ArgoCD) already owns
+                        this addon's lifecycle.
+                      type: boolean
+                    lifecycle:
+                      description: |-
+                        AddonLifecycleSpec configures how an addon is provisioned and, in the
+                        future, kept up to date.
+                      properties:
+                        provisioning:
+                          description: AddonProvisioningSpec configures how an addon's
+                            manifests are applied.
+                          properties:
+                            method:
+                              default: HelmUpgradeInstall
+                              description: Method selects HelmUpgradeInstall (the
+                                default) or KubectlApply.
+                              enum:
+                              - HelmUpgradeInstall
+                              - KubectlApply
+                              type: string
+                          type: object
+                      type: object
+                    name:
+                      description: |-
+                        Name identifies this addon — also its Helm release name. "cilium"
+                        and "cert-manager" are built-in: TalosCluster installs both by
+                        default even with no entry here at all, using the chart/namespace/
+                        values baked into this controller. An entry with one of those names
+                        overrides that built-in's own fields one at a time — an unset field
+                        keeps the built-in's own value. Any other Name is a fully
+                        user-defined addon with no built-in default — Chart must be set.
+                      maxLength: 63
+                      type: string
+                    namespace:
+                      description: |-
+                        Namespace this addon installs into. Empty means the built-in's own
+                        default (for cilium/cert-manager) or an error (for any other Name).
+                      type: string
+                    values:
+                      description: |-
+                        Values are user-provided Helm values, merged on top of Kontinuum's
+                        own required values for this addon — user values win on conflict.
+                        Free-form (not a typed struct) since chart values vary per addon and
+                        per chart version.
+                      x-kubernetes-preserve-unknown-fields: true
+                  required:
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               controlPlane:
                 description: |-
                   ControlPlane is this cluster's control-plane member pool. A

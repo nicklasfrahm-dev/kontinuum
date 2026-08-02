@@ -39,6 +39,27 @@ type AddonLifecycleSpec struct {
 	Provisioning AddonProvisioningSpec `json:"provisioning,omitempty"`
 }
 
+// AddonChartSpec identifies the Helm chart an addon installs from.
+// Optional for the built-in addons (cilium, cert-manager — see
+// AddonSpec.Name's own doc), whose own chart identity/version is baked
+// into this controller and only needs a field here to override one piece
+// of it; required for any other Name, since there's no built-in to fall
+// back on.
+type AddonChartSpec struct {
+	// Repo is the Helm chart repository URL.
+	// +optional
+	// +kubebuilder:validation:MaxLength=256
+	Repo string `json:"repo,omitempty"`
+	// Name is the chart's own name within Repo.
+	// +optional
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name,omitempty"`
+	// Version pins the chart version to install.
+	// +optional
+	// +kubebuilder:validation:MaxLength=32
+	Version string `json:"version,omitempty"`
+}
+
 // AddonSpec configures one addon this TalosCluster installs. Enabled is a
 // pointer, not a plain bool, so a hand-built Go value (e.g. a unit test's
 // fake-client object, which bypasses CRD admission defaulting) can still
@@ -46,23 +67,33 @@ type AddonLifecycleSpec struct {
 // matching the effective behavior +kubebuilder:default=true gives any real
 // Create/Update through the apiserver.
 type AddonSpec struct {
+	// Name identifies this addon — also its Helm release name. "cilium"
+	// and "cert-manager" are built-in: TalosCluster installs both by
+	// default even with no entry here at all, using the chart/namespace/
+	// values baked into this controller. An entry with one of those names
+	// overrides that built-in's own fields one at a time — an unset field
+	// keeps the built-in's own value. Any other Name is a fully
+	// user-defined addon with no built-in default — Chart must be set.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name"`
 	// Enabled controls whether this addon is installed at all. Defaults to
 	// true; set to false when something else (e.g. ArgoCD) already owns
 	// this addon's lifecycle.
 	// +optional
 	// +kubebuilder:default=true
 	Enabled *bool `json:"enabled,omitempty"`
+	// Chart identifies the Helm chart to install. Optional for the
+	// built-in addons, whose own default applies unless overridden here;
+	// required for any other Name.
+	// +optional
+	Chart *AddonChartSpec `json:"chart,omitempty"`
 	// +optional
 	Lifecycle AddonLifecycleSpec `json:"lifecycle,omitempty"`
-	// Namespace this addon installs into. Empty means the reconciler's own
-	// per-addon default.
+	// Namespace this addon installs into. Empty means the built-in's own
+	// default (for cilium/cert-manager) or an error (for any other Name).
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
-	// Version pins the chart version to install. Empty means the
-	// reconciler's own pinned default for this addon.
-	// +optional
-	// +kubebuilder:validation:MaxLength=32
-	Version string `json:"version,omitempty"`
 	// Values are user-provided Helm values, merged on top of Kontinuum's
 	// own required values for this addon — user values win on conflict.
 	// Free-form (not a typed struct) since chart values vary per addon and
@@ -70,20 +101,4 @@ type AddonSpec struct {
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	Values *apiextensionsv1.JSON `json:"values,omitempty"`
-}
-
-// AddonsSpec configures the addons a TalosCluster installs once its
-// control plane is healthy — see this package's own pkg/domain/taloscluster
-// for the reconciler that acts on it.
-type AddonsSpec struct {
-	// Cilium is this cluster's CNI — envoy and node LB IPAM enabled,
-	// kube-proxy replaced.
-	// +optional
-	Cilium AddonSpec `json:"cilium,omitempty"`
-	// CertManager provisions and renews the cluster's TLS certificates.
-	// The hyphenated JSON key matches the project's own established name
-	// (its chart/release/CLI are all "cert-manager", never "certManager").
-	// +optional
-	//nolint:tagliatelle // "cert-manager" is the tool's own established name, not a stray abbreviation
-	CertManager AddonSpec `json:"cert-manager,omitempty"`
 }

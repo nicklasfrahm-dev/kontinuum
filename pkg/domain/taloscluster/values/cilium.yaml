@@ -1,12 +1,14 @@
 # Default Cilium install — chart identity/version, namespace, and Helm
 # values all live together here so there's one place to update when e.g.
-# bumping a chart version. The release/chart name itself is inferred from
-# this file's own name ("cilium") — see loadAddonDefaults in addons.go.
-# values are merged with (and overridden by) any user-supplied
-# spec.addons.cilium.values — see mergeValues in addons.go. Every value
-# below diverges from the chart's own default for a reason — see
-# ciliumValues' own doc — following Talos's own documented Cilium install
-# (docs.siderolabs.com/kubernetes-guides/cni/deploying-cilium).
+# bumping a chart version. The release/chart name itself defaults to this
+# file's own name ("cilium") — see resolveAddon in addons.go. values are
+# merged with (and overridden by) any user-supplied spec.addons[].values
+# for an entry named "cilium" — see mergeValues in addons.go. Every value
+# below diverges from the chart's own default for a reason — see this
+# package's own doc — following Talos's own documented Cilium install
+# (docs.siderolabs.com/kubernetes-guides/cni/deploying-cilium). Fields
+# marked $cel are computed at reconcile time — see celvalues.go's own doc
+# for the ctx variable they evaluate against.
 chart:
   repo: https://helm.cilium.io
   version: 1.16.5
@@ -14,8 +16,8 @@ namespace: kube-system
 values:
   kubeProxyReplacement: true
   k8sServiceHost: localhost
-  # k8sServicePort is set at runtime from kubePrismPort (config.go) — see
-  # ciliumValues, which overlays it onto what's loaded from this file.
+  k8sServicePort:
+    $cel: "ctx.kubePrismPort"
   envoy:
     enabled: true
   gatewayAPI:
@@ -25,9 +27,11 @@ values:
   nodeIPAM:
     enabled: true
   operator:
-    # replicas is overridden to 2 at runtime when the cluster has more than
-    # one control-plane node — see ciliumValues in addons.go.
-    replicas: 1
+    # A second replica could never even schedule on a single-node cluster
+    # (hostNetwork: true means a port collision) — scale up only once
+    # there's more than one control-plane node to spread across.
+    replicas:
+      $cel: "ctx.controlPlaneCount > 1 ? 2 : 1"
   ipam:
     mode: kubernetes
   cgroup:
