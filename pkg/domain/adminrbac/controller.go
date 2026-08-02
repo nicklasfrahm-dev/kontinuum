@@ -1,9 +1,9 @@
 // Package adminrbac reconciles a ClusterRoleBinding for every OIDC admin
 // group configured on cfg.OIDC.AdminGroups (see pkg/config), so the grant
-// libkapi.WithAdminAuthorizer enforces in-process is also backed by real,
-// inspectable RBAC objects — `kubectl get clusterrolebindings` — instead of
-// existing only as a row libkapi.WithAdminAuthorizer's authorizer computes
-// on the fly. See issue #41.
+// pkg/rbac's authorizer enforces is backed by real, inspectable RBAC
+// objects — `kubectl get clusterrolebindings` — that its RBAC authorizer
+// half actually evaluates on every request, not just a row an authorizer
+// computes on the fly from config. See issue #41.
 //
 // AdminGroups comes from static process config, not a watched Kubernetes
 // object, so there's nothing for a reconcile.Reconciler to trigger on when
@@ -21,7 +21,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -31,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
+	"github.com/nicklasfrahm/kontinuum/pkg/config"
 )
 
 const (
@@ -189,7 +189,7 @@ func adminClusterRole() *rbacv1.ClusterRole {
 // binding for each group missing one, and deletes bindings for groups no
 // longer present — leaving any unlabeled ClusterRoleBinding untouched.
 func (r *Runnable) reconcileBindings(ctx context.Context) error {
-	desired := parseAdminGroups(r.AdminGroups)
+	desired := config.ParseAdminGroups(r.AdminGroups)
 
 	var existing rbacv1.ClusterRoleBindingList
 
@@ -270,22 +270,4 @@ func bindingName(group string) string {
 	sum := sha256.Sum256([]byte(group))
 
 	return bindingNamePrefix + hex.EncodeToString(sum[:])[:12]
-}
-
-// parseAdminGroups splits raw's comma-delimited list into trimmed,
-// non-empty group names. Mirrors libkapi's own unexported parseAdminGroups
-// (github.com/kommodity-io/kommodity/pkg/libkapi/auth) so the set of
-// bindings this controller reconciles always matches the set
-// libkapi.WithAdminAuthorizer actually grants access to.
-func parseAdminGroups(raw string) []string {
-	var groups []string
-
-	for group := range strings.SplitSeq(raw, ",") {
-		group = strings.TrimSpace(group)
-		if group != "" {
-			groups = append(groups, group)
-		}
-	}
-
-	return groups
 }

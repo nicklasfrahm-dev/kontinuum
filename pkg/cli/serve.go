@@ -33,6 +33,7 @@ import (
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/registry"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/taloscluster"
 	"github.com/nicklasfrahm/kontinuum/pkg/logging"
+	"github.com/nicklasfrahm/kontinuum/pkg/rbac"
 	"github.com/nicklasfrahm/kontinuum/pkg/ui"
 )
 
@@ -357,11 +358,10 @@ func addonOptions(logger *slog.Logger) []libkapi.Option {
 // adminRBACOptions builds the libkapi options that wire the admin-group
 // RBAC reconciler (see pkg/domain/adminrbac) onto the Server: it keeps a
 // ClusterRoleBinding for every group in cfg.OIDC.AdminGroups pointing at a
-// cluster-admin-equivalent ClusterRole, so the grant
-// libkapi.WithAdminAuthorizer enforces in-process is also visible as real,
-// inspectable RBAC objects — see issue #41. Only wired when OIDC is
-// configured; with no OIDC there's no notion of an admin group to bind, and
-// libkapi.WithAdminAuthorizer itself isn't wired either (see configureOIDC).
+// cluster-admin-equivalent ClusterRole, which pkg/rbac's authorizer (see
+// configureOIDC) actually evaluates on every request — see issue #41. Only
+// wired when OIDC is configured; with no OIDC there's no notion of an admin
+// group to bind, and no authorizer is wired either (see configureOIDC).
 func adminRBACOptions(cfg *config.Config, logger *slog.Logger) []libkapi.Option {
 	if cfg.OIDC.IssuerURL == "" {
 		return nil
@@ -443,11 +443,14 @@ func kontinuumListerFactory(addr string, scheme *runtime.Scheme) ui.KontinuumCli
 // document is fetched from ctx, so startup fails fast if the issuer is
 // unreachable or misconfigured.
 //
-// Authorization is deny-by-default: only system:masters, service accounts,
-// and the groups listed in cfg.OIDC.AdminGroups get access — see
-// libkapi.WithAdminAuthorizer. Server startup fails if AdminGroups is empty,
-// since an OIDC deployment with no admin groups configured would lock
-// everyone out.
+// Authorization is deny-by-default: pkg/rbac.NewAuthorizer's real RBAC
+// authorizer is tried first (evaluating the ClusterRoleBindings
+// pkg/domain/adminrbac reconciles, plus any hand-authored
+// Role/RoleBinding/ClusterRole/ClusterRoleBinding), falling back to
+// system:masters, service accounts, and the groups listed in
+// cfg.OIDC.AdminGroups — see pkg/rbac.AdminAuthorizer. Server startup fails
+// if AdminGroups is empty, since an OIDC deployment with no admin groups
+// configured would lock everyone out.
 func configureOIDC(
 	ctx context.Context, cfg *config.Config, logger *slog.Logger,
 ) ([]libkapi.Option, *auth.Handler, error) {
@@ -464,17 +467,48 @@ func configureOIDC(
 		return nil, nil, fmt.Errorf("failed to configure oidc login flow: %w", err)
 	}
 
+	authz, rbacSource, err := rbac.NewAuthorizer(cfg.OIDC.AdminGroups)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to configure authorizer: %w", err)
+	}
+
 	authOpts := []libkapi.Option{
 		libkapi.WithOIDC(libkapi.OIDCConfig{
 			IssuerURL: cfg.OIDC.IssuerURL,
 			ClientID:  cfg.OIDC.ClientID,
 		}),
-		libkapi.WithAdminAuthorizer(libkapi.AdminAuthorizerConfig{
-			AdminGroups: cfg.OIDC.AdminGroups,
-		}),
+		libkapi.WithAuthorizer(authz),
+		libkapi.WithPostStartHook(rbacAuthorizerClientHook(rbacSource)),
 	}
 
 	return authOpts, oidcHandler, nil
+}
+
+// rbacAuthorizerClientHook builds the libkapi.WithPostStartHook that
+// installs source's privileged client once the loopback config becomes
+// available — see rbac.NewAuthorizer's doc for why this can't happen any
+// earlier. Its scheme only needs rbac.authorization.k8s.io/v1 — the
+// authorizer's ClientSource never touches any other kind — so it's built
+// standalone here rather than threading buildServer's own broader scheme
+// through configureOIDC.
+func rbacAuthorizerClientHook(source *rbac.ClientSource) libkapi.PostStartHookFunc {
+	return func(_ context.Context, loopbackConfig *rest.Config) error {
+		scheme := runtime.NewScheme()
+
+		err := rbacv1.AddToScheme(scheme)
+		if err != nil {
+			return fmt.Errorf("failed to register rbac.authorization.k8s.io/v1 scheme for authorizer client: %w", err)
+		}
+
+		rbacClient, err := ctrlclient.New(loopbackConfig, ctrlclient.Options{Scheme: scheme})
+		if err != nil {
+			return fmt.Errorf("failed to build authorizer's rbac client: %w", err)
+		}
+
+		source.SetClient(rbacClient)
+
+		return nil
+	}
 }
 
 // shutdownServer gracefully stops the HTTP listener, the apiserver's

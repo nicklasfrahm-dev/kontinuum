@@ -88,6 +88,27 @@ func RedactStorage(raw string) string {
 	return parsed.String()
 }
 
+// ParseAdminGroups splits OIDC.AdminGroups's comma-delimited value into
+// trimmed, non-empty group names — the single source of truth for exactly
+// which groups get admin access, shared by every authorization- and
+// RBAC-reconciliation-facing consumer (see pkg/rbac.NewAuthorizer,
+// pkg/domain/adminrbac's ClusterRoleBinding reconciler) so they can never
+// drift from one another. Mirrors
+// github.com/kommodity-io/kommodity/pkg/libkapi/auth's own unexported
+// parseAdminGroups.
+func ParseAdminGroups(raw string) []string {
+	var groups []string
+
+	for group := range strings.SplitSeq(raw, ",") {
+		group = strings.TrimSpace(group)
+		if group != "" {
+			groups = append(groups, group)
+		}
+	}
+
+	return groups
+}
+
 // loadStruct walks structVal recursively. For each string field, it sets the
 // field from the KONTINUUM_-prefixed env var derived from path (when useEnv
 // is true and the var is non-empty) or the field's `default` tag.

@@ -25,14 +25,18 @@ linters:
       # own foundational interfaces: every DeepCopyObject in the ecosystem
       # returns runtime.Object by contract, and controller-runtime's fake
       # client builder only exposes its result as client.Client/WithWatch —
-      # its concrete type is unexported. Neither has a concrete-type
-      # alternative.
+      # its concrete type is unexported. authorizer.Authorizer is the same
+      # shape of foundational k8s.io/apiserver interface — pkg/rbac.NewAuthorizer
+      # returns k8s.io/apiserver/pkg/authorization/union.New's own result,
+      # which has no exported concrete type either. Neither has a
+      # concrete-type alternative.
       allow:
         - error
         - empty
         - stdlib
         - runtime\.Object
         - client\.Client
+        - authorizer\.Authorizer
     wrapcheck:
       # grpc-go's own status.Error/Errorf already produce a self-describing
       # error (code + message) that is the correct thing to return directly
