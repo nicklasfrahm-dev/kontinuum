@@ -28,3 +28,7 @@ pkg/ui/assets/vendor/
 .env
 .env.*
 !.env.example
+
+# Documentation virtualenv and built site (see `make docs`)
+.venv/
+site/
