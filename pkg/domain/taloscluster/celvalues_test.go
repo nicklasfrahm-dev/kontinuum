@@ -44,7 +44,7 @@ func TestEvaluateComputedValuesEvaluatesCelField(t *testing.T) {
 	t.Parallel()
 
 	values := map[string]any{
-		"replicas": map[string]any{"$cel": "ctx.controlPlaneCount > 1 ? 2 : 1"},
+		"replicas": map[string]any{"$cel": "ctx.taloscluster.status.controlPlane.replicas > 1 ? 2 : 1"},
 	}
 
 	single, err := evaluateComputedValues(values, testCelCtx(t, 1))
@@ -68,13 +68,25 @@ func TestEvaluateComputedValuesAccessesTalosClusterResource(t *testing.T) {
 	assert.Equal(t, "eu-1a", resolved["clusterName"])
 }
 
+func TestEvaluateComputedValuesAccessesTalosNamespace(t *testing.T) {
+	t.Parallel()
+
+	values := map[string]any{
+		"port": map[string]any{"$cel": "ctx.talos.kubePrism.port"},
+	}
+
+	resolved, err := evaluateComputedValues(values, testCelCtx(t, 1))
+	require.NoError(t, err)
+	assert.Equal(t, int64(7445), resolved["port"])
+}
+
 func TestEvaluateComputedValuesPreservesNestedStructure(t *testing.T) {
 	t.Parallel()
 
 	values := map[string]any{
 		"outer": map[string]any{
 			"inner": []any{
-				map[string]any{"$cel": "ctx.kubePrismPort"},
+				map[string]any{"$cel": "ctx.talos.kubePrism.port"},
 				"literal",
 			},
 		},
@@ -97,7 +109,7 @@ func TestEvaluateComputedValuesReturnsErrorOnMalformedExpression(t *testing.T) {
 	t.Parallel()
 
 	values := map[string]any{
-		"broken": map[string]any{"$cel": "ctx.controlPlaneCount +"},
+		"broken": map[string]any{"$cel": "ctx.taloscluster.status.controlPlane.replicas +"},
 	}
 
 	_, err := evaluateComputedValues(values, testCelCtx(t, 1))

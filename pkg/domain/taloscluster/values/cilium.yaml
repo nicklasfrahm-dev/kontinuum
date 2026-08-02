@@ -17,7 +17,7 @@ values:
   kubeProxyReplacement: true
   k8sServiceHost: localhost
   k8sServicePort:
-    $cel: "ctx.kubePrismPort"
+    $cel: "ctx.talos.kubePrism.port"
   envoy:
     enabled: true
   gatewayAPI:
@@ -31,7 +31,7 @@ values:
     # (hostNetwork: true means a port collision) — scale up only once
     # there's more than one control-plane node to spread across.
     replicas:
-      $cel: "ctx.controlPlaneCount > 1 ? 2 : 1"
+      $cel: "ctx.taloscluster.status.controlPlane.replicas > 1 ? 2 : 1"
   ipam:
     mode: kubernetes
   cgroup:

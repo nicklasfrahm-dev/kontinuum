@@ -33,24 +33,45 @@ func celEnv() (*cel.Env, error) {
 }
 
 // celContext builds the ctx value every $cel expression in an embedded
-// values/*.yaml evaluates against. ctx.taloscluster is cluster's own full
-// resource (spec, status, metadata — the same shape `kubectl get
-// talosclusters.kontinuum.sh <name> -o json` would print), so any
-// expression can dot into whatever field it needs without a Go change.
-// The other fields carry facts that aren't literally part of the stored
-// resource: controlPlaneCount is derived (from listing the control-plane
-// pool's claimed Instances, not something TalosCluster itself stores),
-// kubePrismPort is a Go-side constant (see config.go).
+// values/*.yaml evaluates against — two namespaced top-level groups
+// rather than a flat bag of ad hoc names, so where a fact belongs is
+// obvious from its own path:
+//
+//   - ctx.taloscluster is cluster's own resource (spec, status, metadata
+//     — the same shape `kubectl get talosclusters.kontinuum.sh <name> -o
+//     json` would print), plus one reconciler-computed addition at its
+//     own natural status path: status.controlPlane.replicas — the
+//     control-plane pool's current claimed-Instance count, something
+//     TalosCluster's real API type doesn't persist itself (see
+//     Reconciler.controlPlaneCount), placed here rather than as a
+//     same-level sibling key so a future real status field of the same
+//     name would need no expression changes to adopt.
+//   - ctx.talos carries facts about Talos itself, not any particular
+//     TalosCluster — currently just kubePrism.port, the fixed local port
+//     Talos's own KubePrism apiserver proxy listens on (see config.go's
+//     kubePrismPort).
+//
+// Any expression can dot into whatever field it needs without a Go
+// change, as long as it already lives somewhere in this shape.
 func celContext(cluster *v1alpha2.TalosCluster, controlPlaneCount int) (map[string]any, error) {
 	unstructuredCluster, err := runtime.DefaultUnstructuredConverter.ToUnstructured(cluster)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert TalosCluster to CEL context: %w", err)
 	}
 
+	status, _ := unstructuredCluster["status"].(map[string]any)
+	if status == nil {
+		status = map[string]any{}
+	}
+
+	status["controlPlane"] = map[string]any{"replicas": controlPlaneCount}
+	unstructuredCluster["status"] = status
+
 	return map[string]any{
-		"taloscluster":      unstructuredCluster,
-		"controlPlaneCount": controlPlaneCount,
-		"kubePrismPort":     kubePrismPort,
+		"taloscluster": unstructuredCluster,
+		"talos": map[string]any{
+			"kubePrism": map[string]any{"port": kubePrismPort},
+		},
 	}, nil
 }
 
