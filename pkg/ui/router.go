@@ -69,6 +69,7 @@ const (
 	pageHome     = "home"
 	pageRegistry = "registry"
 	pageInstance = "instance"
+	pageIAM      = "iam"
 	pageSettings = "settings"
 )
 
@@ -84,6 +85,7 @@ func mustParsePage(content ...string) *template.Template {
 		"templates/components/nav.html",
 		"templates/components/icon_tenants.html",
 		"templates/components/icon_registry.html",
+		"templates/components/icon_shield.html",
 		"templates/components/icon_settings.html",
 		"templates/components/icon_logout.html",
 	}
@@ -122,11 +124,13 @@ func NewRouter(
 		pageRegistry: mustParsePage("templates/registry_content.html",
 			"templates/components/icon_trash.html"),
 		pageInstance: mustParsePage("templates/instance_content.html",
-			"templates/components/icon_server.html", "templates/components/icon_shield.html",
+			"templates/components/icon_server.html",
 			"templates/components/icon_chevron_left.html", "templates/components/icon_eye.html",
 			"templates/components/icon_eye_off.html", "templates/components/icon_copy.html",
 			"templates/components/icon_check.html", "templates/components/icon_key.html",
 			"templates/components/icon_info.html"),
+		pageIAM: mustParsePage("templates/iam_content.html",
+			"templates/components/icon_key.html", "templates/components/icon_info.html"),
 		pageSettings: mustParsePage("templates/settings_content.html",
 			"templates/components/icon_copy.html", "templates/components/icon_download.html",
 			"templates/components/icon_eye.html", "templates/components/icon_eye_off.html",
@@ -178,6 +182,7 @@ func (r *Router) RegisterRoutes(
 	mux.HandleFunc("GET /app/kontinuums", protect(r.renderRegistry))
 	mux.HandleFunc("GET /app/kontinuums/{name}", protect(r.handleInstanceDetail))
 	mux.HandleFunc("DELETE /app/kontinuums/{name}", protect(r.handleDeleteInstance))
+	mux.HandleFunc("GET /app/iam", protect(r.handleIAM))
 	mux.HandleFunc("GET /app/settings", protect(r.handleSettings))
 }
 
@@ -521,6 +526,55 @@ func secretDataToYAML(data map[string][]byte) (string, error) {
 	}
 
 	return string(out), nil
+}
+
+// binding is a group-to-role grant rendered as a row on the IAM page — see
+// handleIAM. Kontinuum's authorization model today only has one role
+// (system:masters-equivalent, full read/write on every resource) bound to
+// whichever OIDC groups are configured as admins; there is no notion yet of
+// scoping a binding to less than that.
+type binding struct {
+	Subject string
+	Role    string
+}
+
+// adminSystemMastersRole is the role every binding on the IAM page currently
+// shows — see binding's doc for why there is only ever this one.
+const adminSystemMastersRole = "system:masters"
+
+func (r *Router) handleIAM(writer http.ResponseWriter, _ *http.Request) {
+	groups := parseAdminGroups(r.cfg.OIDC.AdminGroups)
+
+	bindings := make([]binding, 0, len(groups))
+	for _, group := range groups {
+		bindings = append(bindings, binding{Subject: group, Role: adminSystemMastersRole})
+	}
+
+	r.render(writer, pageIAM, map[string]any{
+		"Title":       "IAM",
+		"ActiveMenu":  "iam",
+		"Version":     r.version,
+		"AuthEnabled": r.authEnabled,
+		"Bindings":    bindings,
+	})
+}
+
+// parseAdminGroups splits cfg.OIDC.AdminGroups's comma-delimited list into
+// trimmed, non-empty group names — mirrors libkapi's own unexported
+// parseAdminGroups (github.com/kommodity-io/kommodity/pkg/libkapi/auth) so
+// the IAM page lists exactly the groups the running authorizer actually
+// grants access to.
+func parseAdminGroups(raw string) []string {
+	var groups []string
+
+	for group := range strings.SplitSeq(raw, ",") {
+		group = strings.TrimSpace(group)
+		if group != "" {
+			groups = append(groups, group)
+		}
+	}
+
+	return groups
 }
 
 func (r *Router) handleSettings(writer http.ResponseWriter, request *http.Request) {
