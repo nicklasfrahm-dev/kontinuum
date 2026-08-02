@@ -15,6 +15,7 @@ A Kubernetes-style API server built on [kommodity](https://github.com/kommodity-
 
 - [**Quickstart**](quickstart.md) — build kontinuum, run it locally, and connect with `kubectl`.
 - [**Architecture**](architecture.md) — how the server, controllers, and UI fit together.
+- [**Reference**](reference.md) — the CRDs that make up kontinuum's API, and the generated field reference.
 - [**Authentication**](authentication.md) — the OIDC/PKCE login flow and how to turn it on.
 - [**Development guide**](development.md) — conventions for contributing to kontinuum.
 - [**Cluster provisioning**](workflows/cluster-provisioning.md) — how kontinuum turns bare-metal machines into a running Talos Kubernetes cluster.

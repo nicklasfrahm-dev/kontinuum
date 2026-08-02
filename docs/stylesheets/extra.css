@@ -1,15 +1,16 @@
 /* Ties the docs site's palette back to the app's own theme (see
-   pkg/ui/templates/layout.html): neutral-950 background, #E0924F accent,
-   the same radial-gradient wash, and JetBrains Mono end to end. */
-:root,
+   pkg/ui/templates/layout.html): neutral-950 body, a slightly lighter
+   header/nav so they read as distinct surfaces, #E0924F accent, the same
+   radial-gradient wash, and JetBrains Mono reserved for nav/headings (body
+   text stays Roboto — see mkdocs.yml's theme.font). */
 [data-md-color-scheme="slate"] {
-  --md-primary-fg-color: #0a0a0a;
-  --md-primary-fg-color--light: #171717;
+  --md-primary-fg-color: #141414;
+  --md-primary-fg-color--light: #1f1f1f;
   --md-primary-fg-color--dark: #000000;
   --md-primary-bg-color: #f5f5f5;
   --md-accent-fg-color: #e0924f;
   --md-accent-fg-color--transparent: rgb(224 146 79 / 15%);
-  --md-accent-bg-color: #0a0a0a;
+  --md-accent-bg-color: #141414;
 
   --md-default-bg-color: #0a0a0a;
   --md-default-fg-color: #f5f5f5;
@@ -20,28 +21,66 @@
   --md-typeset-a-color: #e0924f;
   --md-code-bg-color: #171717;
   --md-code-fg-color: #f5f5f5;
+
+  --md-footer-bg-color: #141414;
+  --md-footer-bg-color--dark: #000000;
+
+  --border-color: #262626;
 }
 
 [data-md-color-scheme="default"] {
   --md-primary-fg-color: #0a0a0a;
+  --md-primary-fg-color--light: #171717;
+  --md-primary-fg-color--dark: #000000;
   --md-accent-fg-color: #e0924f;
+  --md-accent-fg-color--transparent: rgb(224 146 79 / 10%);
   --md-typeset-a-color: #c9762f;
+
+  --border-color: #e5e5e5;
 }
 
-body {
+[data-md-color-scheme="slate"] body {
   background-image: radial-gradient(at 15% 8%, rgb(255 255 255 / 4%) 0px, transparent 45%),
     radial-gradient(at 85% 92%, rgb(255 255 255 / 3%) 0px, transparent 40%);
   background-attachment: fixed;
 }
 
-.md-header,
-.md-tabs {
-  background-color: #0a0a0a;
+/* Header/tabs get their own surface color (--md-primary-fg-color, set
+   above) instead of matching the body 1:1, plus a hairline border so the
+   boundary stays visible even on displays where the color step alone is
+   too subtle. */
+.md-header {
+  border-bottom: 1px solid var(--border-color);
+  box-shadow: none;
 }
 
-.md-typeset code,
-.md-typeset pre,
-.md-typeset kbd {
+.md-tabs {
+  border-bottom: 1px solid var(--border-color);
+}
+
+.md-sidebar--primary .md-sidebar__scrollwrap {
+  border-right: 1px solid var(--border-color);
+}
+
+.md-sidebar--secondary .md-sidebar__scrollwrap {
+  border-left: 1px solid var(--border-color);
+}
+
+.md-typeset table:not([class]) th {
+  background-color: var(--md-code-bg-color);
+}
+
+/* JetBrains Mono is reserved for navigational/structural chrome — nav,
+   tabs, and headings — everything else (body copy) stays on the default
+   Roboto text font set via mkdocs.yml's theme.font.text. */
+.md-nav,
+.md-tabs,
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3,
+.md-typeset h4,
+.md-typeset h5,
+.md-typeset h6 {
   font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
 }
 

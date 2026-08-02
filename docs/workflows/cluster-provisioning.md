@@ -13,32 +13,30 @@ implementation phases these controllers shipped in.
 
 ## Stages
 
-### 1. Instance discovery (`pkg/domain/instance`)
-
-An `Instance` object lists candidate `spec.interfaces` addresses. The
-discovery controller dials each in Talos maintenance mode (insecure TLS,
-port 50000) and, on the first successful probe, records the node's Talos
-version and discovered network interfaces in `status`, setting the
-`Discovered` condition true. Discovery and claiming are independent
-concerns — an `Instance` can be claimed before it's ever been discovered.
-
-### 2. InstancePool claiming (`pkg/domain/instancepool`)
-
-An `InstancePool` selects candidate `Instance`s via `spec.selector` and
-claims up to `spec.replicas` of them by setting the `kontinuum.sh/claimed-by`
-label. Claiming is a conditional (CAS) update — `Get`, label, `Update` — so
-two pools racing for the same candidate can't both win; a resourceVersion
-conflict just skips that candidate. Claims are sticky: only a scale-down
-(claimed count exceeding `spec.replicas`) releases the excess, in
-deterministic (name-sorted) order. `status.readyReplicas` counts claimed
-instances that are also `Discovered`.
-
-### 3. TalosCluster bootstrap and addons (`pkg/domain/taloscluster`)
-
-A `TalosCluster` references a control-plane `InstancePool` and, optionally,
-one or more worker `InstancePool`s (`spec.workers[]`). Its reconciler is a
-state machine driven entirely by `status.conditions`
-(`ControlPlaneReady` → `Bootstrapped` → `Ready`) — see the flow chart below.
+1. **Instance discovery** (`pkg/domain/instance`) — an `Instance` object
+   lists candidate `spec.interfaces` addresses. The discovery controller
+   dials each in Talos maintenance mode (insecure TLS, port 50000) and, on
+   the first successful probe, records the node's Talos version and
+   discovered network interfaces in `status`, setting the `Discovered`
+   condition true. Discovery and claiming are independent concerns — an
+   `Instance` can be claimed before it's ever been discovered.
+2. **InstancePool claiming** (`pkg/domain/instancepool`) — an
+   `InstancePool` selects candidate `Instance`s via `spec.selector` and
+   claims up to `spec.replicas` of them by setting the
+   `kontinuum.sh/claimed-by` label. Claiming is a conditional (CAS) update
+   — `Get`, label, `Update` — so two pools racing for the same candidate
+   can't both win; a resourceVersion conflict just skips that candidate.
+   Claims are sticky: only a scale-down (claimed count exceeding
+   `spec.replicas`) releases the excess, in deterministic (name-sorted)
+   order. `status.readyReplicas` counts claimed instances that are also
+   `Discovered`.
+3. **TalosCluster bootstrap and addons** (`pkg/domain/taloscluster`) — a
+   `TalosCluster` references a control-plane `InstancePool` and,
+   optionally, one or more worker `InstancePool`s (`spec.workers[]`). Its
+   reconciler is a state machine driven entirely by `status.conditions`
+   (`ControlPlaneReady` → `Bootstrapped` → `Ready`) — see the
+   [flow chart](#flow-chart) below and [Bootstrap details](#bootstrap-details)
+   for the reasoning behind it.
 
 Every step past machine-config generation is best-effort and idempotent: a
 maintenance-mode call against a node that's already moved past maintenance
@@ -46,7 +44,9 @@ mode is *expected* to fail, and is logged rather than treated as fatal —
 Talos's own `ClusterHealthCheck` is the real convergence gate, and the
 reconciler simply retries on the next tick.
 
-#### Why Cilium installs before the cluster is "healthy"
+## Bootstrap details
+
+### Why Cilium installs before the cluster is "healthy"
 
 Talos's `ClusterHealthCheck` waits for CoreDNS to report ready, which
 itself needs a working pod network. If Cilium only installed *after* a
@@ -63,7 +63,7 @@ place — a deadlock. Kontinuum breaks the cycle two ways:
 cert-manager has no such dependency, so it installs normally, after
 `ControlPlaneReady`.
 
-#### `cilium-operator` runs a single replica
+### `cilium-operator` runs a single replica
 
 The Cilium chart defaults `operator.replicas` to `2` (for HA) alongside
 `operator.hostNetwork: true`, which makes the operator's prometheus
@@ -78,7 +78,7 @@ pins `operator.replicas` to `1` to avoid this — the chart's own
 pods must not be scheduled on the same node as they will clash with each
 other".
 
-#### Cilium values follow Talos's own guide, not just the chart's defaults
+### Cilium values follow Talos's own guide, not just the chart's defaults
 
 `addons.go`'s `ciliumValues` deviates from the chart's own defaults in
 several places, matching Talos's documented Cilium install
@@ -104,7 +104,7 @@ values chosen ad hoc:
 - `ipam.mode` is set to `kubernetes`, so Cilium reads pod CIDRs from each
   Node's own spec instead of running its own allocator.
 
-#### Pod health is probed separately from the Helm apply
+### Pod health is probed separately from the Helm apply
 
 The Helm install/upgrade calls (`installRelease`/`upgradeRelease`) are
 deliberately non-blocking — no `Wait`/`WaitForJobs` — so they return as
@@ -123,7 +123,7 @@ with its `PodReady` condition true, or `Succeeded` — a completed one-shot
 Job pod (e.g. cert-manager's own `startupapicheck`) is expected, not a
 failure.
 
-#### Timeouts
+### Timeouts
 
 Every blocking call in this pipeline — every Talos gRPC RPC and both Helm
 installs — has an explicit client-side timeout. Talos's own

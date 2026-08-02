@@ -23,7 +23,7 @@ theme:
         icon: material/weather-sunny
         name: Switch to dark mode
   font:
-    text: JetBrains Mono
+    text: Roboto
     code: JetBrains Mono
   icon:
     logo: material/hexagon-outline
@@ -45,6 +45,7 @@ nav:
   - Welcome: index.md
   - Quickstart: quickstart.md
   - Architecture: architecture.md
+  - Reference: reference.md
   - Authentication: authentication.md
   - Development guide: development.md
   - Workflows:
