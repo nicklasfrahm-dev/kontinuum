@@ -300,7 +300,7 @@ func resolveAddon(spec v1alpha2.AddonSpec, celCtx map[string]any) (InstallReques
 		return InstallRequest{}, err
 	}
 
-	resolvedDefaults, err := evaluateComputedValues(def.Values, celCtx)
+	resolvedDefaults, err := EvaluateComputedValues(def.Values, celCtx)
 	if err != nil {
 		return InstallRequest{}, fmt.Errorf("failed to resolve computed values for addon %q: %w", spec.ReleaseName, err)
 	}

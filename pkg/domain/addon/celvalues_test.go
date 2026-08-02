@@ -1,4 +1,4 @@
-package addon //nolint:testpackage // exercises unexported celEnv/celContext/evaluateComputedValues directly
+package addon_test
 
 import (
 	"testing"
@@ -8,6 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/addon"
 )
 
 func testCelCtx(t *testing.T, controlPlaneCount int) map[string]any {
@@ -20,7 +21,7 @@ func testCelCtx(t *testing.T, controlPlaneCount int) map[string]any {
 		},
 	}
 
-	celCtx, err := celContext(cluster, controlPlaneCount)
+	celCtx, err := addon.CelContext(cluster, controlPlaneCount)
 	require.NoError(t, err)
 
 	return celCtx
@@ -35,7 +36,7 @@ func TestEvaluateComputedValuesLeavesLiteralsUntouched(t *testing.T) {
 		"d": []any{"x", "y"},
 	}
 
-	resolved, err := evaluateComputedValues(values, testCelCtx(t, 1))
+	resolved, err := addon.EvaluateComputedValues(values, testCelCtx(t, 1))
 	require.NoError(t, err)
 	assert.Equal(t, values, resolved)
 }
@@ -44,14 +45,14 @@ func TestEvaluateComputedValuesEvaluatesCelField(t *testing.T) {
 	t.Parallel()
 
 	values := map[string]any{
-		"replicas": map[string]any{celFieldKey: "ctx.taloscluster.status.controlPlane.replicas > 1 ? 2 : 1"},
+		"replicas": map[string]any{addon.CelFieldKey: "ctx.taloscluster.status.controlPlane.replicas > 1 ? 2 : 1"},
 	}
 
-	single, err := evaluateComputedValues(values, testCelCtx(t, 1))
+	single, err := addon.EvaluateComputedValues(values, testCelCtx(t, 1))
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), single["replicas"])
 
-	multi, err := evaluateComputedValues(values, testCelCtx(t, 3))
+	multi, err := addon.EvaluateComputedValues(values, testCelCtx(t, 3))
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), multi["replicas"])
 }
@@ -60,10 +61,10 @@ func TestEvaluateComputedValuesAccessesTalosClusterResource(t *testing.T) {
 	t.Parallel()
 
 	values := map[string]any{
-		"clusterName": map[string]any{celFieldKey: "ctx.taloscluster.metadata.name"},
+		"clusterName": map[string]any{addon.CelFieldKey: "ctx.taloscluster.metadata.name"},
 	}
 
-	resolved, err := evaluateComputedValues(values, testCelCtx(t, 1))
+	resolved, err := addon.EvaluateComputedValues(values, testCelCtx(t, 1))
 	require.NoError(t, err)
 	assert.Equal(t, "eu-1a", resolved["clusterName"])
 }
@@ -72,10 +73,10 @@ func TestEvaluateComputedValuesAccessesTalosNamespace(t *testing.T) {
 	t.Parallel()
 
 	values := map[string]any{
-		"port": map[string]any{celFieldKey: "ctx.talos.kubePrism.port"},
+		"port": map[string]any{addon.CelFieldKey: "ctx.talos.kubePrism.port"},
 	}
 
-	resolved, err := evaluateComputedValues(values, testCelCtx(t, 1))
+	resolved, err := addon.EvaluateComputedValues(values, testCelCtx(t, 1))
 	require.NoError(t, err)
 	assert.Equal(t, int64(7445), resolved["port"])
 }
@@ -86,13 +87,13 @@ func TestEvaluateComputedValuesPreservesNestedStructure(t *testing.T) {
 	values := map[string]any{
 		"outer": map[string]any{
 			"inner": []any{
-				map[string]any{celFieldKey: "ctx.talos.kubePrism.port"},
+				map[string]any{addon.CelFieldKey: "ctx.talos.kubePrism.port"},
 				"literal",
 			},
 		},
 	}
 
-	resolved, err := evaluateComputedValues(values, testCelCtx(t, 1))
+	resolved, err := addon.EvaluateComputedValues(values, testCelCtx(t, 1))
 	require.NoError(t, err)
 
 	outer, ok := resolved["outer"].(map[string]any)
@@ -109,17 +110,17 @@ func TestEvaluateComputedValuesReturnsErrorOnMalformedExpression(t *testing.T) {
 	t.Parallel()
 
 	values := map[string]any{
-		"broken": map[string]any{celFieldKey: "ctx.taloscluster.status.controlPlane.replicas +"},
+		"broken": map[string]any{addon.CelFieldKey: "ctx.taloscluster.status.controlPlane.replicas +"},
 	}
 
-	_, err := evaluateComputedValues(values, testCelCtx(t, 1))
+	_, err := addon.EvaluateComputedValues(values, testCelCtx(t, 1))
 	require.Error(t, err)
 }
 
 func TestEvaluateComputedValuesNilSafe(t *testing.T) {
 	t.Parallel()
 
-	resolved, err := evaluateComputedValues(nil, testCelCtx(t, 1))
+	resolved, err := addon.EvaluateComputedValues(nil, testCelCtx(t, 1))
 	require.NoError(t, err)
 	assert.Nil(t, resolved)
 }

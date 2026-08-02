@@ -326,7 +326,7 @@ func (r *Reconciler) resolveInstallRequest(ctx context.Context, spec v1alpha2.Ad
 		return InstallRequest{}, err
 	}
 
-	celCtx, err := celContext(&cluster, controlPlaneCount)
+	celCtx, err := CelContext(&cluster, controlPlaneCount)
 	if err != nil {
 		return InstallRequest{}, err
 	}

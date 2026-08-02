@@ -11,14 +11,14 @@ import (
 )
 
 // kubePrismPort is the fixed local port Talos's own KubePrism apiserver
-// proxy listens on, on every node — see celContext's own doc for why
+// proxy listens on, on every node — see CelContext's own doc for why
 // Cilium is pointed at localhost:kubePrismPort instead of a specific
 // control-plane member's address.
 const kubePrismPort = 7445
 
-// celFieldKey marks a position in an embedded default values file as
-// computed rather than literal — see evaluateComputedValues.
-const celFieldKey = "$cel"
+// CelFieldKey marks a position in an embedded default values file as
+// computed rather than literal — see EvaluateComputedValues.
+const CelFieldKey = "$cel"
 
 // errComputedValuesNotMap is a static sentinel — err113 flags a
 // dynamically constructed errors.New/fmt.Errorf call without a wrapped
@@ -26,7 +26,7 @@ const celFieldKey = "$cel"
 var errComputedValuesNotMap = errors.New("resolved computed values is not a map")
 
 // celEnv declares this package's one CEL variable: ctx, a dynamic value
-// (see celContext) — deliberately a single extensible bag rather than a
+// (see CelContext) — deliberately a single extensible bag rather than a
 // per-fact declared variable, so a new $cel rule needing another piece of
 // context doesn't require touching this function.
 func celEnv() (*cel.Env, error) {
@@ -38,7 +38,7 @@ func celEnv() (*cel.Env, error) {
 	return env, nil
 }
 
-// celContext builds the ctx value every $cel expression in an embedded
+// CelContext builds the ctx value every $cel expression in an embedded
 // values/*.yaml evaluates against — two namespaced top-level groups
 // rather than a flat bag of ad hoc names, so where a fact belongs is
 // obvious from its own path:
@@ -58,7 +58,7 @@ func celEnv() (*cel.Env, error) {
 //
 // Any expression can dot into whatever field it needs without a Go
 // change, as long as it already lives somewhere in this shape.
-func celContext(cluster *v1alpha2.TalosCluster, controlPlaneCount int) (map[string]any, error) {
+func CelContext(cluster *v1alpha2.TalosCluster, controlPlaneCount int) (map[string]any, error) {
 	unstructuredCluster, err := runtime.DefaultUnstructuredConverter.ToUnstructured(cluster)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert TalosCluster to CEL context: %w", err)
@@ -80,12 +80,12 @@ func celContext(cluster *v1alpha2.TalosCluster, controlPlaneCount int) (map[stri
 	}, nil
 }
 
-// evaluateComputedValues walks values recursively, substituting every
+// EvaluateComputedValues walks values recursively, substituting every
 // {"$cel": "<expr>"} it finds with <expr>'s evaluated result against
-// celCtx (built by celContext — exposed to the expression itself as the
+// celCtx (built by CelContext — exposed to the expression itself as the
 // declared "ctx" variable). nil-safe: a nil/empty values returns as-is,
 // no CEL environment even built.
-func evaluateComputedValues(values map[string]any, celCtx map[string]any) (map[string]any, error) {
+func EvaluateComputedValues(values map[string]any, celCtx map[string]any) (map[string]any, error) {
 	if len(values) == 0 {
 		return values, nil
 	}
@@ -149,13 +149,13 @@ func evalNode(env *cel.Env, node any, celCtx map[string]any) (any, error) {
 }
 
 // celExpr reports whether node is a "$cel" marker — a map with exactly
-// one key, celFieldKey, holding a string expression.
+// one key, CelFieldKey, holding a string expression.
 func celExpr(node map[string]any) (string, bool) {
 	if len(node) != 1 {
 		return "", false
 	}
 
-	raw, hasCelKey := node[celFieldKey]
+	raw, hasCelKey := node[CelFieldKey]
 	if !hasCelKey {
 		return "", false
 	}

@@ -57,7 +57,7 @@ func loadClusterKubeconfig(
 // pkg/domain/taloscluster's own resolveMembers uses, duplicated for the
 // same import-cycle reason kubeconfigSecretKey is. Only ever used to
 // populate the CEL ctx.taloscluster.status.controlPlane.replicas value
-// (see celContext) — not a correctness-critical count, just an input to
+// (see CelContext) — not a correctness-critical count, just an input to
 // addon values resolution.
 func controlPlaneMemberCount(
 	ctx context.Context, kubeClient client.Client, cluster *v1alpha2.TalosCluster,
