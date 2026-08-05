@@ -44,9 +44,9 @@ func NewServeCmd() *cobra.Command {
 	defaults := &config.Config{}
 	defaults.Defaults()
 
-	var addr = defaults.Server.Addr
+	addr := defaults.Server.Addr
 
-	var storage = defaults.Server.Storage
+	storage := defaults.Server.Storage
 
 	cmd := &cobra.Command{
 		Use:   "serve",
