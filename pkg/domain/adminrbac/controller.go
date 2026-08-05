@@ -1,6 +1,6 @@
 // Package adminrbac reconciles a ClusterRoleBinding for every OIDC admin
 // group configured on cfg.OIDC.AdminGroups (see pkg/config), so the grant
-// pkg/rbac's authorizer enforces is backed by real, inspectable RBAC
+// libkapi.WithRBACAuthorizer enforces is backed by real, inspectable RBAC
 // objects — `kubectl get clusterrolebindings` — that its RBAC authorizer
 // half actually evaluates on every request, not just a row an authorizer
 // computes on the fly from config. See issue #41.

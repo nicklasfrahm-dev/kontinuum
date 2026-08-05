@@ -12,7 +12,7 @@ import (
 // credential plugin, matching kontinuum's /app login flow: a public OAuth
 // 2.0 client (no client secret) requesting the email and groups scopes
 // needed to resolve group membership for kontinuum's admin-group
-// authorization (see libkapi.WithAdminAuthorizer). %s placeholders are, in
+// authorization (see libkapi.WithRBACAuthorizer). %s placeholders are, in
 // order: the cluster name, the API server origin, the cluster's
 // insecure-skip-tls-verify line (empty unless origin is https and host
 // looks local — see kubeconfig), the context name, the cluster name again (the
