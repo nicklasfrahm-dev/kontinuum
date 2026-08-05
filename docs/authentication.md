@@ -1,6 +1,13 @@
 # Authentication
 
-Kontinuum ships with **anonymous authentication and always-allow authorization by default** — there is no login and no access control until you configure OIDC. Put a TLS-terminating, authenticating proxy in front before exposing it outside a trusted network if you don't enable OIDC.
+Kontinuum refuses to start unless authentication is configured deliberately: set `KONTINUUM_OIDC_ISSUER_URL` to require OIDC, or explicitly set `KONTINUUM_INSECURE_ALLOW_ANONYMOUS=true` to opt into **anonymous authentication and always-allow authorization** — there is no login and no access control in that mode, so put a TLS-terminating, authenticating proxy in front before exposing it outside a trusted network. The two are mutually exclusive; setting both, or neither, fails startup with a descriptive error.
+
+| `KONTINUUM_INSECURE_ALLOW_ANONYMOUS` | Issuer URL set? | Startup behavior |
+| --- | --- | --- |
+| `false` | Yes | Starts normally, no special log output. |
+| `false` | No | Fails to start with a descriptive error. |
+| `true` | No | Starts with a warning that anonymous access is enabled. |
+| `true` | Yes | Fails to start with a descriptive error (mutually exclusive). |
 
 ## Enabling OIDC
 
@@ -16,6 +23,7 @@ Setting `KONTINUUM_OIDC_ISSUER_URL` (e.g. to a [Dex](https://dexidp.io/) issuer)
 | `KONTINUUM_OIDC_CLIENT_ID`    | OAuth 2.0 public client ID registered with the issuer                                | `kontinuum`                 |
 | `KONTINUUM_OIDC_REDIRECT_URL` | Callback URL registered with the issuer for the `/app` login flow                    | `http://localhost:8080/app` |
 | `KONTINUUM_OIDC_ADMIN_GROUPS` | Comma-delimited OIDC groups granted full (`system:masters`-equivalent) access        | *(empty)*                   |
+| `KONTINUUM_INSECURE_ALLOW_ANONYMOUS` | Explicitly acknowledges anonymous access. Must be `true` to start with no OIDC issuer configured; mutually exclusive with `KONTINUUM_OIDC_ISSUER_URL`. | `false` |
 
 ## The PKCE login flow (`pkg/auth`)
 

@@ -9,7 +9,7 @@ A Kubernetes-style API server built on [kommodity](https://github.com/kommodity-
 </p>
 
 !!! warning
-    The server ships with no TLS and no authentication by default. Put a TLS-terminating, authenticating proxy in front before exposing it outside a trusted network, or turn on [OIDC](authentication.md).
+    The server ships with no TLS by default. Put a TLS-terminating proxy in front before exposing it outside a trusted network. Authentication must be configured deliberately — see [Authentication](authentication.md).
 
 ## Where to go next
 
