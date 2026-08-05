@@ -42,14 +42,19 @@ extra_css:
   - stylesheets/extra.css
 
 nav:
-  - Welcome: index.md
-  - Quickstart: quickstart.md
-  - Architecture: architecture.md
-  - Reference: reference.md
-  - Authentication: authentication.md
-  - Development guide: development.md
-  - Workflows:
+  - Overview:
+      - Welcome: index.md
+      - Architecture: architecture.md
+  - Quickstart:
+      - Running via Docker: running-via-docker.md
+  - Admin Guide:
+      - Authentication: authentication.md
       - Cluster provisioning: workflows/cluster-provisioning.md
+  - Developer guide:
+      - Contribution guidelines: contributing.md
+      - Local setup: local-setup.md
+  - Reference:
+      - API reference: reference.md
 
 markdown_extensions:
   - admonition

@@ -37,4 +37,4 @@ A PKCE-based OpenID Connect login flow for the `/app` UI, plus bearer-token vali
 
 ## Storage
 
-Backed by `libkapi`'s pluggable storage layer — SQLite for local development, PostgreSQL or etcd for anything shared. Selected via the `KONTINUUM_SERVER_STORAGE` connection string (see [Quickstart](quickstart.md)).
+Backed by `libkapi`'s pluggable storage layer — SQLite for local development, PostgreSQL or etcd for anything shared. Selected via the `KONTINUUM_SERVER_STORAGE` connection string (see [Configuration](reference.md#configuration)).
