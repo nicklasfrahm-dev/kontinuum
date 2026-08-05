@@ -9,16 +9,17 @@ A Kubernetes-style API server built on [kommodity](https://github.com/kommodity-
 </p>
 
 !!! warning
-    The server ships with no TLS and no authentication by default. Put a TLS-terminating, authenticating proxy in front before exposing it outside a trusted network, or turn on [OIDC](authentication.md).
+    The server ships with no TLS by default. Put a TLS-terminating proxy in front before exposing it outside a trusted network. Authentication must be configured deliberately — see [Authentication](authentication.md).
 
 ## Where to go next
 
-- [**Quickstart**](quickstart.md) — build kontinuum, run it locally, and connect with `kubectl`.
 - [**Architecture**](architecture.md) — how the server, controllers, and UI fit together.
-- [**Reference**](reference.md) — the CRDs that make up kontinuum's API, and the generated field reference.
-- [**Authentication**](authentication.md) — the OIDC/PKCE login flow and how to turn it on.
-- [**Development guide**](development.md) — conventions for contributing to kontinuum.
+- [**Running via Docker**](running-via-docker.md) — the fastest way to try kontinuum, no Go toolchain required.
+- [**Authentication**](authentication.md) — the OIDC/PKCE login flow, anonymous access, and how to turn each on.
 - [**Cluster provisioning**](workflows/cluster-provisioning.md) — how kontinuum turns bare-metal machines into a running Talos Kubernetes cluster.
+- [**Contribution guidelines**](contributing.md) — conventions for contributing to kontinuum.
+- [**Local setup**](local-setup.md) — build kontinuum from source and run the hot-reload dev environment.
+- [**API reference**](reference.md) — the CRDs and configuration variables that make up kontinuum's API, and the generated field reference.
 
 ## What kontinuum is for
 

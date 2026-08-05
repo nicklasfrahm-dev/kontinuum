@@ -23,6 +23,16 @@ func TestDefaults(t *testing.T) {
 	assert.Equal(t, "kontinuum", defaults.OIDC.ClientID)
 	assert.Equal(t, "http://localhost:8080/app", defaults.OIDC.RedirectURL)
 	assert.Empty(t, defaults.OIDC.AdminGroups)
+	assert.Equal(t, "false", defaults.InsecureAllowAnonymous)
+}
+
+func TestLoadReadsInsecureAllowAnonymousEnvVar(t *testing.T) {
+	t.Setenv("KONTINUUM_INSECURE_ALLOW_ANONYMOUS", "true")
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+
+	assert.Equal(t, "true", cfg.InsecureAllowAnonymous)
 }
 
 func TestLoadReadsOIDCEnvVars(t *testing.T) {

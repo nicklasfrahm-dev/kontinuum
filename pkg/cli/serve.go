@@ -167,6 +167,16 @@ func loadServeConfig(cmd *cobra.Command, addr string, storage string) (*config.C
 
 	logger := logging.New(level, format, os.Stdout)
 
+	anonymous, err := cfg.ValidateAuthentication()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to validate authentication config: %w", err)
+	}
+
+	if anonymous {
+		logger.Warn("Starting with anonymous access allowed",
+			"reason", "KONTINUUM_INSECURE_ALLOW_ANONYMOUS=true and no OIDC issuer configured")
+	}
+
 	return cfg, logger, nil
 }
 

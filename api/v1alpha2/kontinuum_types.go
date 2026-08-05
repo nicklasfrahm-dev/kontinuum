@@ -100,6 +100,12 @@ type KontinuumConfigStatus struct {
 	Log KontinuumLogConfigStatus `json:"log"`
 	// +optional
 	OIDC KontinuumOIDCConfigStatus `json:"oidc"`
+	// InsecureAllowAnonymous must be explicitly set to "true" to start the
+	// server with no OIDC issuer configured — see
+	// pkg/config.Config.ValidateAuthentication, which refuses to start
+	// otherwise. Mutually exclusive with OIDC.IssuerURL being set.
+	// +optional
+	InsecureAllowAnonymous string `default:"false" json:"insecureAllowAnonymous"`
 }
 
 // KontinuumServerConfigStatus is pkg/config.ServerConfig, referenced

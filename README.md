@@ -4,8 +4,6 @@ A Kubernetes-style API server built on [kommodity](https://github.com/kommodity-
 
 Full documentation: **[nicklasfrahm-dev.github.io/kontinuum](https://nicklasfrahm-dev.github.io/kontinuum/)**
 
-> **Warning:** The server ships with no TLS and no authentication by default. Put a TLS-terminating, authenticating proxy in front before exposing it outside a trusted network.
-
 <p align="center">
   <img src="docs/screenshots/login.png" width="32%" alt="Login screen" />
   <img src="docs/screenshots/topology.png" width="32%" alt="Topology view" />
@@ -68,6 +66,7 @@ Configuration is loaded from `KONTINUUM_`-prefixed environment variables. Env-va
 | `KONTINUUM_OIDC_CLIENT_ID`    | OAuth 2.0 public client ID registered with the issuer                                | `kontinuum`                 |
 | `KONTINUUM_OIDC_REDIRECT_URL` | Callback URL registered with the issuer for the /app login flow                      | `http://localhost:8080/app` |
 | `KONTINUUM_OIDC_ADMIN_GROUPS` | Comma-delimited OIDC groups granted full (system:masters-equivalent) access          | *(empty)*                   |
+| `KONTINUUM_INSECURE_ALLOW_ANONYMOUS` | Explicitly acknowledges anonymous access. Must be `true` to start with no OIDC issuer configured; mutually exclusive with `KONTINUUM_OIDC_ISSUER_URL`. | `false`  |
 
 Flags override environment variables when explicitly set:
 
@@ -83,7 +82,7 @@ Setting `KONTINUUM_OIDC_ISSUER_URL` turns on three things at once:
 - **Deny-by-default authorization** — only `system:masters`, authenticated service accounts, and the groups listed in `KONTINUUM_OIDC_ADMIN_GROUPS` get access; every other group gets nothing (`libkapi.WithAdminAuthorizer`). **`KONTINUUM_OIDC_ADMIN_GROUPS` is required once OIDC is enabled** — the server refuses to start with OIDC on and no admin groups configured, since that would lock everyone out.
 - **The /app UI's PKCE login flow** — since the client is public (no client secret), the browser exchanges an authorization code for an ID token using PKCE (RFC 7636) and stores it in an HttpOnly session cookie. `KONTINUUM_OIDC_REDIRECT_URL` must exactly match one of the redirect URIs registered with the issuer for the client. `/app` itself never auto-redirects into the login flow — it shows a "Login via SSO" button (linking to `/app/login`) unless a valid session is already present, in which case it forwards straight to `/app/home`. Everything under `/app/*` other than `/app`, `/app/login`, and `/app/logout` requires a valid session.
 
-Leaving `KONTINUUM_OIDC_ISSUER_URL` unset keeps kontinuum's default: anonymous authentication, always-allow authorization.
+The server refuses to start unless authentication is configured deliberately: set `KONTINUUM_OIDC_ISSUER_URL` to require OIDC, or set `KONTINUUM_INSECURE_ALLOW_ANONYMOUS=true` to explicitly opt into anonymous authentication with always-allow authorization (a startup warning is logged in this case). Setting both is also a startup error — they're mutually exclusive.
 
 For local development, copy `.env.example` to `.env` and adjust as needed — `make dev` loads it automatically via `compose.yaml`'s `env_file`.
 

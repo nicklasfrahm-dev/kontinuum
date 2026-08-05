@@ -1,23 +1,6 @@
-# Development guide
+# Contribution guidelines
 
-## Getting set up
-
-See [Quickstart](quickstart.md) for prerequisites and running a plain kontinuum instance locally. For hacking on kontinuum itself, use the hot-reload development environment instead.
-
-### Hot-reload development environment
-
-`make dev` starts PostgreSQL, [air](https://github.com/air-verse/air) hot-reload, and a Caddy proxy that terminates TLS with a self-signed certificate on `https://localhost:8443` (in front of the plain-HTTP `http://localhost:8080` air serves), all via Docker Compose:
-
-```sh
-# start dev environment (air + postgres + proxy)
-make dev
-# stop dev environment
-make dev-down
-# stop and remove volumes
-make dev-clean
-```
-
-For local development, copy `.env.example` to `.env` and adjust as needed — `make dev` loads it automatically via `compose.yaml`'s `env_file`.
+See [Local setup](local-setup.md) for building kontinuum and running the hot-reload dev environment before making changes.
 
 ## Conventions
 

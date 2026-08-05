@@ -1,6 +1,39 @@
-# Reference
+# API reference
 
-Kontinuum's API is a Kubernetes-style API: every resource below is a regular custom resource, served by the embedded apiserver, readable and writable with `kubectl` (see [Quickstart](quickstart.md#connect-with-kubectl)) or any Kubernetes client library — there is no separate, bespoke REST API to learn.
+Kontinuum's API is a Kubernetes-style API: every resource below is a regular custom resource, served by the embedded apiserver, readable and writable with `kubectl` (see [Running via Docker](running-via-docker.md#connect-with-kubectl) or [Local setup](local-setup.md#connect-with-kubectl)) or any Kubernetes client library — there is no separate, bespoke REST API to learn.
+
+## Configuration
+
+Configuration is loaded from `KONTINUUM_`-prefixed environment variables. Env-var names are auto-derived from the config struct path (e.g. `Server.Addr` → `KONTINUUM_SERVER_ADDR`).
+
+### Server & logging
+
+| Env var                    | Description                                                                                        | Default                 |
+| --------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------ |
+| `KONTINUUM_SERVER_ADDR`    | Listener address                                                                                     | `:8080`                 |
+| `KONTINUUM_SERVER_STORAGE` | Storage connection string (`sqlite://`, `postgres://`, `mysql://`, `etcd://`, ...)                   | `sqlite://kontinuum.db` |
+| `KONTINUUM_SERVER_REGION`  | Region this server manages. Leave unset, along with Zone, to run as the control-plane entrypoint.    | *(empty)*               |
+| `KONTINUUM_SERVER_ZONE`    | Availability zone this server manages. Leave unset, along with Region, to run as the control-plane entrypoint. | *(empty)*     |
+| `KONTINUUM_LOG_LEVEL`      | Log level (`debug`, `info`, `warn`, `error`)                                                         | `warn`                  |
+| `KONTINUUM_LOG_FORMAT`     | Log format (`console`, `text`, `json`)                                                               | `json`                  |
+
+### Authentication (OIDC)
+
+See [Authentication](authentication.md) for how these interact and the server's startup behavior when they're missing or conflicting.
+
+| Env var                              | Description                                                                                             | Default                     |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| `KONTINUUM_OIDC_ISSUER_URL`          | OIDC issuer URL. Empty disables OIDC entirely.                                                             | *(empty)*                   |
+| `KONTINUUM_OIDC_CLIENT_ID`           | OAuth 2.0 public client ID registered with the issuer                                                       | `kontinuum`                  |
+| `KONTINUUM_OIDC_REDIRECT_URL`        | Callback URL registered with the issuer for the `/app` login flow                                          | `http://localhost:8080/app` |
+| `KONTINUUM_OIDC_ADMIN_GROUPS`        | Comma-delimited OIDC groups granted full (`system:masters`-equivalent) access                              | *(empty)*                   |
+| `KONTINUUM_INSECURE_ALLOW_ANONYMOUS` | Explicitly acknowledges anonymous access. Must be `true` to start with no OIDC issuer configured; mutually exclusive with `KONTINUUM_OIDC_ISSUER_URL`. | `false` |
+
+Flags override environment variables when explicitly set:
+
+```sh
+kontinuum serve --addr :9090 --storage postgres://user:pass@host/db
+```
 
 ## Generated CRD reference
 
