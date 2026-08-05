@@ -16,6 +16,7 @@ import (
 	"github.com/kommodity-io/kommodity/pkg/libkapi"
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -26,6 +27,7 @@ import (
 	"github.com/nicklasfrahm/kontinuum/pkg/auth"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/addon"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/adminrbac"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instancepool"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/registry"
@@ -207,6 +209,16 @@ func buildServer(
 		return nil, fmt.Errorf("failed to register core/v1 scheme: %w", err)
 	}
 
+	// rbac.authorization.k8s.io/v1 is needed for the same reason as core/v1
+	// above: adminrbac.Runnable's client.Client (built off this scheme) and
+	// the UI's own per-request client (kontinuumListerFactory, which the IAM
+	// page also uses to list ClusterRoleBindings — see handleIAM) both
+	// resolve ClusterRole/ClusterRoleBinding's GVKs against it.
+	err = rbacv1.AddToScheme(scheme)
+	if err != nil {
+		return nil, fmt.Errorf("failed to register rbac.authorization.k8s.io/v1 scheme: %w", err)
+	}
+
 	uiRouter := ui.NewRouter(
 		namespaceListerFactory(cfg.Server.Addr), kontinuumListerFactory(cfg.Server.Addr, scheme),
 		version, cfg.Redact(), oidcHandler != nil, invalidateSession)
@@ -222,7 +234,7 @@ func buildServer(
 		libkapi.WithLogger(logger),
 		libkapi.WithServerFactory(customHandlers(uiRouter, oidcHandler)),
 	}, authOpts, registryOpts, instanceOptions(logger), instancePoolOptions(logger), talosClusterOptions(logger),
-		addonOptions(logger))
+		addonOptions(logger), adminRBACOptions(cfg, logger))
 
 	// Storage is resolved against a background context so the backend
 	// is only torn down by Server.Shutdown, not by the signal context
@@ -342,6 +354,26 @@ func addonOptions(logger *slog.Logger) []libkapi.Option {
 	return []libkapi.Option{libkapi.WithController(controller)}
 }
 
+// adminRBACOptions builds the libkapi options that wire the admin-group
+// RBAC reconciler (see pkg/domain/adminrbac) onto the Server: it keeps a
+// ClusterRoleBinding for every group in cfg.OIDC.AdminGroups pointing at a
+// cluster-admin-equivalent ClusterRole, which the RBAC authorizer (see
+// configureOIDC) actually evaluates on every request — see issue #41. Only
+// wired when OIDC is configured; with no OIDC there's no notion of an admin
+// group to bind, and no authorizer is wired either (see configureOIDC).
+func adminRBACOptions(cfg *config.Config, logger *slog.Logger) []libkapi.Option {
+	if cfg.OIDC.IssuerURL == "" {
+		return nil
+	}
+
+	controller := adminrbac.NewController(adminrbac.Config{
+		Logger:      logger.With("component", "adminrbac"),
+		AdminGroups: cfg.OIDC.AdminGroups,
+	})
+
+	return []libkapi.Option{libkapi.WithController(controller)}
+}
+
 // displayConfig builds the non-confidential configuration snapshot written
 // to status.config on every heartbeat. cfg.Redact() is Config itself with
 // Server.Storage's credentials stripped (the unredacted original still goes
@@ -410,11 +442,14 @@ func kontinuumListerFactory(addr string, scheme *runtime.Scheme) ui.KontinuumCli
 // document is fetched from ctx, so startup fails fast if the issuer is
 // unreachable or misconfigured.
 //
-// Authorization is deny-by-default: only system:masters, service accounts,
-// and the groups listed in cfg.OIDC.AdminGroups get access — see
-// libkapi.WithAdminAuthorizer. Server startup fails if AdminGroups is empty,
-// since an OIDC deployment with no admin groups configured would lock
-// everyone out.
+// Authorization is deny-by-default: libkapi.WithRBACAuthorizer's real RBAC
+// authorizer is tried first (evaluating the ClusterRoleBindings
+// pkg/domain/adminrbac reconciles, plus any hand-authored
+// Role/RoleBinding/ClusterRole/ClusterRoleBinding), falling back to
+// system:masters, service accounts, and the groups listed in
+// cfg.OIDC.AdminGroups. Server startup fails if AdminGroups is empty, since
+// an OIDC deployment with no admin groups configured would lock everyone
+// out.
 func configureOIDC(
 	ctx context.Context, cfg *config.Config, logger *slog.Logger,
 ) ([]libkapi.Option, *auth.Handler, error) {
@@ -436,9 +471,7 @@ func configureOIDC(
 			IssuerURL: cfg.OIDC.IssuerURL,
 			ClientID:  cfg.OIDC.ClientID,
 		}),
-		libkapi.WithAdminAuthorizer(libkapi.AdminAuthorizerConfig{
-			AdminGroups: cfg.OIDC.AdminGroups,
-		}),
+		libkapi.WithRBACAuthorizer(libkapi.RBACAuthorizerConfig{AdminGroups: cfg.OIDC.AdminGroups}),
 	}
 
 	return authOpts, oidcHandler, nil

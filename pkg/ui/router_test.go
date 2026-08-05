@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/adminrbac"
 	"github.com/nicklasfrahm/kontinuum/pkg/ui"
 )
 
@@ -62,6 +64,13 @@ type stubKontinuumLister struct {
 	// issue both kinds of Get and needs to control them independently.
 	secret       *corev1.Secret
 	secretGetErr error
+	// bindings backs List calls for a *rbacv1.ClusterRoleBindingList — used
+	// by the IAM page (see handleIAM). listErr, when set, is returned
+	// instead — separate from err (which handleRegistry/handleDeleteInstance
+	// use for *v1alpha2.KontinuumList) so a single test can control each
+	// list kind independently.
+	bindings []rbacv1.ClusterRoleBinding
+	listErr  error
 }
 
 // Get looks up either a Kontinuum by name in items or, for a *corev1.Secret,
@@ -105,12 +114,19 @@ func (s stubKontinuumLister) Get(
 }
 
 func (s stubKontinuumLister) List(_ context.Context, list client.ObjectList, _ ...client.ListOption) error {
-	if s.err != nil {
-		return s.err
-	}
+	switch target := list.(type) {
+	case *v1alpha2.KontinuumList:
+		if s.err != nil {
+			return s.err
+		}
 
-	if kontinuumList, ok := list.(*v1alpha2.KontinuumList); ok {
-		kontinuumList.Items = s.items
+		target.Items = s.items
+	case *rbacv1.ClusterRoleBindingList:
+		if s.listErr != nil {
+			return s.listErr
+		}
+
+		target.Items = s.bindings
 	}
 
 	return nil
@@ -846,6 +862,20 @@ func TestHandleSettingsUsesForwardedProtoForKubeconfigOrigin(t *testing.T) {
 	assert.NotContains(t, string(body), "insecure-skip-tls-verify")
 }
 
+// adminGroupBinding builds a fixture rbacv1.ClusterRoleBinding shaped the
+// way pkg/domain/adminrbac's controller creates one — labeled as managed
+// and annotated with the OIDC group it grants — for handleIAM's tests.
+func adminGroupBinding(name, group string) rbacv1.ClusterRoleBinding {
+	return rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Labels:      map[string]string{v1alpha2.LabelManagedBy: adminrbac.ManagedByValue},
+			Annotations: map[string]string{adminrbac.AdminGroupAnnotation: group},
+		},
+		RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: adminrbac.RoleName},
+	}
+}
+
 func TestHandleIAMShowsAdminGroupBindings(t *testing.T) {
 	t.Parallel()
 
@@ -855,10 +885,12 @@ func TestHandleIAMShowsAdminGroupBindings(t *testing.T) {
 
 	cfg := config.Config{}
 	cfg.OIDC.IssuerURL = testOIDCIssuerURL
-	cfg.OIDC.AdminGroups = "platform-admins, sre "
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
-		return stubKontinuumLister{}, nil
+		return stubKontinuumLister{bindings: []rbacv1.ClusterRoleBinding{
+			adminGroupBinding("kontinuum-admin-aaaaaaaaaaaa", "platform-admins"),
+			adminGroupBinding("kontinuum-admin-bbbbbbbbbbbb", "sre"),
+		}}, nil
 	}
 
 	router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, true, nil)
@@ -879,8 +911,49 @@ func TestHandleIAMShowsAdminGroupBindings(t *testing.T) {
 	assert.Contains(t, string(body), "Role bindings")
 	assert.Contains(t, string(body), "platform-admins")
 	assert.Contains(t, string(body), "sre")
-	assert.Contains(t, string(body), "system:masters")
+	assert.Contains(t, string(body), adminrbac.RoleName)
+	assert.Contains(t, string(body), "kontinuum-admin-aaaaaaaaaaaa")
 	assert.NotContains(t, string(body), "No admin groups are configured")
+}
+
+func TestHandleIAMInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	forbiddenReason := schema.GroupResource{Group: rbacv1.GroupName, Resource: "clusterrolebindings"}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{listErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
+	}
+
+	var invalidatedWith string
+
+	invalidateSession := func(writer http.ResponseWriter, _ *http.Request, message string) {
+		invalidatedWith = message
+
+		writer.WriteHeader(http.StatusFound)
+	}
+
+	cfg := config.Config{}
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+
+	router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, true, invalidateSession)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/iam"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusFound, resp.StatusCode)
+	assert.NotEmpty(t, invalidatedWith)
 }
 
 func TestHandleIAMShowsNoticeWhenOIDCDisabled(t *testing.T) {
@@ -913,7 +986,7 @@ func TestHandleIAMShowsNoticeWhenOIDCDisabled(t *testing.T) {
 	assert.NotContains(t, string(body), "Role bindings")
 }
 
-func TestHandleIAMShowsNoBindingsMessageWhenAdminGroupsEmpty(t *testing.T) {
+func TestHandleIAMShowsNoBindingsMessageWhenNoneExist(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {

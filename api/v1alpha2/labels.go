@@ -14,4 +14,11 @@ const (
 	// Update; a resourceVersion conflict means another pool won the race,
 	// so that candidate is skipped rather than retried.
 	LabelClaimedBy = "kontinuum.sh/claimed-by"
+	// LabelManagedBy marks an object as owned and reconciled by a specific
+	// kontinuum controller, named by this label's value (e.g.
+	// "admin-group-controller" — see pkg/domain/adminrbac.ManagedByValue).
+	// Used to scope a controller's List/diff/delete loop to only the
+	// objects it created, leaving anything else with the same kind alone —
+	// see issue #41's "reconcile by label, not by name" requirement.
+	LabelManagedBy = "kontinuum.sh/managed-by"
 )

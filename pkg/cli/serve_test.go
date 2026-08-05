@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -15,6 +16,7 @@ import (
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha1"
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/addon"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/adminrbac"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instancepool"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/registry"
@@ -29,7 +31,7 @@ import (
 const unreachableHost = "http://127.0.0.1:1"
 
 // setupWithManagerController is the subset of libkapi.Controller each
-// domain package's own Controller implements. Mirrors the five
+// domain package's own Controller implements. Mirrors the six
 // registrations pkg/cli/serve.go's own *Options functions wire onto the
 // real server.
 type setupWithManagerController interface {
@@ -48,7 +50,7 @@ type setupWithManagerController interface {
 // deferring to a lazy watch like ctrl.NewControllerManagedBy(...).For(...)
 // does) breaks `make dev` with a "connection refused" error before the
 // process ever starts listening. Pointing every controller at a host
-// nothing listens on reproduces that failure mode for any of the five,
+// nothing listens on reproduces that failure mode for any of the six,
 // without needing a running apiserver at all.
 func TestSetupWithManagerDoesNotRequireLiveAPIServer(t *testing.T) {
 	t.Parallel()
@@ -57,6 +59,7 @@ func TestSetupWithManagerDoesNotRequireLiveAPIServer(t *testing.T) {
 	require.NoError(t, v1alpha2.AddToScheme(scheme))
 	require.NoError(t, v1alpha1.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, rbacv1.AddToScheme(scheme))
 
 	logger := slog.Default()
 
@@ -66,6 +69,7 @@ func TestSetupWithManagerDoesNotRequireLiveAPIServer(t *testing.T) {
 		"instancepool": instancepool.NewController(instancepool.Config{Logger: logger}),
 		"taloscluster": taloscluster.NewController(taloscluster.Config{Logger: logger}),
 		"addon":        addon.NewController(addon.Config{Logger: logger}),
+		"adminrbac":    adminrbac.NewController(adminrbac.Config{Logger: logger}),
 	}
 
 	for name, controller := range controllers {
