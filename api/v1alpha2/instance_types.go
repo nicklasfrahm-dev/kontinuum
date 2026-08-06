@@ -87,6 +87,7 @@ type InstanceStatus struct {
 //
 //nolint:lll
 // +kubebuilder:printcolumn:name="Discovered",type="string",JSONPath=".status.conditions[?(@.type==\"Discovered\")].status"
+// +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.conditions[?(@.type==\"Discovered\")].reason"
 
 // Instance represents a single machine (bare metal or, via ProviderRef, a
 // provisioned cloud resource) that can be claimed by an InstancePool — see

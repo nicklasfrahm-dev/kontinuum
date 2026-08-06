@@ -21,6 +21,9 @@ spec:
     - jsonPath: .status.conditions[?(@.type=="Discovered")].status
       name: Discovered
       type: string
+    - jsonPath: .status.conditions[?(@.type=="Discovered")].reason
+      name: Reason
+      type: string
     name: v1alpha2
     schema:
       openAPIV3Schema:
@@ -189,8 +192,13 @@ spec:
                 properties:
                   version:
                     description: |-
-                      Version is the Talos version this Instance reported while being
-                      probed.
+                      Version is the Talos version this Instance reported. Left empty by
+                      maintenance-mode discovery itself — current Talos releases reject the
+                      maintenance-mode Version RPC for any caller without an admin identity,
+                      which no not-yet-configured node can present — and instead populated
+                      later, once this Instance is claimed by a TalosCluster and its own
+                      config-apply gives it a real one (see pkg/domain/taloscluster's
+                      recordTalosVersions).
                     type: string
                 type: object
             type: object
