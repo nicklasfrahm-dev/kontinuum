@@ -294,6 +294,20 @@ type instance struct {
 	Version       string
 }
 
+// zoneRow is a Zone object rendered as a row in the registry page's own
+// zones table. Condition/Message reflect whichever of status.conditions
+// most recently transitioned (see latestCondition) — a Zone only ever
+// carries ClusterReady and Installed (see ZoneStatus's own doc), so
+// showing "whichever changed last" is a reasonable single-glance summary
+// without needing a column per condition type.
+type zoneRow struct {
+	Name      string
+	Region    string
+	Age       string
+	Condition string
+	Message   string
+}
+
 // handleDeleteInstance deletes the Kontinuum object named by the {name}
 // path value, then re-renders the registry page — the same response a GET
 // would produce — so the htmx button that triggers this (hx-select'ing
@@ -386,11 +400,17 @@ func (r *Router) renderRegistry(writer http.ResponseWriter, request *http.Reques
 
 	sort.Slice(instances, func(i, j int) bool { return instances[i].Name < instances[j].Name })
 
+	zones, err := r.listZoneRows(writer, request)
+	if err != nil {
+		return
+	}
+
 	data := map[string]any{
 		"Title":       "Registry",
 		"ActiveMenu":  "registry",
 		"Version":     r.version,
 		"Instances":   instances,
+		"Zones":       zones,
 		"AuthEnabled": r.authEnabled,
 	}
 
@@ -402,6 +422,72 @@ func (r *Router) renderRegistry(writer http.ResponseWriter, request *http.Reques
 	maps.Copy(data, r.zoneAddFormData(zoneAddFields{}, "", ""))
 
 	r.render(writer, pageRegistry, data)
+}
+
+// listZoneRows lists Zone objects and maps them to zoneRow, sorted by name
+// — the registry page's own zones table. On error it writes the
+// appropriate HTTP response itself (same as renderRegistry's own
+// kontinuums.List handling) and returns a non-nil error so the caller
+// knows not to render the page.
+func (r *Router) listZoneRows(writer http.ResponseWriter, request *http.Request) ([]zoneRow, error) {
+	zones, err := r.zonesFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return nil, fmt.Errorf("failed to build kubernetes client: %w", err)
+	}
+
+	var list v1alpha2.ZoneList
+
+	err = zones.List(request.Context(), &list)
+	if err != nil {
+		// Forbidden means the signed-in identity is authenticated but not
+		// authorized — the session itself isn't the problem, but there's
+		// no reason to keep it either, so send the caller back to sign in
+		// rather than leave them stuck on a page they can't use.
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return nil, fmt.Errorf("forbidden: %w", err)
+		}
+
+		http.Error(writer, "failed to list zones: "+err.Error(), http.StatusBadGateway)
+
+		return nil, fmt.Errorf("failed to list zones: %w", err)
+	}
+
+	rows := make([]zoneRow, 0, len(list.Items))
+
+	for _, item := range list.Items {
+		row := zoneRow{Name: item.Name, Region: item.Spec.Region, Age: formatAge(item.CreationTimestamp.Time)}
+
+		if cond := latestCondition(item.Status.Conditions); cond != nil {
+			row.Condition = cond.Type + "=" + string(cond.Status)
+			row.Message = cond.Message
+		}
+
+		rows = append(rows, row)
+	}
+
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
+
+	return rows, nil
+}
+
+// latestCondition returns whichever of conditions most recently
+// transitioned, or nil if conditions is empty — see zoneRow's own doc for
+// why "most recent" is the summary this package shows.
+func latestCondition(conditions []metav1.Condition) *metav1.Condition {
+	var latest *metav1.Condition
+
+	for index := range conditions {
+		cond := &conditions[index]
+		if latest == nil || cond.LastTransitionTime.After(latest.LastTransitionTime.Time) {
+			latest = cond
+		}
+	}
+
+	return latest
 }
 
 // maxZoneAddFormBytes bounds the "Add zone" form's request body — every

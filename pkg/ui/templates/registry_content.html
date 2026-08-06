@@ -78,6 +78,48 @@
         </div>
         {{end}}
     </div>
+
+    <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+        <div class="px-6 py-3 border-b border-neutral-800">
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider">Zones <span class="text-neutral-500">{{len .Zones}}</span></h2>
+        </div>
+
+        {{if .Zones}}
+        <table class="w-full">
+            <thead>
+                <tr class="border-b border-neutral-800">
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Name</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Region</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Age</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Condition</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Message</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .Zones}}
+                <tr class="border-b border-neutral-800 last:border-b-0 hover:bg-neutral-800/50 transition-colors">
+                    <td class="px-6 py-2 text-sm font-medium text-white">{{.Name}}</td>
+                    <td class="px-6 py-2 text-sm text-neutral-400">{{if .Region}}{{.Region}}{{else}}-{{end}}</td>
+                    <td class="px-6 py-2 text-sm text-neutral-400">{{.Age}}</td>
+                    <td class="px-6 py-2">
+                        {{if .Condition}}
+                        <span class="inline-flex items-center gap-1.5 bg-neutral-800 border border-neutral-700 rounded-full px-2.5 py-1 text-xs font-medium text-neutral-300">{{.Condition}}</span>
+                        {{else}}
+                        <span class="text-sm text-neutral-400">-</span>
+                        {{end}}
+                    </td>
+                    <td class="px-6 py-2 text-sm text-neutral-400">{{if .Message}}{{.Message}}{{else}}-{{end}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+        {{else}}
+        <div class="px-6 py-16 text-center">
+            <h3 class="text-sm font-bold text-white uppercase tracking-wider">No zones found</h3>
+            <p class="mt-2 text-sm text-neutral-500">No zones have been added yet.</p>
+        </div>
+        {{end}}
+    </div>
 </div>
 
 <!-- Deliberately outside #registry-content: that div's own 15s poll

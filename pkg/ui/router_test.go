@@ -141,11 +141,15 @@ func (s stubKontinuumLister) Delete(_ context.Context, _ client.Object, _ ...cli
 }
 
 // zoneFactory is a fixed ui.ZoneClientFactory for tests that don't exercise
-// the "Add zone" form at all — none of the handlers under test here call
-// it, so an empty fake client is enough to satisfy ui.NewRouter's
-// constructor.
+// the "Add zone" form or the registry page's own zones table — an empty
+// (but scheme-registered, so renderRegistry's own Zone List call succeeds
+// with zero results rather than erroring) fake client is enough to satisfy
+// ui.NewRouter's constructor.
 func zoneFactory(context.Context) (client.Client, error) {
-	return fake.NewClientBuilder().Build(), nil
+	scheme := apiruntime.NewScheme()
+	_ = v1alpha2.AddToScheme(scheme)
+
+	return fake.NewClientBuilder().WithScheme(scheme).Build(), nil
 }
 
 func newTestRequest(t *testing.T, target string) *http.Request {
@@ -1113,6 +1117,91 @@ func TestHandleRegistryRendersInstances(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	assert.Contains(t, string(body), "demo")
+}
+
+func TestHandleRegistryRendersZones(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	scheme := apiruntime.NewScheme()
+	require.NoError(t, v1alpha2.AddToScheme(scheme))
+
+	zone := &v1alpha2.Zone{
+		ObjectMeta: metav1.ObjectMeta{Name: "eu-eu-1a"},
+		Spec:       v1alpha2.ZoneSpec{Region: "eu", Zone: "eu-1a", Domain: "example.com"},
+		Status: v1alpha2.ZoneStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type: "Installed", Status: metav1.ConditionFalse, Reason: "WaitingForCertificate",
+					Message:            "waiting for cert-manager to issue eu-1a.eu.example.com's certificate",
+					LastTransitionTime: metav1.Now(),
+				},
+			},
+		},
+	}
+	zoneClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(zone).Build()
+	zonesFactory := func(context.Context) (client.Client, error) { return zoneClient, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-domain", "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "eu-eu-1a")
+	assert.Contains(t, string(body), ">eu<")
+	assert.Contains(t, string(body), "Installed=False")
+	assert.Contains(t, string(body), "waiting for cert-manager to issue")
+}
+
+func TestHandleRegistryReturnsBadGatewayWhenZoneListFails(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+	zonesFactory := func(context.Context) (client.Client, error) { return failingListZoneClient{}, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-domain", "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
+}
+
+// failingListZoneClient is a client.Client test double whose List always
+// fails with a plain (non-Forbidden) error — every other method falls
+// through to the embedded nil client.Client, which is fine: renderRegistry
+// only ever calls List through this factory.
+type failingListZoneClient struct{ client.Client }
+
+func (failingListZoneClient) List(context.Context, client.ObjectList, ...client.ListOption) error {
+	return errFactory
 }
 
 func TestHandleRegistryReturnsServerErrorWhenFactoryFails(t *testing.T) {
