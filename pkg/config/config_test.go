@@ -24,6 +24,8 @@ func TestDefaults(t *testing.T) {
 	assert.Equal(t, "http://localhost:8080/app", defaults.OIDC.RedirectURL)
 	assert.Empty(t, defaults.OIDC.AdminGroups)
 	assert.Equal(t, "false", defaults.InsecureAllowAnonymous)
+	assert.Empty(t, defaults.ACME.Email)
+	assert.Equal(t, "https://acme-v02.api.letsencrypt.org/directory", defaults.ACME.Server)
 }
 
 func TestLoadReadsInsecureAllowAnonymousEnvVar(t *testing.T) {
@@ -60,4 +62,25 @@ func TestLoadFallsBackToOIDCDefaults(t *testing.T) {
 	assert.Equal(t, "kontinuum", cfg.OIDC.ClientID)
 	assert.Equal(t, "http://localhost:8080/app", cfg.OIDC.RedirectURL)
 	assert.Empty(t, cfg.OIDC.AdminGroups)
+}
+
+func TestLoadReadsACMEEnvVars(t *testing.T) {
+	t.Setenv("KONTINUUM_ACME_EMAIL", "ops@example.com")
+	t.Setenv("KONTINUUM_ACME_SERVER", "https://acme-staging-v02.api.letsencrypt.org/directory")
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+
+	assert.Equal(t, "ops@example.com", cfg.ACME.Email)
+	assert.Equal(t, "https://acme-staging-v02.api.letsencrypt.org/directory", cfg.ACME.Server)
+}
+
+func TestLoadFallsBackToACMEDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+
+	assert.Empty(t, cfg.ACME.Email)
+	assert.Equal(t, "https://acme-v02.api.letsencrypt.org/directory", cfg.ACME.Server)
 }

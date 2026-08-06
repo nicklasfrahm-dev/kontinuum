@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,8 +16,10 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
@@ -136,6 +140,14 @@ func (s stubKontinuumLister) Delete(_ context.Context, _ client.Object, _ ...cli
 	return s.deleteErr
 }
 
+// zoneFactory is a fixed ui.ZoneClientFactory for tests that don't exercise
+// the "Join zone" form at all — none of the handlers under test here call
+// it, so an empty fake client is enough to satisfy ui.NewRouter's
+// constructor.
+func zoneFactory(context.Context) (client.Client, error) {
+	return fake.NewClientBuilder().Build(), nil
+}
+
 func newTestRequest(t *testing.T, target string) *http.Request {
 	t.Helper()
 
@@ -161,7 +173,8 @@ func TestHandleHomeRendersTenants(t *testing.T) {
 		return stubKontinuumLister{}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		config.Config{}, false, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -191,7 +204,8 @@ func TestHandleHomeReturnsServerErrorWhenFactoryFails(t *testing.T) {
 		return stubKontinuumLister{}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		config.Config{}, false, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -217,7 +231,8 @@ func TestRegisterRoutesUsesCustomAppRootAndProtect(t *testing.T) {
 		return stubKontinuumLister{}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		config.Config{}, false, nil)
 
 	appRootCalled := false
 	appRoot := func(http.ResponseWriter, *http.Request) { appRootCalled = true }
@@ -255,7 +270,8 @@ func TestRegisterRoutesServesVendoredStaticAssets(t *testing.T) {
 		return stubKontinuumLister{}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		config.Config{}, false, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -288,7 +304,8 @@ func TestHandleHomeShowsLogoutLinkOnlyWhenAuthEnabled(t *testing.T) {
 			return stubKontinuumLister{}, nil
 		}
 
-		router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, authEnabled, nil)
+		router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+			config.Config{}, authEnabled, nil)
 
 		mux := http.NewServeMux()
 		router.RegisterRoutes(mux, nil, nil)
@@ -344,7 +361,8 @@ func TestHandleInstanceDetailRendersInstanceSettings(t *testing.T) {
 		return stubKontinuumLister{items: []v1alpha2.Kontinuum{item}}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		config.Config{}, false, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -383,7 +401,8 @@ func TestHandleInstanceDetailHidesOIDCDetailsWhenInstanceOIDCDisabled(t *testing
 		return stubKontinuumLister{items: []v1alpha2.Kontinuum{item}}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		config.Config{}, false, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -411,7 +430,8 @@ func TestHandleInstanceDetailReturnsNotFoundForUnknownInstance(t *testing.T) {
 		return stubKontinuumLister{}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		config.Config{}, false, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -437,7 +457,8 @@ func TestHandleInstanceDetailReturnsServerErrorWhenFactoryFails(t *testing.T) {
 		return nil, errFactory
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		config.Config{}, false, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -481,7 +502,8 @@ func TestHandleInstanceDetailShowsConfigSecretDataReveal(t *testing.T) {
 		return stubKontinuumLister{items: []v1alpha2.Kontinuum{item}, secret: secret}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		config.Config{}, false, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -515,7 +537,8 @@ func TestHandleInstanceDetailHidesConfigSecretRevealWhenSecretRefEmpty(t *testin
 		return stubKontinuumLister{items: []v1alpha2.Kontinuum{item}}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		config.Config{}, false, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -551,7 +574,8 @@ func TestHandleInstanceDetailHidesConfigSecretRevealWhenSecretNotFound(t *testin
 		}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		config.Config{}, false, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -584,7 +608,8 @@ func TestHandleInstanceDetailReturnsBadGatewayWhenSecretGetFails(t *testing.T) {
 		return stubKontinuumLister{items: []v1alpha2.Kontinuum{item}, secretGetErr: errFactory}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		config.Config{}, false, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -630,7 +655,8 @@ func TestHandleSettingsShowsOIDCKubeconfigWhenAuthEnabled(t *testing.T) {
 		return stubKontinuumLister{}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, true, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		cfg, true, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -674,7 +700,8 @@ func TestHandleSettingsShowsNoAuthKubeconfigWhenOIDCDisabled(t *testing.T) {
 		return stubKontinuumLister{}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		config.Config{}, false, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -719,7 +746,8 @@ func TestHandleSettingsStripsPortFromKubeconfigClusterName(t *testing.T) {
 		return stubKontinuumLister{}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, true, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		cfg, true, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -761,7 +789,8 @@ func TestHandleSettingsSetsInsecureSkipTLSVerifyForLocalHostsOverHTTPS(t *testin
 			return stubKontinuumLister{}, nil
 		}
 
-		router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, true, nil)
+		router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+			cfg, true, nil)
 
 		mux := http.NewServeMux()
 		router.RegisterRoutes(mux, nil, nil)
@@ -804,7 +833,8 @@ func TestHandleSettingsOmitsInsecureSkipTLSVerifyForPlainHTTP(t *testing.T) {
 			return stubKontinuumLister{}, nil
 		}
 
-		router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, true, nil)
+		router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+			cfg, true, nil)
 
 		mux := http.NewServeMux()
 		router.RegisterRoutes(mux, nil, nil)
@@ -840,7 +870,8 @@ func TestHandleSettingsUsesForwardedProtoForKubeconfigOrigin(t *testing.T) {
 		return stubKontinuumLister{}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, true, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		cfg, true, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -893,7 +924,8 @@ func TestHandleIAMShowsAdminGroupBindings(t *testing.T) {
 		}}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, true, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		cfg, true, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -940,7 +972,8 @@ func TestHandleIAMInvalidatesSessionOnForbidden(t *testing.T) {
 	cfg := config.Config{}
 	cfg.OIDC.IssuerURL = testOIDCIssuerURL
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, true, invalidateSession)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		cfg, true, invalidateSession)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -967,7 +1000,8 @@ func TestHandleIAMShowsNoticeWhenOIDCDisabled(t *testing.T) {
 		return stubKontinuumLister{}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		config.Config{}, false, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -1000,7 +1034,8 @@ func TestHandleIAMShowsNoBindingsMessageWhenNoneExist(t *testing.T) {
 		return stubKontinuumLister{}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", cfg, true, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		cfg, true, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -1030,7 +1065,8 @@ func TestRegisterRoutesDefaultsToUnconditionalAppRedirect(t *testing.T) {
 		return stubKontinuumLister{}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		config.Config{}, false, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -1059,7 +1095,8 @@ func TestHandleRegistryRendersInstances(t *testing.T) {
 		}}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		config.Config{}, false, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -1089,7 +1126,8 @@ func TestHandleRegistryReturnsServerErrorWhenFactoryFails(t *testing.T) {
 		return nil, errFactory
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		config.Config{}, false, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -1126,7 +1164,8 @@ func assertForbiddenInvalidatesSession(
 		writer.WriteHeader(http.StatusFound)
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, invalidateSession)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		config.Config{}, false, invalidateSession)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -1165,7 +1204,8 @@ func TestHandleDeleteInstanceRemovesInstanceAndRerendersRegistry(t *testing.T) {
 		return stubKontinuumLister{}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		config.Config{}, false, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -1195,7 +1235,8 @@ func TestHandleDeleteInstanceReturnsBadGatewayOnFailure(t *testing.T) {
 		return stubKontinuumLister{deleteErr: errFactory}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, "test-version", config.Config{}, false, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		config.Config{}, false, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
@@ -1220,4 +1261,212 @@ func TestHandleDeleteInstanceInvalidatesSessionOnForbidden(t *testing.T) {
 	}
 
 	assertForbiddenInvalidatesSession(t, newTestDeleteRequest(t, "/app/kontinuums/demo"), kontinuumFactory)
+}
+
+// newTestZoneClient builds a real fake controller-runtime client with
+// kontinuum.sh/v1alpha2 registered, for tests that need handleZoneJoin's
+// pkg/domain/zone.Apply call to actually create objects.
+func newTestZoneClient(t *testing.T) client.Client {
+	t.Helper()
+
+	scheme := apiruntime.NewScheme()
+	require.NoError(t, v1alpha2.AddToScheme(scheme))
+
+	return fake.NewClientBuilder().WithScheme(scheme).Build()
+}
+
+// forbiddenZoneClient is a client.Client test double whose Create always
+// returns Forbidden — every other method falls through to the embedded nil
+// client.Client, which is fine: handleZoneJoin's only call through
+// pkg/domain/zone.Apply is a sequence of Create calls, and Apply stops at
+// the first error.
+type forbiddenZoneClient struct{ client.Client }
+
+func (forbiddenZoneClient) Create(context.Context, client.Object, ...client.CreateOption) error {
+	return apierrors.NewForbidden(schema.GroupResource{Group: v1alpha2.GroupName, Resource: "zones"}, "",
+		errTestForbidden)
+}
+
+func newTestZoneJoinRequest(t *testing.T, form url.Values) *http.Request {
+	t.Helper()
+
+	request := httptest.NewRequestWithContext(
+		context.Background(), http.MethodPost, "/app/zones/join", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	return request
+}
+
+func TestHandleZoneJoinFormRendersEmptyForm(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/zones/join"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "Join zone")
+}
+
+func TestHandleZoneJoinFormShowsCreatedBanner(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/zones/join?created=eu-eu-1a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "eu-eu-1a")
+}
+
+func TestHandleZoneJoinCreatesZoneAndRedirects(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	zoneClient := newTestZoneClient(t)
+	zonesFactory := func(context.Context) (client.Client, error) { return zoneClient, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "example.com", "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	form := url.Values{"region": {"eu"}, "zone": {"eu-1a"}, "talos-address": {"10.0.0.5"}}
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestZoneJoinRequest(t, form))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusSeeOther, resp.StatusCode)
+	assert.Equal(t, "/app/zones/join?created=eu-eu-1a", resp.Header.Get("Location"))
+
+	var got v1alpha2.Zone
+	require.NoError(t, zoneClient.Get(context.Background(), client.ObjectKey{Name: "eu-eu-1a"}, &got))
+	assert.Equal(t, "example.com", got.Spec.Domain)
+}
+
+func TestHandleZoneJoinRerendersFormOnValidationError(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	zonesFactory := func(context.Context) (client.Client, error) { return newTestZoneClient(t), nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "example.com", "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	// talos-address deliberately omitted — Apply's own validation rejects it.
+	form := url.Values{"region": {"eu"}, "zone": {"eu-1a"}}
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestZoneJoinRequest(t, form))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "talos-address")
+	// The submitted region/zone are preserved so the user doesn't retype them.
+	assert.Contains(t, string(body), `value="eu"`)
+}
+
+func TestHandleZoneJoinReturnsServerErrorWhenFactoryFails(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+	zonesFactory := func(context.Context) (client.Client, error) { return nil, errFactory }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "example.com", "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	form := url.Values{"region": {"eu"}, "zone": {"eu-1a"}, "talos-address": {"10.0.0.5"}}
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestZoneJoinRequest(t, form))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+}
+
+func TestHandleZoneJoinInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+	zonesFactory := func(context.Context) (client.Client, error) { return forbiddenZoneClient{}, nil }
+
+	var invalidatedWith string
+
+	invalidateSession := func(writer http.ResponseWriter, _ *http.Request, message string) {
+		invalidatedWith = message
+
+		writer.WriteHeader(http.StatusFound)
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "example.com", "test-version",
+		config.Config{}, false, invalidateSession)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	form := url.Values{"region": {"eu"}, "zone": {"eu-1a"}, "talos-address": {"10.0.0.5"}}
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestZoneJoinRequest(t, form))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusFound, resp.StatusCode)
+	assert.NotEmpty(t, invalidatedWith)
 }

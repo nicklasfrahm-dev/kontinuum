@@ -10,7 +10,7 @@ Kontinuum embeds [kommodity](https://github.com/kommodity-io/kommodity)'s `libka
 
 ## CLI
 
-`pkg/cli` holds the cobra command tree: `kontinuum serve` (start the server), `kontinuum version`, and `kontinuum config` (import/inspect configuration). `pkg/config` loads configuration from `KONTINUUM_`-prefixed environment variables, with CLI flags overriding it when explicitly set.
+`pkg/cli` holds the cobra command tree: `kontinuum serve` (start the server), `kontinuum version`, `kontinuum config` (import/inspect configuration), and `kontinuum zone join` (fan out a new zone's `Zone`/`Instance`/`InstancePool`/`TalosCluster` objects — see [Zone join](workflows/zone-join.md)). `pkg/config` loads configuration from `KONTINUUM_`-prefixed environment variables, with CLI flags overriding it when explicitly set.
 
 ## Domain controllers (`pkg/domain/`)
 
@@ -23,9 +23,10 @@ Each controller lives in its own package and owns one CRD's reconcile loop, per 
 | `instancepool` | Claims discovered `Instance`s into an `InstancePool` via `spec.selector`, up to `spec.replicas`, using a conditional (CAS) update so two pools can't claim the same instance. |
 | `taloscluster` | Bootstraps a Talos Kubernetes cluster from a control-plane `InstancePool` (and optional worker pools), then installs Cilium and cert-manager as addons. State machine driven by `status.conditions`. |
 | `addon` | Backs `taloscluster`'s Helm-based addon install and pod-health probing. |
+| `zone` | Once a zone's `TalosCluster` reports Ready, installs kontinuum's own downstream footprint into it: `kontinuum-system` namespace, `kontinuum-env` Secret/ConfigMap, `kontinuum` Deployment/Service, and a cert-manager-backed `ClusterIssuer`/`Gateway`/`Certificate`/`HTTPRoute` exposing that zone's own kontinuum-server. Also exports the shared `Zone`/`Instance`/`InstancePool`/`TalosCluster` fan-out logic `kontinuum zone join` (and, later, the UI's join form) both call into. |
 | `kms` | A dummy in-memory KMS server implementing Talos's disk-encryption KMS gRPC service, for local dev and integration tests — not for production use. |
 
-See [Cluster provisioning](workflows/cluster-provisioning.md) for the full instance → pool → cluster → addon flow, including a flow chart.
+See [Cluster provisioning](workflows/cluster-provisioning.md) for the full instance → pool → cluster → addon flow, including a flow chart, and [Zone join](workflows/zone-join.md) for how a zone's own kontinuum-server gets installed and registers back into the hub.
 
 ## Web UI (`pkg/ui`)
 

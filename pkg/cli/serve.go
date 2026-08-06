@@ -32,6 +32,7 @@ import (
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instancepool"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/registry"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/taloscluster"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/zone"
 	"github.com/nicklasfrahm/kontinuum/pkg/logging"
 	"github.com/nicklasfrahm/kontinuum/pkg/ui"
 )
@@ -231,6 +232,7 @@ func buildServer(
 
 	uiRouter := ui.NewRouter(
 		namespaceListerFactory(cfg.Server.Addr), kontinuumListerFactory(cfg.Server.Addr, scheme),
+		zoneClientFactory(cfg.Server.Addr, scheme), os.Getenv(domainEnvVar),
 		version, cfg.Redact(), oidcHandler != nil, invalidateSession)
 
 	registryOpts, err := registryOptions(cfg, logger, scheme)
@@ -244,7 +246,7 @@ func buildServer(
 		libkapi.WithLogger(logger),
 		libkapi.WithServerFactory(customHandlers(uiRouter, oidcHandler)),
 	}, authOpts, registryOpts, instanceOptions(logger), instancePoolOptions(logger), talosClusterOptions(logger),
-		addonOptions(logger), adminRBACOptions(cfg, logger))
+		addonOptions(logger), zoneOptions(cfg, logger), adminRBACOptions(cfg, logger))
 
 	// Storage is resolved against a background context so the backend
 	// is only torn down by Server.Shutdown, not by the signal context
@@ -364,6 +366,27 @@ func addonOptions(logger *slog.Logger) []libkapi.Option {
 	return []libkapi.Option{libkapi.WithController(controller)}
 }
 
+// zoneImage is the kontinuum container image zoneOptions deploys onto
+// every joined zone's downstream cluster — matches the image ci.yml pushes
+// (see .github/workflows/ci.yml), tagged with this repo's own build
+// version so a zone runs the exact same version its own hub does.
+const zoneImageRepo = "ghcr.io/nicklasfrahm/kontinuum"
+
+// zoneOptions builds the libkapi options that wire the Zone downstream-
+// install reconciler (see pkg/domain/zone) onto the Server. No
+// WithPostStartHook is needed — zones.kontinuum.sh's CRD is already
+// ensured by instanceOptions' own ensureCRDs call.
+func zoneOptions(cfg *config.Config, logger *slog.Logger) []libkapi.Option {
+	controller := zone.NewController(zone.Config{
+		Logger:     logger.With("component", "zone"),
+		ACMEEmail:  cfg.ACME.Email,
+		ACMEServer: cfg.ACME.Server,
+		Image:      zoneImageRepo + ":" + version,
+	})
+
+	return []libkapi.Option{libkapi.WithController(controller)}
+}
+
 // adminRBACOptions builds the libkapi options that wire the admin-group
 // RBAC reconciler (see pkg/domain/adminrbac) onto the Server: it keeps a
 // ClusterRoleBinding for every group in cfg.OIDC.AdminGroups pointing at a
@@ -439,6 +462,36 @@ func kontinuumListerFactory(addr string, scheme *runtime.Scheme) ui.KontinuumCli
 		c, err := ctrlclient.New(restCfg, ctrlclient.Options{Scheme: scheme})
 		if err != nil {
 			return nil, fmt.Errorf("failed to build in-process kontinuum client: %w", err)
+		}
+
+		return c, nil
+	}
+}
+
+// domainEnvVar is read directly from the environment, not through
+// pkg/config: it's used only by the UI's "Join zone" form, and — like
+// pkg/cli/zone's own identical constant — has no reason to be formal
+// server-side config (pkg/config.Load's env vars are all things `kontinuum
+// serve` itself needs to start; this is a value only ever handed to
+// pkg/domain/zone.Apply, same as the CLI's own --region/--zone flags).
+const domainEnvVar = "KONTINUUM_DOMAIN"
+
+// zoneClientFactory builds a ui.ZoneClientFactory that calls back into this
+// same server over loopback HTTP, authenticated as whatever identity ctx
+// carries — see kontinuumListerFactory, which this mirrors exactly except
+// for its return type: ui.ZoneClientFactory hands the raw client.Client
+// straight to pkg/domain/zone.Apply rather than a narrowed interface.
+func zoneClientFactory(addr string, scheme *runtime.Scheme) ui.ZoneClientFactory {
+	return func(ctx context.Context) (ctrlclient.Client, error) {
+		restCfg := &rest.Config{Host: localBaseURL(addr)}
+
+		if token := auth.TokenFromContext(ctx); token != "" {
+			restCfg.BearerToken = token
+		}
+
+		c, err := ctrlclient.New(restCfg, ctrlclient.Options{Scheme: scheme})
+		if err != nil {
+			return nil, fmt.Errorf("failed to build in-process zone client: %w", err)
 		}
 
 		return c, nil

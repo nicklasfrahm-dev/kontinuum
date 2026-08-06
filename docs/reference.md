@@ -29,6 +29,17 @@ See [Authentication](authentication.md) for how these interact and the server's 
 | `KONTINUUM_OIDC_ADMIN_GROUPS`        | Comma-delimited OIDC groups granted full (`system:masters`-equivalent) access                              | *(empty)*                   |
 | `KONTINUUM_INSECURE_ALLOW_ANONYMOUS` | Explicitly acknowledges anonymous access. Must be `true` to start with no OIDC issuer configured; mutually exclusive with `KONTINUUM_OIDC_ISSUER_URL`. | `false` |
 
+### Zones
+
+See [Zone join](workflows/zone-join.md) for how these are used.
+
+| Env var                 | Description                                                                                            | Default                                                         |
+| ------------------------ | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `KONTINUUM_ACME_EMAIL`  | ACME account email used when the `zone` controller creates a joined zone's cert-manager `ClusterIssuer` | *(empty)*                                                       |
+| `KONTINUUM_ACME_SERVER` | ACME directory URL used for the same `ClusterIssuer`                                                     | `https://acme-v02.api.letsencrypt.org/directory` (Let's Encrypt production) |
+
+`KONTINUUM_DOMAIN` is a related but separate case: it's read by the `kontinuum zone join` CLI itself, not by `kontinuum serve` — see [Zone join](workflows/zone-join.md) for why it isn't in the table above.
+
 Flags override environment variables when explicitly set:
 
 ```sh
@@ -48,7 +59,7 @@ All kinds below belong to the `kontinuum.sh/v1alpha2` API group/version (`kontin
 | Kind | Owning controller | Purpose |
 | --- | --- | --- |
 | `Kontinuum` | `pkg/domain/registry` | Self-registration record for a running kontinuum process — role, region/zone, version, heartbeat. |
-| `Zone` | — | Groups instances by availability zone. |
+| `Zone` | `pkg/domain/zone` | A single availability zone. Once its `TalosCluster` is Ready, installs kontinuum's downstream footprint (namespace, Deployment/Service, Gateway/Certificate) onto that zone's own cluster — see [Zone join](workflows/zone-join.md). |
 | `Instance` | `pkg/domain/instance` | A candidate machine, discovered over the Talos maintenance-mode API. |
 | `InstancePool` | `pkg/domain/instancepool` | Claims a set of `Instance`s matching a selector, up to `spec.replicas`. |
 | `TalosCluster` | `pkg/domain/taloscluster` | Bootstraps a Talos Kubernetes cluster from a control-plane `InstancePool` and optional worker pools. |

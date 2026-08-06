@@ -25,6 +25,7 @@ import (
 	"github.com/nicklasfrahm/kontinuum/pkg/auth"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/adminrbac"
+	zonedomain "github.com/nicklasfrahm/kontinuum/pkg/domain/zone"
 )
 
 // NamespaceLister is the subset of the Kubernetes API the UI needs to list
@@ -54,6 +55,14 @@ type KontinuumClient interface {
 // pattern.
 type KontinuumClientFactory func(ctx context.Context) (KontinuumClient, error)
 
+// ZoneClientFactory builds a client scoped to ctx for the "Join zone" form
+// — see NamespaceListerFactory for the same per-request-identity pattern.
+// Unlike KontinuumClient/NamespaceLister, this isn't narrowed to a small
+// interface: it's handed straight to pkg/domain/zone.Apply, the same
+// shared fan-out function kontinuum zone join calls, which itself expects
+// a full controller-runtime client.Client — see that function's own doc.
+type ZoneClientFactory func(ctx context.Context) (client.Client, error)
+
 // SessionInvalidator ends the caller's session and sends them back to the
 // login page with message shown as a human-readable error. Called when a
 // Kubernetes API request comes back Forbidden — a valid session cookie only
@@ -71,6 +80,7 @@ const (
 	pageHome     = "home"
 	pageRegistry = "registry"
 	pageInstance = "instance"
+	pageZoneJoin = "zone_join"
 	pageIAM      = "iam"
 	pageSettings = "settings"
 )
@@ -87,6 +97,7 @@ func mustParsePage(content ...string) *template.Template {
 		"templates/components/nav.html",
 		"templates/components/icon_tenants.html",
 		"templates/components/icon_registry.html",
+		"templates/components/icon_globe.html",
 		"templates/components/icon_shield.html",
 		"templates/components/icon_settings.html",
 		"templates/components/icon_logout.html",
@@ -103,6 +114,8 @@ func mustParsePage(content ...string) *template.Template {
 type Router struct {
 	namespacesFor     NamespaceListerFactory
 	kontinuumsFor     KontinuumClientFactory
+	zonesFor          ZoneClientFactory
+	domain            string
 	pages             map[string]*template.Template
 	version           string
 	cfg               config.Config
@@ -110,16 +123,21 @@ type Router struct {
 	invalidateSession SessionInvalidator
 }
 
-// NewRouter creates a new UI router backed by namespacesFor and
-// kontinuumsFor. cfg is shown on the settings page and is expected to
+// NewRouter creates a new UI router backed by namespacesFor, kontinuumsFor,
+// and zonesFor. cfg is shown on the settings page and is expected to
 // already be redacted (see config.Config.Redact) — Router does not redact it
-// itself. authEnabled shows or hides the nav's logout link; pass true only
-// when a /app/logout route is actually registered (see pkg/auth), since
-// otherwise the link would 404. invalidateSession may be nil (see
-// SessionInvalidator).
+// itself. domain populates the "Join zone" form's zones — it's
+// KONTINUUM_DOMAIN, read directly from the environment rather than through
+// pkg/config, since that env var is otherwise CLI-side only (see
+// pkg/cli/zone's identical reasoning); an empty domain still renders the
+// form, but submitting it fails the same CEL validation `kontinuum zone
+// join` would hit with no KONTINUUM_DOMAIN set. authEnabled shows or hides
+// the nav's logout link; pass true only when a /app/logout route is
+// actually registered (see pkg/auth), since otherwise the link would 404.
+// invalidateSession may be nil (see SessionInvalidator).
 func NewRouter(
-	namespacesFor NamespaceListerFactory, kontinuumsFor KontinuumClientFactory,
-	version string, cfg config.Config, authEnabled bool, invalidateSession SessionInvalidator,
+	namespacesFor NamespaceListerFactory, kontinuumsFor KontinuumClientFactory, zonesFor ZoneClientFactory,
+	domain, version string, cfg config.Config, authEnabled bool, invalidateSession SessionInvalidator,
 ) *Router {
 	pages := map[string]*template.Template{
 		pageHome: mustParsePage("templates/home_content.html"),
@@ -131,6 +149,7 @@ func NewRouter(
 			"templates/components/icon_eye_off.html", "templates/components/icon_copy.html",
 			"templates/components/icon_check.html", "templates/components/icon_key.html",
 			"templates/components/icon_info.html"),
+		pageZoneJoin: mustParsePage("templates/zone_join_content.html"),
 		pageIAM: mustParsePage("templates/iam_content.html",
 			"templates/components/icon_key.html", "templates/components/icon_info.html"),
 		pageSettings: mustParsePage("templates/settings_content.html",
@@ -142,6 +161,8 @@ func NewRouter(
 	return &Router{
 		namespacesFor:     namespacesFor,
 		kontinuumsFor:     kontinuumsFor,
+		zonesFor:          zonesFor,
+		domain:            domain,
 		pages:             pages,
 		version:           version,
 		cfg:               cfg,
@@ -184,6 +205,8 @@ func (r *Router) RegisterRoutes(
 	mux.HandleFunc("GET /app/kontinuums", protect(r.renderRegistry))
 	mux.HandleFunc("GET /app/kontinuums/{name}", protect(r.handleInstanceDetail))
 	mux.HandleFunc("DELETE /app/kontinuums/{name}", protect(r.handleDeleteInstance))
+	mux.HandleFunc("GET /app/zones/join", protect(r.handleZoneJoinForm))
+	mux.HandleFunc("POST /app/zones/join", protect(r.handleZoneJoin))
 	mux.HandleFunc("GET /app/iam", protect(r.handleIAM))
 	mux.HandleFunc("GET /app/settings", protect(r.handleSettings))
 }
@@ -372,6 +395,103 @@ func (r *Router) renderRegistry(writer http.ResponseWriter, request *http.Reques
 		"Instances":   instances,
 		"AuthEnabled": r.authEnabled,
 	})
+}
+
+// maxZoneJoinFormBytes bounds the "Join zone" form's request body — every
+// field is a short identifier/address, so this is generous, not tight.
+const maxZoneJoinFormBytes = 1 << 16
+
+// zoneJoinFormData is handleZoneJoinForm/handleZoneJoin's shared template
+// data shape — fields is the (possibly just-submitted) form state,
+// createdZone/formErr surface a just-completed submission's outcome.
+func (r *Router) zoneJoinFormData(fields zoneJoinFields, createdZone, formErr string) map[string]any {
+	return map[string]any{
+		"Title":             "Join zone",
+		"ActiveMenu":        "zones",
+		"Version":           r.version,
+		"AuthEnabled":       r.authEnabled,
+		"Region":            fields.region,
+		"Zone":              fields.zone,
+		"TalosAddress":      fields.talosAddress,
+		"TalosVersion":      fields.talosVersion,
+		"KubernetesVersion": fields.kubernetesVersion,
+		"CreatedZone":       createdZone,
+		"Error":             formErr,
+	}
+}
+
+// handleZoneJoinForm is GET /app/zones/join's handler — it renders an empty
+// join form, or a success banner for ?created=<name> (see handleZoneJoin's
+// post-submit redirect).
+func (r *Router) handleZoneJoinForm(writer http.ResponseWriter, request *http.Request) {
+	r.render(writer, pageZoneJoin, r.zoneJoinFormData(zoneJoinFields{}, request.URL.Query().Get("created"), ""))
+}
+
+// zoneJoinFields is "Join zone"'s parsed form fields.
+type zoneJoinFields struct {
+	region            string
+	zone              string
+	talosAddress      string
+	talosVersion      string
+	kubernetesVersion string
+}
+
+// handleZoneJoin is POST /app/zones/join's handler — it creates the
+// submitted zone's four hub-side objects via the same shared
+// pkg/domain/zone.Apply fan-out `kontinuum zone join` calls, so the CLI and
+// UI never construct these objects differently. On success it redirects
+// (303, so a page refresh doesn't resubmit the form) to a ?created=<name>
+// success banner; on failure it re-renders the form with the submitted
+// values preserved and an error message, so the user doesn't have to
+// retype everything to fix one field.
+func (r *Router) handleZoneJoin(writer http.ResponseWriter, request *http.Request) {
+	// Every field here is a short identifier/address, never a bulk upload —
+	// bound the body before ParseForm reads it into memory.
+	request.Body = http.MaxBytesReader(writer, request.Body, maxZoneJoinFormBytes)
+
+	err := request.ParseForm()
+	if err != nil {
+		http.Error(writer, "failed to parse form: "+err.Error(), http.StatusBadRequest)
+
+		return
+	}
+
+	fields := zoneJoinFields{
+		region:            request.PostFormValue("region"),
+		zone:              request.PostFormValue("zone"),
+		talosAddress:      request.PostFormValue("talos-address"),
+		talosVersion:      request.PostFormValue("talos-version"),
+		kubernetesVersion: request.PostFormValue("kubernetes-version"),
+	}
+
+	zones, err := r.zonesFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	createdZone, err := zonedomain.Apply(request.Context(), zones, zonedomain.JoinOptions{
+		Region:            fields.region,
+		Zone:              fields.zone,
+		Domain:            r.domain,
+		TalosAddress:      fields.talosAddress,
+		TalosVersion:      fields.talosVersion,
+		KubernetesVersion: fields.kubernetesVersion,
+	})
+	if err != nil {
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return
+		}
+
+		r.render(writer, pageZoneJoin, r.zoneJoinFormData(fields, "", err.Error()))
+
+		return
+	}
+
+	http.Redirect(writer, request, "/app/zones/join?created="+createdZone.Name, http.StatusSeeOther)
 }
 
 // handleInstanceDetail is GET /app/kontinuums/{name}'s handler — it shows one

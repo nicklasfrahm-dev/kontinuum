@@ -106,6 +106,8 @@ type KontinuumConfigStatus struct {
 	// otherwise. Mutually exclusive with OIDC.IssuerURL being set.
 	// +optional
 	InsecureAllowAnonymous string `default:"false" json:"insecureAllowAnonymous"`
+	// +optional
+	ACME KontinuumACMEConfigStatus `json:"acme"`
 }
 
 // KontinuumServerConfigStatus is pkg/config.ServerConfig, referenced
@@ -167,6 +169,21 @@ type KontinuumOIDCConfigStatus struct {
 	// access. Empty when Enabled is false.
 	// +optional
 	AdminGroups string `default:"" json:"adminGroups"`
+}
+
+// KontinuumACMEConfigStatus is pkg/config's ACME.Email/ACME.Server —
+// non-confidential, so (like Server/Log/OIDC) it's safe to show on every
+// registered Kontinuum's own status.config. Used by pkg/domain/zone when
+// creating a joined zone's cert-manager ClusterIssuer.
+type KontinuumACMEConfigStatus struct {
+	// Email is the ACME account email used when creating a zone's
+	// cert-manager ClusterIssuer.
+	// +optional
+	Email string `default:"" json:"email"`
+	// Server is the ACME directory URL. Defaults to Let's Encrypt
+	// production, not staging.
+	// +optional
+	Server string `default:"https://acme-v02.api.letsencrypt.org/directory" json:"server"`
 }
 
 // KontinuumSecretReference points to the Secret holding a Kontinuum's
