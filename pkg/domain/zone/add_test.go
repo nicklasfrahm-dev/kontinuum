@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -83,6 +84,45 @@ func TestAddCreatesAllFourObjects(t *testing.T) {
 
 	var cluster v1alpha2.TalosCluster
 	assert.NoError(t, hubClient.Get(t.Context(), client.ObjectKey{Name: testZoneName}, &cluster))
+}
+
+// TestAddSetsOwnerReferencesFromZoneToDependents covers the fan-out's own
+// ownership metadata: the seed Instance, InstancePool, and TalosCluster
+// are each owned by the created Zone. Nothing acts on this yet —
+// libkapi.WithGarbageCollector, which would cascade a Zone deletion to all
+// three, is deliberately not enabled (see pkg/cli/serve.go's own doc) —
+// but it's still correct, real metadata (kubectl tree already reads it),
+// and ready for whichever cleanup mechanism ends up using it.
+func TestAddSetsOwnerReferencesFromZoneToDependents(t *testing.T) {
+	t.Parallel()
+
+	hubClient := newHubFakeClient(t)
+
+	got, err := zone.Add(t.Context(), hubClient, testAddOptions())
+	require.NoError(t, err)
+
+	var instance v1alpha2.Instance
+	require.NoError(t, hubClient.Get(t.Context(), client.ObjectKey{Name: testZoneName + "-seed"}, &instance))
+	assertOwnedByZone(t, got, instance.OwnerReferences)
+
+	var pool v1alpha2.InstancePool
+	require.NoError(t, hubClient.Get(t.Context(), client.ObjectKey{Name: testZoneName}, &pool))
+	assertOwnedByZone(t, got, pool.OwnerReferences)
+
+	var cluster v1alpha2.TalosCluster
+	require.NoError(t, hubClient.Get(t.Context(), client.ObjectKey{Name: testZoneName}, &cluster))
+	assertOwnedByZone(t, got, cluster.OwnerReferences)
+}
+
+func assertOwnedByZone(t *testing.T, zoneObj *v1alpha2.Zone, refs []metav1.OwnerReference) {
+	t.Helper()
+
+	require.Len(t, refs, 1)
+	assert.Equal(t, "Zone", refs[0].Kind)
+	assert.Equal(t, zoneObj.Name, refs[0].Name)
+	assert.Equal(t, zoneObj.UID, refs[0].UID)
+	require.NotNil(t, refs[0].Controller)
+	assert.True(t, *refs[0].Controller)
 }
 
 func TestAddToleratesAlreadyAddedZone(t *testing.T) {

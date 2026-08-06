@@ -251,6 +251,18 @@ func buildServer(
 		return nil, err
 	}
 
+	// Deliberately not passing libkapi.WithGarbageCollector here, despite
+	// several domain controllers already setting owner references that
+	// assume something cascades on them (see pkg/domain/zone/add.go,
+	// pkg/domain/addon/resources.go, pkg/domain/taloscluster/secrets.go):
+	// enabling it took the whole controller manager down, repeatedly
+	// failing "conversion webhook for kontinuum.sh/v1alpha2, Kind=Kontinuum
+	// ... connection refused" — its own discovery/informer machinery
+	// appears to hit Kontinuum's v1alpha1/v1alpha2 conversion webhook
+	// (registered by registry.Controller.SetupWithManager) in a way this
+	// hasn't been root-caused yet. Revisit once that's understood; until
+	// then, owner references are correct metadata (kubectl tree already
+	// reads them) that nothing acts on.
 	opts := slices.Concat([]libkapi.Option{
 		libkapi.WithAddr(cfg.Server.Addr),
 		libkapi.WithStorage(cfg.Server.Storage),
