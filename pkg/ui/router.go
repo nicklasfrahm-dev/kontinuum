@@ -301,7 +301,11 @@ type zoneRow struct {
 	Region    string
 	Age       string
 	Condition string
-	Message   string
+	// ConditionOK is whether Condition's own status is True — the zones
+	// table's badge template colors on this rather than parsing Condition's
+	// "Type=Status" string back apart.
+	ConditionOK bool
+	Message     string
 }
 
 // handleDeleteInstance deletes the Kontinuum object named by the {name}
@@ -459,7 +463,8 @@ func (r *Router) listZoneRows(writer http.ResponseWriter, request *http.Request)
 
 		if cond := latestCondition(item.Status.Conditions); cond != nil {
 			row.Condition = cond.Type + "=" + string(cond.Status)
-			row.Message = cond.Message
+			row.ConditionOK = cond.Status == metav1.ConditionTrue
+			row.Message = capitalizeFirst(cond.Message)
 		}
 
 		rows = append(rows, row)

@@ -1119,6 +1119,26 @@ func TestHandleRegistryRendersInstances(t *testing.T) {
 	assert.Contains(t, string(body), "demo")
 }
 
+// zoneWithCondition builds a Zone fixture with a single Installed condition
+// — see TestHandleRegistryRendersZones' own use for exercising both the
+// True (green badge) and False (blue badge) rendering paths.
+func zoneWithCondition(
+	name, region, zoneName string, status metav1.ConditionStatus, reason, message string,
+) *v1alpha2.Zone {
+	return &v1alpha2.Zone{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec:       v1alpha2.ZoneSpec{Region: region, Zone: zoneName, Domain: "example.com"},
+		Status: v1alpha2.ZoneStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type: "Installed", Status: status, Reason: reason,
+					Message: message, LastTransitionTime: metav1.Now(),
+				},
+			},
+		},
+	}
+}
+
 func TestHandleRegistryRendersZones(t *testing.T) {
 	t.Parallel()
 
@@ -1130,20 +1150,11 @@ func TestHandleRegistryRendersZones(t *testing.T) {
 	scheme := apiruntime.NewScheme()
 	require.NoError(t, v1alpha2.AddToScheme(scheme))
 
-	zone := &v1alpha2.Zone{
-		ObjectMeta: metav1.ObjectMeta{Name: "eu-eu-1a"},
-		Spec:       v1alpha2.ZoneSpec{Region: "eu", Zone: "eu-1a", Domain: "example.com"},
-		Status: v1alpha2.ZoneStatus{
-			Conditions: []metav1.Condition{
-				{
-					Type: "Installed", Status: metav1.ConditionFalse, Reason: "WaitingForCertificate",
-					Message:            "waiting for cert-manager to issue eu-1a.eu.example.com's certificate",
-					LastTransitionTime: metav1.Now(),
-				},
-			},
-		},
-	}
-	zoneClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(zone).Build()
+	notReadyZone := zoneWithCondition("eu-eu-1a", "eu", "eu-1a", metav1.ConditionFalse, "WaitingForCertificate",
+		"waiting for cert-manager to issue eu-1a.eu.example.com's certificate")
+	readyZone := zoneWithCondition("eu-eu-1b", "eu", "eu-1b", metav1.ConditionTrue, "Installed",
+		"kontinuum-server installed")
+	zoneClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(notReadyZone, readyZone).Build()
 	zonesFactory := func(context.Context) (client.Client, error) { return zoneClient, nil }
 
 	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-version",
@@ -1166,7 +1177,10 @@ func TestHandleRegistryRendersZones(t *testing.T) {
 	assert.Contains(t, string(body), "eu-eu-1a")
 	assert.Contains(t, string(body), ">eu<")
 	assert.Contains(t, string(body), "Installed=False")
-	assert.Contains(t, string(body), "waiting for cert-manager to issue")
+	assert.Contains(t, string(body), "Waiting for cert-manager to issue",
+		"the condition message's first letter is capitalized")
+	assert.Contains(t, string(body), "bg-blue-900/40", "a False condition renders a blue badge")
+	assert.Contains(t, string(body), "bg-green-900/40", "a True condition renders a green badge")
 }
 
 func TestHandleRegistryReturnsBadGatewayWhenZoneListFails(t *testing.T) {
