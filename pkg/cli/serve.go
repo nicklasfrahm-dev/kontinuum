@@ -122,8 +122,19 @@ func runServe(cmd *cobra.Command, addr string, storage string) error {
 		logger.Info("Received signal, shutting down", "signal", sig.String())
 	}
 
-	cancel()
-
+	// Deliberately not cancel()ing ctx here: ListenAndServe derives its own
+	// internal runCtx from ctx, and libkapi's Server watches runCtx with a
+	// shutdown goroutine that closes the HTTP listener the moment it's
+	// canceled — independently of, and unsequenced with, Shutdown's own
+	// "stop the controller manager (running registry.Heartbeat, whose
+	// deregister call needs a live listener to reach itself over) → run
+	// pre-shutdown hooks → only then close the listener" ordering. Canceling
+	// ctx early raced that internal watcher ahead of Shutdown's own
+	// sequencing, closing the listener out from under an in-flight
+	// deregister call. Shutdown cancels the same underlying context itself,
+	// at the correct point in that sequence — nothing here needs to. The
+	// deferred cancel() above still runs once runServe returns, as a safety
+	// net, but by then Shutdown has already finished.
 	err = shutdownServer(server, logger)
 	if err != nil {
 		<-serveErr
