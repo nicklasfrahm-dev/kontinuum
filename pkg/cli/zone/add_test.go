@@ -42,20 +42,20 @@ func newFakeHubClient(t *testing.T, objects ...client.Object) client.Client {
 }
 
 func testCmd(out *bytes.Buffer) *cobra.Command {
-	cmd := &cobra.Command{Use: "join"}
+	cmd := &cobra.Command{Use: "add"}
 	cmd.SetOut(out)
 	cmd.SetContext(context.Background())
 
 	return cmd
 }
 
-func TestRunZoneJoinRequiresDomainEnv(t *testing.T) {
+func TestRunZoneAddRequiresDomainEnv(t *testing.T) {
 	t.Parallel()
 
 	buf := &bytes.Buffer{}
 	cmd := testCmd(buf)
 
-	err := zone.RunZoneJoin(cmd, zone.JoinFlags{Region: testRegion, Zone: testZone, TalosAddress: testTalosAddress},
+	err := zone.RunZoneAdd(cmd, zone.AddFlags{Region: testRegion, Zone: testZone, TalosAddress: testTalosAddress},
 		func(string, string) (client.Client, error) {
 			t.Fatal("hub client should not be built when KONTINUUM_DOMAIN is unset")
 
@@ -65,14 +65,14 @@ func TestRunZoneJoinRequiresDomainEnv(t *testing.T) {
 	assert.Contains(t, err.Error(), "KONTINUUM_DOMAIN")
 }
 
-func TestRunZoneJoinCreatesZoneObjects(t *testing.T) {
+func TestRunZoneAddCreatesZoneObjects(t *testing.T) {
 	t.Setenv("KONTINUUM_DOMAIN", testDomain)
 
 	hubClient := newFakeHubClient(t)
 	buf := &bytes.Buffer{}
 	cmd := testCmd(buf)
 
-	err := zone.RunZoneJoin(cmd, zone.JoinFlags{Region: testRegion, Zone: testZone, TalosAddress: testTalosAddress},
+	err := zone.RunZoneAdd(cmd, zone.AddFlags{Region: testRegion, Zone: testZone, TalosAddress: testTalosAddress},
 		func(string, string) (client.Client, error) { return hubClient, nil })
 	require.NoError(t, err)
 	assert.Contains(t, buf.String(), "Created zone")
@@ -82,21 +82,21 @@ func TestRunZoneJoinCreatesZoneObjects(t *testing.T) {
 	assert.Equal(t, testDomain, got.Spec.Domain)
 }
 
-func TestRunZoneJoinPropagatesHubClientBuildError(t *testing.T) {
+func TestRunZoneAddPropagatesHubClientBuildError(t *testing.T) {
 	t.Setenv("KONTINUUM_DOMAIN", testDomain)
 
 	cmd := testCmd(&bytes.Buffer{})
 
-	err := zone.RunZoneJoin(cmd, zone.JoinFlags{Region: testRegion, Zone: testZone, TalosAddress: testTalosAddress},
+	err := zone.RunZoneAdd(cmd, zone.AddFlags{Region: testRegion, Zone: testZone, TalosAddress: testTalosAddress},
 		func(string, string) (client.Client, error) { return nil, assert.AnError })
 	require.ErrorIs(t, err, assert.AnError)
 }
 
-func TestRunZoneJoinWaitReturnsOnceInstalled(t *testing.T) {
+func TestRunZoneAddWaitReturnsOnceInstalled(t *testing.T) {
 	t.Setenv("KONTINUUM_DOMAIN", testDomain)
 
 	name := testRegion + "-" + testZone
-	// Pre-seeded already-Installed Zone: RunZoneJoin's own Apply call is a
+	// Pre-seeded already-Installed Zone: RunZoneAdd's own Add call is a
 	// no-op AlreadyExists, and --wait's first poll (before it would ever
 	// need to wait on pollInterval's ticker) already observes Installed.
 	existing := &v1alpha2.Zone{
@@ -114,7 +114,7 @@ func TestRunZoneJoinWaitReturnsOnceInstalled(t *testing.T) {
 	buf := &bytes.Buffer{}
 	cmd := testCmd(buf)
 
-	err := zone.RunZoneJoin(cmd, zone.JoinFlags{
+	err := zone.RunZoneAdd(cmd, zone.AddFlags{
 		Region: testRegion, Zone: testZone, TalosAddress: testTalosAddress,
 		Wait: true, Timeout: time.Minute,
 	}, func(string, string) (client.Client, error) { return hubClient, nil })
@@ -122,14 +122,14 @@ func TestRunZoneJoinWaitReturnsOnceInstalled(t *testing.T) {
 	assert.Contains(t, buf.String(), "Installed")
 }
 
-func TestRunZoneJoinWaitTimesOut(t *testing.T) {
+func TestRunZoneAddWaitTimesOut(t *testing.T) {
 	t.Setenv("KONTINUUM_DOMAIN", testDomain)
 
 	hubClient := newFakeHubClient(t)
 	buf := &bytes.Buffer{}
 	cmd := testCmd(buf)
 
-	err := zone.RunZoneJoin(cmd, zone.JoinFlags{
+	err := zone.RunZoneAdd(cmd, zone.AddFlags{
 		Region: testRegion, Zone: testZone, TalosAddress: testTalosAddress,
 		Wait: true, Timeout: time.Millisecond,
 	}, func(string, string) (client.Client, error) { return hubClient, nil })

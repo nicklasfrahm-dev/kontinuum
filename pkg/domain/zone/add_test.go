@@ -16,7 +16,7 @@ import (
 )
 
 // fakeClientWithoutV1alpha2Scheme builds a client whose scheme can't
-// resolve any kontinuum.sh Kind — used to exercise Apply's non-AlreadyExists
+// resolve any kontinuum.sh Kind — used to exercise Add's non-AlreadyExists
 // error-wrapping path deterministically, without needing a real conflicting
 // object.
 func fakeClientWithoutV1alpha2Scheme(t *testing.T) client.Client {
@@ -28,8 +28,8 @@ func fakeClientWithoutV1alpha2Scheme(t *testing.T) client.Client {
 	return fake.NewClientBuilder().WithScheme(scheme).Build()
 }
 
-func testJoinOptions() zone.JoinOptions {
-	return zone.JoinOptions{
+func testAddOptions() zone.AddOptions {
+	return zone.AddOptions{
 		Region:       testRegion,
 		Zone:         testZone,
 		Domain:       testDomain,
@@ -37,10 +37,10 @@ func testJoinOptions() zone.JoinOptions {
 	}
 }
 
-func TestBuildJoinObjectsSharesNameAcrossZoneInstancePoolAndTalosCluster(t *testing.T) {
+func TestBuildAddObjectsSharesNameAcrossZoneInstancePoolAndTalosCluster(t *testing.T) {
 	t.Parallel()
 
-	zoneObj, instance, pool, cluster := zone.BuildJoinObjects(testJoinOptions())
+	zoneObj, instance, pool, cluster := zone.BuildAddObjects(testAddOptions())
 
 	assert.Equal(t, testZoneName, zoneObj.Name)
 	assert.Equal(t, testZoneName, pool.Name)
@@ -63,12 +63,12 @@ func TestBuildJoinObjectsSharesNameAcrossZoneInstancePoolAndTalosCluster(t *test
 	assert.Empty(t, cluster.Spec.Kubernetes.Version)
 }
 
-func TestApplyCreatesAllFourObjects(t *testing.T) {
+func TestAddCreatesAllFourObjects(t *testing.T) {
 	t.Parallel()
 
 	hubClient := newHubFakeClient(t)
 
-	got, err := zone.Apply(t.Context(), hubClient, testJoinOptions())
+	got, err := zone.Add(t.Context(), hubClient, testAddOptions())
 	require.NoError(t, err)
 	assert.Equal(t, testZoneName, got.Name)
 
@@ -85,47 +85,47 @@ func TestApplyCreatesAllFourObjects(t *testing.T) {
 	assert.NoError(t, hubClient.Get(t.Context(), client.ObjectKey{Name: testZoneName}, &cluster))
 }
 
-func TestApplyToleratesAlreadyJoinedZone(t *testing.T) {
+func TestAddToleratesAlreadyAddedZone(t *testing.T) {
 	t.Parallel()
 
 	hubClient := newHubFakeClient(t)
 
-	_, err := zone.Apply(t.Context(), hubClient, testJoinOptions())
+	_, err := zone.Add(t.Context(), hubClient, testAddOptions())
 	require.NoError(t, err)
 
-	_, err = zone.Apply(t.Context(), hubClient, testJoinOptions())
+	_, err = zone.Add(t.Context(), hubClient, testAddOptions())
 	require.NoError(t, err)
 }
 
-func TestApplyRejectsMissingRequiredFields(t *testing.T) {
+func TestAddRejectsMissingRequiredFields(t *testing.T) {
 	t.Parallel()
 
-	opts := testJoinOptions()
+	opts := testAddOptions()
 	opts.TalosAddress = ""
 
-	_, err := zone.Apply(t.Context(), newHubFakeClient(t), opts)
+	_, err := zone.Add(t.Context(), newHubFakeClient(t), opts)
 	require.Error(t, err)
 }
 
-func TestApplyRejectsInvalidRegionLabel(t *testing.T) {
+func TestAddRejectsInvalidRegionLabel(t *testing.T) {
 	t.Parallel()
 
-	opts := testJoinOptions()
+	opts := testAddOptions()
 	opts.Region = "Not A Valid Label!"
 
-	_, err := zone.Apply(t.Context(), newHubFakeClient(t), opts)
+	_, err := zone.Add(t.Context(), newHubFakeClient(t), opts)
 	require.Error(t, err)
 }
 
-func TestApplyPropagatesUnexpectedCreateError(t *testing.T) {
+func TestAddPropagatesUnexpectedCreateError(t *testing.T) {
 	t.Parallel()
 
 	// A hub client with no Zone/Instance/InstancePool/TalosCluster kinds
 	// registered in its scheme makes every Create fail with something
-	// other than AlreadyExists, exercising Apply's own error-wrapping path.
+	// other than AlreadyExists, exercising Add's own error-wrapping path.
 	hubClient := fakeClientWithoutV1alpha2Scheme(t)
 
-	_, err := zone.Apply(t.Context(), hubClient, testJoinOptions())
+	_, err := zone.Add(t.Context(), hubClient, testAddOptions())
 	require.Error(t, err)
 	assert.False(t, apierrors.IsAlreadyExists(err))
 }

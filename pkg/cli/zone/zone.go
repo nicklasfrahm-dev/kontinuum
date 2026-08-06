@@ -1,6 +1,6 @@
 // Package zone implements kontinuum's "zone" cobra command tree (currently
-// just "zone join"), which creates the hub-side objects that fan a new
-// zone out (see pkg/domain/zone's shared BuildJoinObjects/Apply).
+// just "zone add"), which creates the hub-side objects that fan a new
+// zone out (see pkg/domain/zone's shared BuildAddObjects/Add).
 package zone
 
 import (
@@ -14,7 +14,7 @@ func NewCmd() *cobra.Command {
 		Short: "Manage zones",
 	}
 
-	cmd.AddCommand(NewJoinCmd())
+	cmd.AddCommand(NewAddCmd())
 
 	return cmd
 }

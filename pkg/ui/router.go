@@ -9,6 +9,7 @@ import (
 	"embed"
 	"fmt"
 	"html/template"
+	"maps"
 	"net/http"
 	"sort"
 	"strings"
@@ -55,11 +56,11 @@ type KontinuumClient interface {
 // pattern.
 type KontinuumClientFactory func(ctx context.Context) (KontinuumClient, error)
 
-// ZoneClientFactory builds a client scoped to ctx for the "Join zone" form
+// ZoneClientFactory builds a client scoped to ctx for the "Add zone" form
 // — see NamespaceListerFactory for the same per-request-identity pattern.
 // Unlike KontinuumClient/NamespaceLister, this isn't narrowed to a small
-// interface: it's handed straight to pkg/domain/zone.Apply, the same
-// shared fan-out function kontinuum zone join calls, which itself expects
+// interface: it's handed straight to pkg/domain/zone.Add, the same
+// shared fan-out function kontinuum zone add calls, which itself expects
 // a full controller-runtime client.Client — see that function's own doc.
 type ZoneClientFactory func(ctx context.Context) (client.Client, error)
 
@@ -80,7 +81,6 @@ const (
 	pageHome     = "home"
 	pageRegistry = "registry"
 	pageInstance = "instance"
-	pageZoneJoin = "zone_join"
 	pageIAM      = "iam"
 	pageSettings = "settings"
 )
@@ -97,7 +97,6 @@ func mustParsePage(content ...string) *template.Template {
 		"templates/components/nav.html",
 		"templates/components/icon_tenants.html",
 		"templates/components/icon_registry.html",
-		"templates/components/icon_globe.html",
 		"templates/components/icon_shield.html",
 		"templates/components/icon_settings.html",
 		"templates/components/icon_logout.html",
@@ -126,12 +125,12 @@ type Router struct {
 // NewRouter creates a new UI router backed by namespacesFor, kontinuumsFor,
 // and zonesFor. cfg is shown on the settings page and is expected to
 // already be redacted (see config.Config.Redact) — Router does not redact it
-// itself. domain populates the "Join zone" form's zones — it's
+// itself. domain populates the "Add zone" form's zones — it's
 // KONTINUUM_DOMAIN, read directly from the environment rather than through
 // pkg/config, since that env var is otherwise CLI-side only (see
 // pkg/cli/zone's identical reasoning); an empty domain still renders the
 // form, but submitting it fails the same CEL validation `kontinuum zone
-// join` would hit with no KONTINUUM_DOMAIN set. authEnabled shows or hides
+// add` would hit with no KONTINUUM_DOMAIN set. authEnabled shows or hides
 // the nav's logout link; pass true only when a /app/logout route is
 // actually registered (see pkg/auth), since otherwise the link would 404.
 // invalidateSession may be nil (see SessionInvalidator).
@@ -142,14 +141,14 @@ func NewRouter(
 	pages := map[string]*template.Template{
 		pageHome: mustParsePage("templates/home_content.html"),
 		pageRegistry: mustParsePage("templates/registry_content.html",
-			"templates/components/icon_trash.html"),
+			"templates/components/icon_trash.html", "templates/components/icon_globe.html",
+			"templates/components/zone_add_modal.html"),
 		pageInstance: mustParsePage("templates/instance_content.html",
 			"templates/components/icon_server.html",
 			"templates/components/icon_chevron_left.html", "templates/components/icon_eye.html",
 			"templates/components/icon_eye_off.html", "templates/components/icon_copy.html",
 			"templates/components/icon_check.html", "templates/components/icon_key.html",
 			"templates/components/icon_info.html"),
-		pageZoneJoin: mustParsePage("templates/zone_join_content.html"),
 		pageIAM: mustParsePage("templates/iam_content.html",
 			"templates/components/icon_key.html", "templates/components/icon_info.html"),
 		pageSettings: mustParsePage("templates/settings_content.html",
@@ -205,8 +204,7 @@ func (r *Router) RegisterRoutes(
 	mux.HandleFunc("GET /app/kontinuums", protect(r.renderRegistry))
 	mux.HandleFunc("GET /app/kontinuums/{name}", protect(r.handleInstanceDetail))
 	mux.HandleFunc("DELETE /app/kontinuums/{name}", protect(r.handleDeleteInstance))
-	mux.HandleFunc("GET /app/zones/join", protect(r.handleZoneJoinForm))
-	mux.HandleFunc("POST /app/zones/join", protect(r.handleZoneJoin))
+	mux.HandleFunc("POST /app/zones/add", protect(r.handleZoneAdd))
 	mux.HandleFunc("GET /app/iam", protect(r.handleIAM))
 	mux.HandleFunc("GET /app/settings", protect(r.handleSettings))
 }
@@ -388,28 +386,35 @@ func (r *Router) renderRegistry(writer http.ResponseWriter, request *http.Reques
 
 	sort.Slice(instances, func(i, j int) bool { return instances[i].Name < instances[j].Name })
 
-	r.render(writer, pageRegistry, map[string]any{
+	data := map[string]any{
 		"Title":       "Registry",
 		"ActiveMenu":  "registry",
 		"Version":     r.version,
 		"Instances":   instances,
 		"AuthEnabled": r.authEnabled,
-	})
+	}
+
+	// The "Add zone" modal's own fragment data — always empty on a plain
+	// page load, since only a submission (see handleZoneAdd) ever carries
+	// a preserved/error/success state. Merged in here so the same
+	// "zone-add-modal-body" template works whether it's embedded on
+	// initial page load or swapped in on submit.
+	maps.Copy(data, r.zoneAddFormData(zoneAddFields{}, "", ""))
+
+	r.render(writer, pageRegistry, data)
 }
 
-// maxZoneJoinFormBytes bounds the "Join zone" form's request body — every
+// maxZoneAddFormBytes bounds the "Add zone" form's request body — every
 // field is a short identifier/address, so this is generous, not tight.
-const maxZoneJoinFormBytes = 1 << 16
+const maxZoneAddFormBytes = 1 << 16
 
-// zoneJoinFormData is handleZoneJoinForm/handleZoneJoin's shared template
-// data shape — fields is the (possibly just-submitted) form state,
-// createdZone/formErr surface a just-completed submission's outcome.
-func (r *Router) zoneJoinFormData(fields zoneJoinFields, createdZone, formErr string) map[string]any {
+// zoneAddFormData is the "zone-add-modal-body" fragment's template data —
+// fields is the (possibly just-submitted) form state, createdZone/formErr
+// surface a just-completed submission's outcome. Rendered three times: once
+// embedded in the registry page's own initial render (always empty — see
+// renderRegistry), and again by handleZoneAdd on every submission.
+func (r *Router) zoneAddFormData(fields zoneAddFields, createdZone, formErr string) map[string]any {
 	return map[string]any{
-		"Title":             "Join zone",
-		"ActiveMenu":        "zones",
-		"Version":           r.version,
-		"AuthEnabled":       r.authEnabled,
 		"Region":            fields.region,
 		"Zone":              fields.zone,
 		"TalosAddress":      fields.talosAddress,
@@ -420,15 +425,8 @@ func (r *Router) zoneJoinFormData(fields zoneJoinFields, createdZone, formErr st
 	}
 }
 
-// handleZoneJoinForm is GET /app/zones/join's handler — it renders an empty
-// join form, or a success banner for ?created=<name> (see handleZoneJoin's
-// post-submit redirect).
-func (r *Router) handleZoneJoinForm(writer http.ResponseWriter, request *http.Request) {
-	r.render(writer, pageZoneJoin, r.zoneJoinFormData(zoneJoinFields{}, request.URL.Query().Get("created"), ""))
-}
-
-// zoneJoinFields is "Join zone"'s parsed form fields.
-type zoneJoinFields struct {
+// zoneAddFields is "Add zone"'s parsed form fields.
+type zoneAddFields struct {
 	region            string
 	zone              string
 	talosAddress      string
@@ -436,18 +434,36 @@ type zoneJoinFields struct {
 	kubernetesVersion string
 }
 
-// handleZoneJoin is POST /app/zones/join's handler — it creates the
+// renderZoneAddModalBody renders just the "zone-add-modal-body" fragment
+// (not a full page via layout.html) — the registry page's own dialog swaps
+// #zone-add-modal-body's innerHTML with this on every form submission, so
+// the modal never navigates away from the registry page.
+func (r *Router) renderZoneAddModalBody(writer http.ResponseWriter, data map[string]any) {
+	var buf bytes.Buffer
+
+	err := r.pages[pageRegistry].ExecuteTemplate(&buf, "zone-add-modal-body", data)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = buf.WriteTo(writer)
+}
+
+// handleZoneAdd is POST /app/zones/add's handler — it creates the
 // submitted zone's four hub-side objects via the same shared
-// pkg/domain/zone.Apply fan-out `kontinuum zone join` calls, so the CLI and
-// UI never construct these objects differently. On success it redirects
-// (303, so a page refresh doesn't resubmit the form) to a ?created=<name>
-// success banner; on failure it re-renders the form with the submitted
-// values preserved and an error message, so the user doesn't have to
-// retype everything to fix one field.
-func (r *Router) handleZoneJoin(writer http.ResponseWriter, request *http.Request) {
+// pkg/domain/zone.Add fan-out `kontinuum zone add` calls, so the CLI and
+// UI never construct these objects differently. On success it swaps the
+// modal body to a success message; on failure it re-renders the form with
+// the submitted values preserved and an error message, so the user doesn't
+// have to retype everything to fix one field. Either way the response stays
+// a fragment — the registry page underneath is never navigated away from.
+func (r *Router) handleZoneAdd(writer http.ResponseWriter, request *http.Request) {
 	// Every field here is a short identifier/address, never a bulk upload —
 	// bound the body before ParseForm reads it into memory.
-	request.Body = http.MaxBytesReader(writer, request.Body, maxZoneJoinFormBytes)
+	request.Body = http.MaxBytesReader(writer, request.Body, maxZoneAddFormBytes)
 
 	err := request.ParseForm()
 	if err != nil {
@@ -456,7 +472,7 @@ func (r *Router) handleZoneJoin(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 
-	fields := zoneJoinFields{
+	fields := zoneAddFields{
 		region:            request.PostFormValue("region"),
 		zone:              request.PostFormValue("zone"),
 		talosAddress:      request.PostFormValue("talos-address"),
@@ -471,7 +487,7 @@ func (r *Router) handleZoneJoin(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 
-	createdZone, err := zonedomain.Apply(request.Context(), zones, zonedomain.JoinOptions{
+	createdZone, err := zonedomain.Add(request.Context(), zones, zonedomain.AddOptions{
 		Region:            fields.region,
 		Zone:              fields.zone,
 		Domain:            r.domain,
@@ -486,12 +502,12 @@ func (r *Router) handleZoneJoin(writer http.ResponseWriter, request *http.Reques
 			return
 		}
 
-		r.render(writer, pageZoneJoin, r.zoneJoinFormData(fields, "", err.Error()))
+		r.renderZoneAddModalBody(writer, r.zoneAddFormData(fields, "", err.Error()))
 
 		return
 	}
 
-	http.Redirect(writer, request, "/app/zones/join?created="+createdZone.Name, http.StatusSeeOther)
+	r.renderZoneAddModalBody(writer, r.zoneAddFormData(zoneAddFields{}, createdZone.Name, ""))
 }
 
 // handleInstanceDetail is GET /app/kontinuums/{name}'s handler — it shows one

@@ -50,7 +50,7 @@ nav:
   - Admin Guide:
       - Authentication: authentication.md
       - Cluster provisioning: workflows/cluster-provisioning.md
-      - Zone join: workflows/zone-join.md
+      - Add zone: workflows/zone-add.md
   - Developer guide:
       - Contribution guidelines: contributing.md
       - Local setup: local-setup.md

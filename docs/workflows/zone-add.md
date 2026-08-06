@@ -1,8 +1,8 @@
-# Zone join
+# Add zone
 
 The final phase of the incremental build-out described in
 [issue #24](https://github.com/nicklasfrahm-dev/kontinuum/issues/24):
-`kontinuum zone join` fans a new zone out into four hub-side objects, and
+`kontinuum zone add` fans a new zone out into four hub-side objects, and
 once that zone's own [`TalosCluster`](cluster-provisioning.md) reports
 `Ready`, the `zone` controller installs kontinuum's own footprint onto that
 downstream cluster — closing the loop by registering that zone's own
@@ -20,15 +20,15 @@ phase's own scope.
 ```sh
 export KUBECONFIG=kontinuum.yaml
 export KONTINUUM_DOMAIN=example.com
-kontinuum zone join --region eu --zone eu-1a --talos-address 10.0.0.5 --wait
+kontinuum zone add --region eu --zone eu-1a --talos-address 10.0.0.5 --wait
 ```
 
 Fans out a new zone's hub-side objects and, once its `TalosCluster` is bootstrapped, installs and exposes that zone's own kontinuum-server at `eu-1a.eu.example.com`. See [Configuration](../reference.md#zones) for `KONTINUUM_ACME_EMAIL`/`KONTINUUM_ACME_SERVER`, which the `zone` controller needs to issue that certificate.
 
 ## Stages
 
-1. **Fan-out** (`kontinuum zone join`, `pkg/domain/zone`'s shared
-   `BuildJoinObjects`/`Apply`) — creates four hub-side objects, all sharing
+1. **Fan-out** (`kontinuum zone add`, `pkg/domain/zone`'s shared
+   `BuildAddObjects`/`Add`) — creates four hub-side objects, all sharing
    one name, `<region>-<zone>`, except the seed `Instance` (`-seed`
    suffixed, since `Instance` is a distinct Kind with no naming collision
    risk): a `Zone`, the seed `Instance` (`spec.interfaces` from
@@ -64,7 +64,7 @@ A zone's `kontinuum-server` only "closes the loop" — registering itself as
 a worker `Kontinuum` the hub can see — if it's pointed at the *same*
 storage backend the hub itself uses (see issue #24's architecture: storage
 is a property of the deployment, not of role). Rather than have the
-operator pass a raw connection string through `zone join`, the `zone`
+operator pass a raw connection string through `zone add`, the `zone`
 controller finds it itself: **every** registered `Kontinuum` — hub or
 worker, it doesn't matter which — already upserts its own storage
 connection string into a Secret on every heartbeat
@@ -91,7 +91,7 @@ the `Certificate`'s own secret.
 The `Gateway`'s `gatewayClassName` is `"cilium"` — assumed already present
 on the downstream cluster from Cilium's own chart, not created by this
 controller. This is an unverified assumption worth checking with `kubectl
-get gatewayclass cilium` against a real joined zone; if it's ever missing,
+get gatewayclass cilium` against a real added zone; if it's ever missing,
 the `Gateway` simply never reports `Accepted`, which is a visible, easy to
 diagnose failure rather than a silent one.
 
@@ -106,13 +106,13 @@ for free the way it does for same-cluster owner references. See
 [issue #49](https://github.com/nicklasfrahm-dev/kontinuum/issues/49) for
 the planned follow-up: a finalizer-driven downstream cleanup, plus a Talos
 `Reset` of the seed node so it returns to maintenance mode and can be
-rejoined elsewhere.
+re-added elsewhere.
 
 ## Flow chart
 
 ```mermaid
 flowchart TD
-    Start([kontinuum zone join]) --> FanOut[Create Zone, seed Instance,\nInstancePool, TalosCluster]
+    Start([kontinuum zone add]) --> FanOut[Create Zone, seed Instance,\nInstancePool, TalosCluster]
     FanOut --> Bootstrap[Ordinary cluster provisioning\nsee Cluster provisioning]
 
     Bootstrap --> ClusterCheck{TalosCluster found\nand Ready?}

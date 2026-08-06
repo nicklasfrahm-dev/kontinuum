@@ -16,7 +16,7 @@ import (
 // against) — and builds a client.Client against whichever cluster
 // contextOverride names, or the kubeconfig's own current-context when
 // contextOverride is empty. This is new plumbing: unlike pkg/cli/config,
-// which only ever reads/writes a kubeconfig file, "zone join" needs a live
+// which only ever reads/writes a kubeconfig file, "zone add" needs a live
 // client against the hub apiserver that file points at.
 func buildHubClient(kubeconfigPath, contextOverride string) (client.Client, error) {
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()

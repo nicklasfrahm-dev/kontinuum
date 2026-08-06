@@ -13,11 +13,11 @@ import (
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 )
 
-// JoinOptions is zone-join's fan-out input — pkg/cli/zone's flags and (in a
-// later phase) pkg/ui's join form both parse straight onto this.
-type JoinOptions struct {
+// AddOptions is zone-add's fan-out input — pkg/cli/zone's flags and pkg/ui's
+// "Add zone" form both parse straight onto this.
+type AddOptions struct {
 	// Region and Zone identify the new zone — together they name every
-	// object BuildJoinObjects creates (see that function's own doc).
+	// object BuildAddObjects creates (see that function's own doc).
 	Region string
 	Zone   string
 	// Domain is this zone's own kontinuum-server's published domain — see
@@ -34,45 +34,45 @@ type JoinOptions struct {
 }
 
 var (
-	// errJoinOptionsMissingField is a static sentinel — err113 flags a
+	// errAddOptionsMissingField is a static sentinel — err113 flags a
 	// dynamically constructed errors.New/fmt.Errorf call without a wrapped
 	// static error.
-	errJoinOptionsMissingField = errors.New("zone join: missing required field")
-	// errJoinOptionsInvalidLabel is validateJoinOptions' sentinel for a
+	errAddOptionsMissingField = errors.New("zone add: missing required field")
+	// errAddOptionsInvalidLabel is validateAddOptions' sentinel for a
 	// Region/Zone value that can't be used as a DNS-1123 label component —
 	// both become part of an object name (<region>-<zone>) and a label
 	// value (v1alpha2.LabelRegion/LabelZone).
-	errJoinOptionsInvalidLabel = errors.New("zone join: invalid value")
+	errAddOptionsInvalidLabel = errors.New("zone add: invalid value")
 )
 
-// validateJoinOptions checks that every required field is set and that
+// validateAddOptions checks that every required field is set and that
 // Region/Zone are valid DNS-1123 label components.
-func validateJoinOptions(opts JoinOptions) error {
+func validateAddOptions(opts AddOptions) error {
 	for name, value := range map[string]string{
 		"region": opts.Region, "zone": opts.Zone, "domain": opts.Domain, "talos-address": opts.TalosAddress,
 	} {
 		if value == "" {
-			return fmt.Errorf("%w: %s", errJoinOptionsMissingField, name)
+			return fmt.Errorf("%w: %s", errAddOptionsMissingField, name)
 		}
 	}
 
 	for name, value := range map[string]string{"region": opts.Region, "zone": opts.Zone} {
 		if errs := validation.IsDNS1123Label(value); len(errs) > 0 {
-			return fmt.Errorf("%w: %s %q: %s", errJoinOptionsInvalidLabel, name, value, errs[0])
+			return fmt.Errorf("%w: %s %q: %s", errAddOptionsInvalidLabel, name, value, errs[0])
 		}
 	}
 
 	return nil
 }
 
-// joinObjectName is the shared name every one of BuildJoinObjects' four
+// addObjectName is the shared name every one of BuildAddObjects' four
 // objects gets — see that function's own doc.
-func joinObjectName(opts JoinOptions) string {
+func addObjectName(opts AddOptions) string {
 	return opts.Region + "-" + opts.Zone
 }
 
-// BuildJoinObjects builds (without creating) the four hub-side objects
-// zone-join fans out to — see issue #29's architecture: Zone, the seed
+// BuildAddObjects builds (without creating) the four hub-side objects
+// zone-add fans out to — see issue #29's architecture: Zone, the seed
 // Instance, a replicas:1 InstancePool selecting it, and a TalosCluster
 // whose control plane references that pool. Zone/InstancePool/TalosCluster
 // all share one name, <region>-<zone> — this is what lets the Zone
@@ -82,10 +82,10 @@ func joinObjectName(opts JoinOptions) string {
 // seed Instance gets its own name (suffixed -seed) since Instance is a
 // distinct Kind — no collision risk — but is labeled
 // v1alpha2.LabelRegion/LabelZone so the InstancePool's selector matches it.
-func BuildJoinObjects(
-	opts JoinOptions,
+func BuildAddObjects(
+	opts AddOptions,
 ) (*v1alpha2.Zone, *v1alpha2.Instance, *v1alpha2.InstancePool, *v1alpha2.TalosCluster) {
-	name := joinObjectName(opts)
+	name := addObjectName(opts)
 	labels := map[string]string{v1alpha2.LabelRegion: opts.Region, v1alpha2.LabelZone: opts.Zone}
 
 	zoneObj := &v1alpha2.Zone{
@@ -118,17 +118,17 @@ func BuildJoinObjects(
 	return zoneObj, instance, pool, cluster
 }
 
-// Apply validates opts and creates all four of BuildJoinObjects' objects on
+// Add validates opts and creates all four of BuildAddObjects' objects on
 // hubClient, in dependency order, tolerating AlreadyExists on each — safe
-// to re-run zone-join against a zone that's already joining or joined.
-// Returns the created (or already-existing) Zone.
-func Apply(ctx context.Context, hubClient client.Client, opts JoinOptions) (*v1alpha2.Zone, error) {
-	err := validateJoinOptions(opts)
+// to re-run zone-add against a zone that's already being added or already
+// exists. Returns the created (or already-existing) Zone.
+func Add(ctx context.Context, hubClient client.Client, opts AddOptions) (*v1alpha2.Zone, error) {
+	err := validateAddOptions(opts)
 	if err != nil {
 		return nil, err
 	}
 
-	zoneObj, instance, pool, cluster := BuildJoinObjects(opts)
+	zoneObj, instance, pool, cluster := BuildAddObjects(opts)
 
 	for _, obj := range []client.Object{zoneObj, instance, pool, cluster} {
 		err := hubClient.Create(ctx, obj)

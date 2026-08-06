@@ -1,13 +1,20 @@
 {{define "content"}}
 <div id="registry-content" hx-get="/app/kontinuums" hx-trigger="every 15s" hx-select="#registry-content" hx-swap="outerHTML">
-    <div class="mb-6 flex items-center gap-4">
-        <div class="text-accent [&>svg]:h-10 [&>svg]:w-10">
-            {{template "icon-registry"}}
+    <div class="mb-6 flex items-center justify-between gap-4">
+        <div class="flex items-center gap-4">
+            <div class="text-accent [&>svg]:h-10 [&>svg]:w-10">
+                {{template "icon-registry"}}
+            </div>
+            <div>
+                <h1 class="text-xl font-bold text-white">Registry</h1>
+                <p class="mt-1 text-sm text-neutral-500">Kontinuum instances registered in the server registry.</p>
+            </div>
         </div>
-        <div>
-            <h1 class="text-xl font-bold text-white">Registry</h1>
-            <p class="mt-1 text-sm text-neutral-500">Kontinuum instances registered in the server registry.</p>
-        </div>
+        <button type="button" onclick="openZoneAddModal()"
+                class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium uppercase tracking-wider rounded-lg bg-accent text-neutral-950 hover:bg-accent/90 transition-colors">
+            {{template "icon-globe"}}
+            Add zone
+        </button>
     </div>
 
     <div class="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
@@ -72,4 +79,36 @@
         {{end}}
     </div>
 </div>
+
+<!-- Deliberately outside #registry-content: that div's own 15s poll
+     (hx-swap="outerHTML" above) would otherwise wipe out an open dialog or
+     a form the user is mid-typing every time the instance list refreshes. -->
+{{template "zone-add-modal" .}}
+
+<script>
+    // Captured once, before any submission can mutate #zone-add-modal-body
+    // — restored on every open so a previous success/error state (or
+    // partially-filled form) never lingers into a fresh "Add zone" attempt.
+    var zoneAddModalPristineHTML = document.getElementById('zone-add-modal-body').innerHTML;
+
+    function openZoneAddModal() {
+        var body = document.getElementById('zone-add-modal-body');
+        body.innerHTML = zoneAddModalPristineHTML;
+        // Raw innerHTML assignment doesn't run through htmx's own swap
+        // pipeline, so the freshly-inserted <form>'s hx-post would
+        // otherwise never get bound — htmx.process wires it up exactly
+        // as if this had been a normal htmx-driven swap.
+        htmx.process(body);
+        document.getElementById('zone-add-modal').showModal();
+    }
+
+    // <dialog> has no built-in "click outside to close" — close only when
+    // the click lands on the dialog element itself (the backdrop area),
+    // not when it bubbles up from a click inside the dialog's own content.
+    document.getElementById('zone-add-modal').addEventListener('click', function (event) {
+        if (event.target === this) {
+            this.close();
+        }
+    });
+</script>
 {{end}}

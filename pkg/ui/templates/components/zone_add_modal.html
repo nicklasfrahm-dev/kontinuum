@@ -1,0 +1,84 @@
+{{/*
+    zone-add-modal is the registry page's own "Add zone" dialog — a
+    native <dialog> element, opened via the header button's
+    openZoneAddModal() (see registry_content.html's own script block) and
+    closed via Escape, a backdrop click, or the header's close button. It's
+    rendered once, outside #registry-content's own 15s poll (see
+    registry_content.html), so a refresh of the instance list never resets
+    or closes an in-progress submission.
+*/}}
+{{define "zone-add-modal"}}
+<dialog id="zone-add-modal" class="bg-neutral-900 border border-neutral-800 rounded-xl p-0 w-full max-w-lg text-neutral-100 backdrop:bg-black/60">
+    <div class="px-6 py-3 border-b border-neutral-800 flex items-center justify-between gap-2">
+        <h2 class="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+            <span class="text-accent [&>svg]:h-4 [&>svg]:w-4">{{template "icon-globe"}}</span>
+            Add zone
+        </h2>
+        <button type="button" onclick="this.closest('dialog').close()"
+                class="text-neutral-500 hover:text-white transition-colors text-lg leading-none" aria-label="Close">
+            &times;
+        </button>
+    </div>
+    <div id="zone-add-modal-body" class="p-6">
+        {{template "zone-add-modal-body" .}}
+    </div>
+</dialog>
+{{end}}
+
+{{/*
+    zone-add-modal-body is the swappable part of the dialog above —
+    handleZoneAdd's POST response replaces just #zone-add-modal-body's
+    innerHTML with this same template, executed directly (see
+    Router.renderZoneAddModalBody) rather than through layout.html.
+*/}}
+{{define "zone-add-modal-body"}}
+{{if .CreatedZone}}
+<div class="bg-accent/10 border border-accent/30 rounded-xl px-4 py-3 text-sm text-accent">
+    Created zone <span class="font-medium">{{.CreatedZone}}</span>. Cluster provisioning is now underway — check the zone's status with <code class="font-mono">kubectl get zone {{.CreatedZone}}</code>.
+</div>
+{{else}}
+{{if .Error}}
+<div class="mb-4 bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 text-sm text-red-400">
+    {{.Error}}
+</div>
+{{end}}
+<form hx-post="/app/zones/add" hx-target="#zone-add-modal-body" hx-swap="innerHTML" class="space-y-4">
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <label class="block">
+            <span class="text-xs uppercase tracking-wider text-neutral-500">Region</span>
+            <input type="text" name="region" value="{{.Region}}" required placeholder="eu"
+                   class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+        </label>
+        <label class="block">
+            <span class="text-xs uppercase tracking-wider text-neutral-500">Zone</span>
+            <input type="text" name="zone" value="{{.Zone}}" required placeholder="eu-1a"
+                   class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+        </label>
+    </div>
+    <label class="block">
+        <span class="text-xs uppercase tracking-wider text-neutral-500">Talos address</span>
+        <input type="text" name="talos-address" value="{{.TalosAddress}}" required placeholder="10.0.0.5"
+               class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+        <span class="mt-1 block text-xs text-neutral-600">Maintenance-mode address of the seed node.</span>
+    </label>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <label class="block">
+            <span class="text-xs uppercase tracking-wider text-neutral-500">Talos version</span>
+            <input type="text" name="talos-version" value="{{.TalosVersion}}" placeholder="defaulted"
+                   class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+        </label>
+        <label class="block">
+            <span class="text-xs uppercase tracking-wider text-neutral-500">Kubernetes version</span>
+            <input type="text" name="kubernetes-version" value="{{.KubernetesVersion}}" placeholder="defaulted"
+                   class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+        </label>
+    </div>
+    <div class="flex justify-end pt-2">
+        <button type="submit"
+                class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg bg-accent text-neutral-950 hover:bg-accent/90 transition-colors">
+            Add zone
+        </button>
+    </div>
+</form>
+{{end}}
+{{end}}

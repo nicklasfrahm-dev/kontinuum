@@ -469,11 +469,11 @@ func kontinuumListerFactory(addr string, scheme *runtime.Scheme) ui.KontinuumCli
 }
 
 // domainEnvVar is read directly from the environment, not through
-// pkg/config: it's used only by the UI's "Join zone" form, and — like
+// pkg/config: it's used only by the UI's "Add zone" form, and — like
 // pkg/cli/zone's own identical constant — has no reason to be formal
 // server-side config (pkg/config.Load's env vars are all things `kontinuum
 // serve` itself needs to start; this is a value only ever handed to
-// pkg/domain/zone.Apply, same as the CLI's own --region/--zone flags).
+// pkg/domain/zone.Add, same as the CLI's own --region/--zone flags).
 const domainEnvVar = "KONTINUUM_DOMAIN"
 
 // zoneClientFactory builds a ui.ZoneClientFactory that calls back into this

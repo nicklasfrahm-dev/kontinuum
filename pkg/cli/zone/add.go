@@ -15,7 +15,7 @@ import (
 // domainEnvVar is read directly from the operator's own shell environment,
 // not via pkg/config: pkg/config.Load is only ever called by `kontinuum
 // serve` (a hub/worker process reading its own server-side config); "zone
-// join" is a client-side command with no server config of its own, and
+// add" is a client-side command with no server config of its own, and
 // Zone.spec.domain's CEL validation requires a non-empty value at create
 // time, so it has to come from somewhere the CLI itself can read.
 const domainEnvVar = "KONTINUUM_DOMAIN"
@@ -24,10 +24,10 @@ const defaultWaitTimeout = 15 * time.Minute
 
 // errMissingDomainEnv is a static sentinel — err113 flags a dynamically
 // constructed errors.New/fmt.Errorf call without a wrapped static error.
-var errMissingDomainEnv = fmt.Errorf("%s must be set in the environment before running zone join", domainEnvVar)
+var errMissingDomainEnv = fmt.Errorf("%s must be set in the environment before running zone add", domainEnvVar)
 
-// JoinFlags is "zone join"'s parsed flag set.
-type JoinFlags struct {
+// AddFlags is "zone add"'s parsed flag set.
+type AddFlags struct {
 	Region            string
 	Zone              string
 	TalosAddress      string
@@ -39,18 +39,18 @@ type JoinFlags struct {
 	Timeout           time.Duration
 }
 
-// NewJoinCmd builds the "zone join" command.
-func NewJoinCmd() *cobra.Command {
-	flags := JoinFlags{Timeout: defaultWaitTimeout}
+// NewAddCmd builds the "zone add" command.
+func NewAddCmd() *cobra.Command {
+	flags := AddFlags{Timeout: defaultWaitTimeout}
 
 	cmd := &cobra.Command{
-		Use:   "join",
-		Short: "Join a new zone to this kontinuum control plane",
+		Use:   "add",
+		Short: "Add a new zone to this kontinuum control plane",
 		// Runtime errors (kubeconfig resolution, API errors) shouldn't
 		// print the command usage alongside the error.
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return RunZoneJoin(cmd, flags, buildHubClient)
+			return RunZoneAdd(cmd, flags, buildHubClient)
 		},
 	}
 
@@ -79,16 +79,16 @@ func NewJoinCmd() *cobra.Command {
 }
 
 // hubClientBuilder builds a client.Client against the hub apiserver — the
-// seam RunZoneJoin's tests inject a fake through, in place of the
+// seam RunZoneAdd's tests inject a fake through, in place of the
 // production buildHubClient.
 type hubClientBuilder func(kubeconfigPath, contextOverride string) (client.Client, error)
 
-// RunZoneJoin is "zone join"'s implementation: it reads KONTINUUM_DOMAIN
+// RunZoneAdd is "zone add"'s implementation: it reads KONTINUUM_DOMAIN
 // from the environment, builds a client against the hub apiserver, and
 // creates the zone's four hub-side objects via the shared
-// pkg/domain/zone.Apply fan-out — the same function a future UI join form
+// pkg/domain/zone.Add fan-out — the same function the UI's "Add zone" form
 // calls, so the two never construct these objects differently.
-func RunZoneJoin(cmd *cobra.Command, flags JoinFlags, buildClient hubClientBuilder) error {
+func RunZoneAdd(cmd *cobra.Command, flags AddFlags, buildClient hubClientBuilder) error {
 	domain := os.Getenv(domainEnvVar)
 	if domain == "" {
 		return errMissingDomainEnv
@@ -99,7 +99,7 @@ func RunZoneJoin(cmd *cobra.Command, flags JoinFlags, buildClient hubClientBuild
 		return err
 	}
 
-	createdZone, err := zonedomain.Apply(cmd.Context(), hubClient, zonedomain.JoinOptions{
+	createdZone, err := zonedomain.Add(cmd.Context(), hubClient, zonedomain.AddOptions{
 		Region:            flags.Region,
 		Zone:              flags.Zone,
 		Domain:            domain,
@@ -108,13 +108,13 @@ func RunZoneJoin(cmd *cobra.Command, flags JoinFlags, buildClient hubClientBuild
 		KubernetesVersion: flags.KubernetesVersion,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to join zone: %w", err)
+		return fmt.Errorf("failed to add zone: %w", err)
 	}
 
 	_, err = fmt.Fprintf(cmd.OutOrStdout(), "Created zone %q (region=%s zone=%s)\n",
 		createdZone.Name, flags.Region, flags.Zone)
 	if err != nil {
-		return fmt.Errorf("failed to print join result: %w", err)
+		return fmt.Errorf("failed to print add result: %w", err)
 	}
 
 	if !flags.Wait {

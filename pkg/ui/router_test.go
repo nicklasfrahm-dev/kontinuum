@@ -141,7 +141,7 @@ func (s stubKontinuumLister) Delete(_ context.Context, _ client.Object, _ ...cli
 }
 
 // zoneFactory is a fixed ui.ZoneClientFactory for tests that don't exercise
-// the "Join zone" form at all — none of the handlers under test here call
+// the "Add zone" form at all — none of the handlers under test here call
 // it, so an empty fake client is enough to satisfy ui.NewRouter's
 // constructor.
 func zoneFactory(context.Context) (client.Client, error) {
@@ -1264,8 +1264,8 @@ func TestHandleDeleteInstanceInvalidatesSessionOnForbidden(t *testing.T) {
 }
 
 // newTestZoneClient builds a real fake controller-runtime client with
-// kontinuum.sh/v1alpha2 registered, for tests that need handleZoneJoin's
-// pkg/domain/zone.Apply call to actually create objects.
+// kontinuum.sh/v1alpha2 registered, for tests that need handleZoneAdd's
+// pkg/domain/zone.Add call to actually create objects.
 func newTestZoneClient(t *testing.T) client.Client {
 	t.Helper()
 
@@ -1277,8 +1277,8 @@ func newTestZoneClient(t *testing.T) client.Client {
 
 // forbiddenZoneClient is a client.Client test double whose Create always
 // returns Forbidden — every other method falls through to the embedded nil
-// client.Client, which is fine: handleZoneJoin's only call through
-// pkg/domain/zone.Apply is a sequence of Create calls, and Apply stops at
+// client.Client, which is fine: handleZoneAdd's only call through
+// pkg/domain/zone.Add is a sequence of Create calls, and Apply stops at
 // the first error.
 type forbiddenZoneClient struct{ client.Client }
 
@@ -1287,20 +1287,22 @@ func (forbiddenZoneClient) Create(context.Context, client.Object, ...client.Crea
 		errTestForbidden)
 }
 
-func newTestZoneJoinRequest(t *testing.T, form url.Values) *http.Request {
+func newTestZoneAddRequest(t *testing.T, form url.Values) *http.Request {
 	t.Helper()
 
 	request := httptest.NewRequestWithContext(
-		context.Background(), http.MethodPost, "/app/zones/join", strings.NewReader(form.Encode()))
+		context.Background(), http.MethodPost, "/app/zones/add", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	return request
 }
 
-func TestHandleZoneJoinFormRendersEmptyForm(t *testing.T) {
+func TestRegistryPageEmbedsAddZoneButtonAndEmptyModal(t *testing.T) {
 	t.Parallel()
 
-	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
 
 	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
@@ -1310,7 +1312,7 @@ func TestHandleZoneJoinFormRendersEmptyForm(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/zones/join"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums"))
 
 	resp := recorder.Result()
 
@@ -1320,34 +1322,16 @@ func TestHandleZoneJoinFormRendersEmptyForm(t *testing.T) {
 
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	assert.Contains(t, string(body), "Join zone")
+	// The button that opens the modal, and the (always-empty on a plain
+	// page load) form itself, both embedded directly in the registry page
+	// — not a separate /app/zones/add page.
+	assert.Contains(t, string(body), "openZoneAddModal()")
+	assert.Contains(t, string(body), `id="zone-add-modal"`)
+	assert.Contains(t, string(body), `name="talos-address"`)
+	assert.NotContains(t, string(body), "Cluster provisioning is now underway")
 }
 
-func TestHandleZoneJoinFormShowsCreatedBanner(t *testing.T) {
-	t.Parallel()
-
-	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
-	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
-
-	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-domain", "test-version",
-		config.Config{}, false, nil)
-
-	mux := http.NewServeMux()
-	router.RegisterRoutes(mux, nil, nil)
-
-	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/zones/join?created=eu-eu-1a"))
-
-	resp := recorder.Result()
-
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	assert.Contains(t, string(body), "eu-eu-1a")
-}
-
-func TestHandleZoneJoinCreatesZoneAndRedirects(t *testing.T) {
+func TestHandleZoneAddCreatesZoneAndReturnsSuccessFragment(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
@@ -1365,21 +1349,27 @@ func TestHandleZoneJoinCreatesZoneAndRedirects(t *testing.T) {
 	form := url.Values{"region": {"eu"}, "zone": {"eu-1a"}, "talos-address": {"10.0.0.5"}}
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestZoneJoinRequest(t, form))
+	mux.ServeHTTP(recorder, newTestZoneAddRequest(t, form))
 
 	resp := recorder.Result()
 
 	defer func() { _ = resp.Body.Close() }()
 
-	require.Equal(t, http.StatusSeeOther, resp.StatusCode)
-	assert.Equal(t, "/app/zones/join?created=eu-eu-1a", resp.Header.Get("Location"))
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "eu-eu-1a")
+	// The form itself is gone from a success response — nothing left to
+	// resubmit.
+	assert.NotContains(t, string(body), `name="talos-address"`)
 
 	var got v1alpha2.Zone
 	require.NoError(t, zoneClient.Get(context.Background(), client.ObjectKey{Name: "eu-eu-1a"}, &got))
 	assert.Equal(t, "example.com", got.Spec.Domain)
 }
 
-func TestHandleZoneJoinRerendersFormOnValidationError(t *testing.T) {
+func TestHandleZoneAddRerendersFormOnValidationError(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
@@ -1393,11 +1383,11 @@ func TestHandleZoneJoinRerendersFormOnValidationError(t *testing.T) {
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
 
-	// talos-address deliberately omitted — Apply's own validation rejects it.
+	// talos-address deliberately omitted — Add's own validation rejects it.
 	form := url.Values{"region": {"eu"}, "zone": {"eu-1a"}}
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestZoneJoinRequest(t, form))
+	mux.ServeHTTP(recorder, newTestZoneAddRequest(t, form))
 
 	resp := recorder.Result()
 
@@ -1412,7 +1402,7 @@ func TestHandleZoneJoinRerendersFormOnValidationError(t *testing.T) {
 	assert.Contains(t, string(body), `value="eu"`)
 }
 
-func TestHandleZoneJoinReturnsServerErrorWhenFactoryFails(t *testing.T) {
+func TestHandleZoneAddReturnsServerErrorWhenFactoryFails(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
@@ -1428,7 +1418,7 @@ func TestHandleZoneJoinReturnsServerErrorWhenFactoryFails(t *testing.T) {
 	form := url.Values{"region": {"eu"}, "zone": {"eu-1a"}, "talos-address": {"10.0.0.5"}}
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestZoneJoinRequest(t, form))
+	mux.ServeHTTP(recorder, newTestZoneAddRequest(t, form))
 
 	resp := recorder.Result()
 
@@ -1437,7 +1427,7 @@ func TestHandleZoneJoinReturnsServerErrorWhenFactoryFails(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 }
 
-func TestHandleZoneJoinInvalidatesSessionOnForbidden(t *testing.T) {
+func TestHandleZoneAddInvalidatesSessionOnForbidden(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
@@ -1461,7 +1451,7 @@ func TestHandleZoneJoinInvalidatesSessionOnForbidden(t *testing.T) {
 	form := url.Values{"region": {"eu"}, "zone": {"eu-1a"}, "talos-address": {"10.0.0.5"}}
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestZoneJoinRequest(t, form))
+	mux.ServeHTTP(recorder, newTestZoneAddRequest(t, form))
 
 	resp := recorder.Result()
 

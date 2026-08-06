@@ -20,7 +20,7 @@ import (
 
 const (
 	// ClusterReadyConditionType is set true once the zone's own TalosCluster
-	// (found by name — see BuildJoinObjects) reports Ready — see
+	// (found by name — see BuildAddObjects) reports Ready — see
 	// ZoneStatus's own doc comment ("ClusterReady, Installed").
 	ClusterReadyConditionType = "ClusterReady"
 	// InstalledConditionType is set true once every downstream object this
@@ -113,7 +113,7 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 
 // mapTalosClusterToZone maps a TalosCluster change to exactly one Zone
 // reconcile request — the shared <region>-<zone> naming convention (see
-// BuildJoinObjects) means a TalosCluster named X can only ever be "owned"
+// BuildAddObjects) means a TalosCluster named X can only ever be "owned"
 // by a Zone also named X, so this is O(1), not a broad "enqueue every Zone"
 // scan. Safe even if no such Zone exists: Reconcile's own Get handles
 // NotFound.
