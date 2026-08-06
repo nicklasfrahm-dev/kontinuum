@@ -130,6 +130,23 @@ type KontinuumServerConfigStatus struct {
 	// Zone duplicates spec.zone — see this type's own doc.
 	// +optional
 	Zone string `default:"" json:"zone"`
+	// +optional
+	DNS KontinuumDNSConfigStatus `json:"dns"`
+}
+
+// KontinuumDNSConfigStatus groups DNS-related server config under its own
+// namespace, room to grow beyond just Domain later without crowding
+// KontinuumServerConfigStatus itself.
+type KontinuumDNSConfigStatus struct {
+	// Domain is the base domain a zone's own kontinuum-server is published
+	// under (<zone>.<region>.<domain> — see ZoneSpec.Domain's own doc). Not
+	// confidential, so — unlike Storage — it's published here directly
+	// rather than through the Secret KontinuumStatus.SecretRef points to:
+	// pkg/domain/zone's Add fan-out infers a new zone's own domain from
+	// this same field on any already-registered Kontinuum, exactly
+	// mirroring how it infers Storage from that Secret.
+	// +optional
+	Domain string `default:"" json:"domain"`
 }
 
 // KontinuumLogConfigStatus is pkg/config.LogConfig, referenced directly by

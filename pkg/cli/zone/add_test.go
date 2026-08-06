@@ -41,6 +41,24 @@ func newFakeHubClient(t *testing.T, objects ...client.Object) client.Client {
 		Build()
 }
 
+// registeredKontinuumWithDomain is a Kontinuum that's already published a
+// DNS domain on its own status.config.server.dns.domain — seeded into a
+// fake hub client so pkg/domain/zone.Add's own domain inference (see
+// AddOptions.Domain's doc) has something to find, the same way a real
+// hub's self-registration would provide it.
+func registeredKontinuumWithDomain(name, domain string) *v1alpha2.Kontinuum {
+	return &v1alpha2.Kontinuum{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Status: v1alpha2.KontinuumStatus{
+			Config: v1alpha2.KontinuumConfigStatus{
+				Server: v1alpha2.KontinuumServerConfigStatus{
+					DNS: v1alpha2.KontinuumDNSConfigStatus{Domain: domain},
+				},
+			},
+		},
+	}
+}
+
 func testCmd(out *bytes.Buffer) *cobra.Command {
 	cmd := &cobra.Command{Use: "add"}
 	cmd.SetOut(out)
@@ -49,26 +67,10 @@ func testCmd(out *bytes.Buffer) *cobra.Command {
 	return cmd
 }
 
-func TestRunZoneAddRequiresDomainEnv(t *testing.T) {
+func TestRunZoneAddCreatesZoneObjects(t *testing.T) {
 	t.Parallel()
 
-	buf := &bytes.Buffer{}
-	cmd := testCmd(buf)
-
-	err := zone.RunZoneAdd(cmd, zone.AddFlags{Region: testRegion, Zone: testZone, TalosAddress: testTalosAddress},
-		func(string, string) (client.Client, error) {
-			t.Fatal("hub client should not be built when KONTINUUM_DOMAIN is unset")
-
-			return nil, assert.AnError
-		})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "KONTINUUM_DOMAIN")
-}
-
-func TestRunZoneAddCreatesZoneObjects(t *testing.T) {
-	t.Setenv("KONTINUUM_DOMAIN", testDomain)
-
-	hubClient := newFakeHubClient(t)
+	hubClient := newFakeHubClient(t, registeredKontinuumWithDomain("hub", testDomain))
 	buf := &bytes.Buffer{}
 	cmd := testCmd(buf)
 
@@ -83,7 +85,7 @@ func TestRunZoneAddCreatesZoneObjects(t *testing.T) {
 }
 
 func TestRunZoneAddPropagatesHubClientBuildError(t *testing.T) {
-	t.Setenv("KONTINUUM_DOMAIN", testDomain)
+	t.Parallel()
 
 	cmd := testCmd(&bytes.Buffer{})
 
@@ -92,8 +94,22 @@ func TestRunZoneAddPropagatesHubClientBuildError(t *testing.T) {
 	require.ErrorIs(t, err, assert.AnError)
 }
 
+func TestRunZoneAddPropagatesDomainInferenceError(t *testing.T) {
+	t.Parallel()
+
+	// No registered Kontinuum at all — Add has nothing to infer a domain
+	// from.
+	hubClient := newFakeHubClient(t)
+	cmd := testCmd(&bytes.Buffer{})
+
+	err := zone.RunZoneAdd(cmd, zone.AddFlags{Region: testRegion, Zone: testZone, TalosAddress: testTalosAddress},
+		func(string, string) (client.Client, error) { return hubClient, nil })
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "infer domain")
+}
+
 func TestRunZoneAddWaitReturnsOnceInstalled(t *testing.T) {
-	t.Setenv("KONTINUUM_DOMAIN", testDomain)
+	t.Parallel()
 
 	name := testRegion + "-" + testZone
 	// Pre-seeded already-Installed Zone: RunZoneAdd's own Add call is a
@@ -110,7 +126,7 @@ func TestRunZoneAddWaitReturnsOnceInstalled(t *testing.T) {
 		},
 	}
 
-	hubClient := newFakeHubClient(t, existing)
+	hubClient := newFakeHubClient(t, existing, registeredKontinuumWithDomain("hub", testDomain))
 	buf := &bytes.Buffer{}
 	cmd := testCmd(buf)
 
@@ -123,9 +139,9 @@ func TestRunZoneAddWaitReturnsOnceInstalled(t *testing.T) {
 }
 
 func TestRunZoneAddWaitTimesOut(t *testing.T) {
-	t.Setenv("KONTINUUM_DOMAIN", testDomain)
+	t.Parallel()
 
-	hubClient := newFakeHubClient(t)
+	hubClient := newFakeHubClient(t, registeredKontinuumWithDomain("hub", testDomain))
 	buf := &bytes.Buffer{}
 	cmd := testCmd(buf)
 

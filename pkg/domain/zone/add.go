@@ -22,6 +22,11 @@ type AddOptions struct {
 	Zone   string
 	// Domain is this zone's own kontinuum-server's published domain — see
 	// ZoneSpec.Domain's own doc for the <zone>.<region>.<domain> format.
+	// Optional: left empty, Add infers it from any already-registered
+	// Kontinuum's own published KONTINUUM_SERVER_DNS_DOMAIN (see
+	// findKontinuumDomain) — exactly mirroring how the zone controller
+	// itself infers the downstream storage connection string, rather than
+	// requiring every caller to know or supply it.
 	Domain string
 	// TalosAddress is the seed Instance's spec.interfaces[0] — the address
 	// the instance discovery controller dials in Talos maintenance mode.
@@ -46,10 +51,12 @@ var (
 )
 
 // validateAddOptions checks that every required field is set and that
-// Region/Zone are valid DNS-1123 label components.
+// Region/Zone are valid DNS-1123 label components. Domain is deliberately
+// not checked here — see its own doc for why it's optional at this point,
+// inferred later by Add if still empty.
 func validateAddOptions(opts AddOptions) error {
 	for name, value := range map[string]string{
-		"region": opts.Region, "zone": opts.Zone, "domain": opts.Domain, "talos-address": opts.TalosAddress,
+		"region": opts.Region, "zone": opts.Zone, "talos-address": opts.TalosAddress,
 	} {
 		if value == "" {
 			return fmt.Errorf("%w: %s", errAddOptionsMissingField, name)
@@ -118,14 +125,24 @@ func BuildAddObjects(
 	return zoneObj, instance, pool, cluster
 }
 
-// Add validates opts and creates all four of BuildAddObjects' objects on
-// hubClient, in dependency order, tolerating AlreadyExists on each — safe
-// to re-run zone-add against a zone that's already being added or already
-// exists. Returns the created (or already-existing) Zone.
+// Add validates opts, infers opts.Domain when left empty, and creates all
+// four of BuildAddObjects' objects on hubClient, in dependency order,
+// tolerating AlreadyExists on each — safe to re-run zone-add against a
+// zone that's already being added or already exists. Returns the created
+// (or already-existing) Zone.
 func Add(ctx context.Context, hubClient client.Client, opts AddOptions) (*v1alpha2.Zone, error) {
 	err := validateAddOptions(opts)
 	if err != nil {
 		return nil, err
+	}
+
+	if opts.Domain == "" {
+		domain, err := findKontinuumDomain(ctx, hubClient)
+		if err != nil {
+			return nil, fmt.Errorf("failed to infer domain: %w", err)
+		}
+
+		opts.Domain = domain
 	}
 
 	zoneObj, instance, pool, cluster := BuildAddObjects(opts)

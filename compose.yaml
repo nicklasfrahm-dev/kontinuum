@@ -35,6 +35,7 @@ services:
       KONTINUUM_SERVER_STORAGE: "postgres://kontinuum:kontinuum@postgres:5432/kontinuum?sslmode=disable"
       KONTINUUM_LOG_LEVEL: "info"
       KONTINUUM_LOG_FORMAT: "console"
+      KONTINUUM_SERVER_DNS_DOMAIN: "kontinuum.localhost"
       GOTOOLCHAIN: auto
     depends_on:
       postgres:

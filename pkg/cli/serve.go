@@ -243,7 +243,7 @@ func buildServer(
 
 	uiRouter := ui.NewRouter(
 		namespaceListerFactory(cfg.Server.Addr), kontinuumListerFactory(cfg.Server.Addr, scheme),
-		zoneClientFactory(cfg.Server.Addr, scheme), os.Getenv(domainEnvVar),
+		zoneClientFactory(cfg.Server.Addr, scheme),
 		version, cfg.Redact(), oidcHandler != nil, invalidateSession)
 
 	registryOpts, err := registryOptions(cfg, logger, scheme)
@@ -479,19 +479,11 @@ func kontinuumListerFactory(addr string, scheme *runtime.Scheme) ui.KontinuumCli
 	}
 }
 
-// domainEnvVar is read directly from the environment, not through
-// pkg/config: it's used only by the UI's "Add zone" form, and — like
-// pkg/cli/zone's own identical constant — has no reason to be formal
-// server-side config (pkg/config.Load's env vars are all things `kontinuum
-// serve` itself needs to start; this is a value only ever handed to
-// pkg/domain/zone.Add, same as the CLI's own --region/--zone flags).
-const domainEnvVar = "KONTINUUM_DOMAIN"
-
 // zoneClientFactory builds a ui.ZoneClientFactory that calls back into this
 // same server over loopback HTTP, authenticated as whatever identity ctx
 // carries — see kontinuumListerFactory, which this mirrors exactly except
 // for its return type: ui.ZoneClientFactory hands the raw client.Client
-// straight to pkg/domain/zone.Apply rather than a narrowed interface.
+// straight to pkg/domain/zone.Add rather than a narrowed interface.
 func zoneClientFactory(addr string, scheme *runtime.Scheme) ui.ZoneClientFactory {
 	return func(ctx context.Context) (ctrlclient.Client, error) {
 		restCfg := &rest.Config{Host: localBaseURL(addr)}

@@ -3,7 +3,6 @@ package zone
 import (
 	"errors"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -12,19 +11,7 @@ import (
 	zonedomain "github.com/nicklasfrahm/kontinuum/pkg/domain/zone"
 )
 
-// domainEnvVar is read directly from the operator's own shell environment,
-// not via pkg/config: pkg/config.Load is only ever called by `kontinuum
-// serve` (a hub/worker process reading its own server-side config); "zone
-// add" is a client-side command with no server config of its own, and
-// Zone.spec.domain's CEL validation requires a non-empty value at create
-// time, so it has to come from somewhere the CLI itself can read.
-const domainEnvVar = "KONTINUUM_DOMAIN"
-
 const defaultWaitTimeout = 15 * time.Minute
-
-// errMissingDomainEnv is a static sentinel — err113 flags a dynamically
-// constructed errors.New/fmt.Errorf call without a wrapped static error.
-var errMissingDomainEnv = fmt.Errorf("%s must be set in the environment before running zone add", domainEnvVar)
 
 // AddFlags is "zone add"'s parsed flag set.
 type AddFlags struct {
@@ -83,17 +70,14 @@ func NewAddCmd() *cobra.Command {
 // production buildHubClient.
 type hubClientBuilder func(kubeconfigPath, contextOverride string) (client.Client, error)
 
-// RunZoneAdd is "zone add"'s implementation: it reads KONTINUUM_DOMAIN
-// from the environment, builds a client against the hub apiserver, and
-// creates the zone's four hub-side objects via the shared
-// pkg/domain/zone.Add fan-out — the same function the UI's "Add zone" form
-// calls, so the two never construct these objects differently.
+// RunZoneAdd is "zone add"'s implementation: it builds a client against
+// the hub apiserver and creates the zone's four hub-side objects via the
+// shared pkg/domain/zone.Add fan-out — the same function the UI's "Add
+// zone" form calls, so the two never construct these objects differently.
+// Domain is left for Add itself to infer from an already-registered
+// Kontinuum (see zonedomain.AddOptions.Domain's own doc) — the CLI has no
+// domain of its own to supply.
 func RunZoneAdd(cmd *cobra.Command, flags AddFlags, buildClient hubClientBuilder) error {
-	domain := os.Getenv(domainEnvVar)
-	if domain == "" {
-		return errMissingDomainEnv
-	}
-
 	hubClient, err := buildClient(flags.Kubeconfig, flags.Context)
 	if err != nil {
 		return err
@@ -102,7 +86,6 @@ func RunZoneAdd(cmd *cobra.Command, flags AddFlags, buildClient hubClientBuilder
 	createdZone, err := zonedomain.Add(cmd.Context(), hubClient, zonedomain.AddOptions{
 		Region:            flags.Region,
 		Zone:              flags.Zone,
-		Domain:            domain,
 		TalosAddress:      flags.TalosAddress,
 		TalosVersion:      flags.TalosVersion,
 		KubernetesVersion: flags.KubernetesVersion,

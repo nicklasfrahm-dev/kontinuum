@@ -17,13 +17,18 @@ phase's own scope.
 
 ## Try it
 
+The hub needs `KONTINUUM_SERVER_DNS_DOMAIN` set once (e.g. in its own
+`compose.yaml`/environment) — `zone add` never passes a domain itself, it
+infers it from any already-registered `Kontinuum`'s published config, the
+same way it infers the storage connection string (see
+[Configuration](../reference.md#zones)):
+
 ```sh
 export KUBECONFIG=kontinuum.yaml
-export KONTINUUM_DOMAIN=example.com
 kontinuum zone add --region eu --zone eu-1a --talos-address 10.0.0.5 --wait
 ```
 
-Fans out a new zone's hub-side objects and, once its `TalosCluster` is bootstrapped, installs and exposes that zone's own kontinuum-server at `eu-1a.eu.example.com`. See [Configuration](../reference.md#zones) for `KONTINUUM_ACME_EMAIL`/`KONTINUUM_ACME_SERVER`, which the `zone` controller needs to issue that certificate.
+Fans out a new zone's hub-side objects and, once its `TalosCluster` is bootstrapped, installs and exposes that zone's own kontinuum-server at `eu-1a.eu.example.com` (assuming the hub's `KONTINUUM_SERVER_DNS_DOMAIN` is `example.com`). See [Configuration](../reference.md#zones) for `KONTINUUM_ACME_EMAIL`/`KONTINUUM_ACME_SERVER`, which the `zone` controller needs to issue that certificate.
 
 ## Stages
 

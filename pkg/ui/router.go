@@ -114,7 +114,6 @@ type Router struct {
 	namespacesFor     NamespaceListerFactory
 	kontinuumsFor     KontinuumClientFactory
 	zonesFor          ZoneClientFactory
-	domain            string
 	pages             map[string]*template.Template
 	version           string
 	cfg               config.Config
@@ -125,18 +124,16 @@ type Router struct {
 // NewRouter creates a new UI router backed by namespacesFor, kontinuumsFor,
 // and zonesFor. cfg is shown on the settings page and is expected to
 // already be redacted (see config.Config.Redact) — Router does not redact it
-// itself. domain populates the "Add zone" form's zones — it's
-// KONTINUUM_DOMAIN, read directly from the environment rather than through
-// pkg/config, since that env var is otherwise CLI-side only (see
-// pkg/cli/zone's identical reasoning); an empty domain still renders the
-// form, but submitting it fails the same CEL validation `kontinuum zone
-// add` would hit with no KONTINUUM_DOMAIN set. authEnabled shows or hides
-// the nav's logout link; pass true only when a /app/logout route is
-// actually registered (see pkg/auth), since otherwise the link would 404.
-// invalidateSession may be nil (see SessionInvalidator).
+// itself. The "Add zone" form leaves zonedomain.AddOptions.Domain empty for
+// pkg/domain/zone.Add to infer from an already-registered Kontinuum — see
+// that field's own doc — rather than this Router needing a domain of its
+// own. authEnabled shows or hides the nav's logout link; pass true only
+// when a /app/logout route is actually registered (see pkg/auth), since
+// otherwise the link would 404. invalidateSession may be nil (see
+// SessionInvalidator).
 func NewRouter(
 	namespacesFor NamespaceListerFactory, kontinuumsFor KontinuumClientFactory, zonesFor ZoneClientFactory,
-	domain, version string, cfg config.Config, authEnabled bool, invalidateSession SessionInvalidator,
+	version string, cfg config.Config, authEnabled bool, invalidateSession SessionInvalidator,
 ) *Router {
 	pages := map[string]*template.Template{
 		pageHome: mustParsePage("templates/home_content.html"),
@@ -161,7 +158,6 @@ func NewRouter(
 		namespacesFor:     namespacesFor,
 		kontinuumsFor:     kontinuumsFor,
 		zonesFor:          zonesFor,
-		domain:            domain,
 		pages:             pages,
 		version:           version,
 		cfg:               cfg,
@@ -576,7 +572,6 @@ func (r *Router) handleZoneAdd(writer http.ResponseWriter, request *http.Request
 	createdZone, err := zonedomain.Add(request.Context(), zones, zonedomain.AddOptions{
 		Region:            fields.region,
 		Zone:              fields.zone,
-		Domain:            r.domain,
 		TalosAddress:      fields.talosAddress,
 		TalosVersion:      fields.talosVersion,
 		KubernetesVersion: fields.kubernetesVersion,

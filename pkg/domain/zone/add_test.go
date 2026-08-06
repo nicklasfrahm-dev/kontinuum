@@ -129,3 +129,64 @@ func TestAddPropagatesUnexpectedCreateError(t *testing.T) {
 	require.Error(t, err)
 	assert.False(t, apierrors.IsAlreadyExists(err))
 }
+
+func TestAddInfersDomainFromRegisteredKontinuumWhenUnset(t *testing.T) {
+	t.Parallel()
+
+	kontinuum, kontinuumSecret := registeredKontinuum("hub", testStorage)
+	kontinuum.Status.Config.Server.DNS.Domain = testDomain
+
+	hubClient := newHubFakeClient(t, kontinuum, kontinuumSecret)
+
+	opts := testAddOptions()
+	opts.Domain = ""
+
+	got, err := zone.Add(t.Context(), hubClient, opts)
+	require.NoError(t, err)
+	assert.Equal(t, testDomain, got.Spec.Domain)
+}
+
+func TestAddPrefersExplicitDomainOverInference(t *testing.T) {
+	t.Parallel()
+
+	kontinuum, kontinuumSecret := registeredKontinuum("hub", testStorage)
+	kontinuum.Status.Config.Server.DNS.Domain = "inferred.example.com"
+
+	hubClient := newHubFakeClient(t, kontinuum, kontinuumSecret)
+
+	opts := testAddOptions()
+	opts.Domain = "explicit.example.com"
+
+	got, err := zone.Add(t.Context(), hubClient, opts)
+	require.NoError(t, err)
+	assert.Equal(t, "explicit.example.com", got.Spec.Domain)
+}
+
+func TestAddFailsWhenNoRegisteredKontinuumPublishesDomain(t *testing.T) {
+	t.Parallel()
+
+	// A Kontinuum is registered, but hasn't set KONTINUUM_SERVER_DNS_DOMAIN
+	// — nothing for inference to find.
+	kontinuum, kontinuumSecret := registeredKontinuum("hub", testStorage)
+	hubClient := newHubFakeClient(t, kontinuum, kontinuumSecret)
+
+	opts := testAddOptions()
+	opts.Domain = ""
+
+	_, err := zone.Add(t.Context(), hubClient, opts)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no registered kontinuum publishes a DNS domain")
+}
+
+func TestAddFailsWhenNoKontinuumRegisteredAtAllForDomainInference(t *testing.T) {
+	t.Parallel()
+
+	hubClient := newHubFakeClient(t)
+
+	opts := testAddOptions()
+	opts.Domain = ""
+
+	_, err := zone.Add(t.Context(), hubClient, opts)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no registered kontinuum found")
+}

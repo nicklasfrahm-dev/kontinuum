@@ -33,12 +33,13 @@ See [Authentication](authentication.md) for how these interact and the server's 
 
 See [Add zone](workflows/zone-add.md) for how these are used.
 
-| Env var                 | Description                                                                                            | Default                                                         |
-| ------------------------ | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `KONTINUUM_ACME_EMAIL`  | ACME account email used when the `zone` controller creates a joined zone's cert-manager `ClusterIssuer` | *(empty)*                                                       |
-| `KONTINUUM_ACME_SERVER` | ACME directory URL used for the same `ClusterIssuer`                                                     | `https://acme-v02.api.letsencrypt.org/directory` (Let's Encrypt production) |
+| Env var                        | Description                                                                                            | Default                                                         |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `KONTINUUM_SERVER_DNS_DOMAIN`  | Base domain a zone's own kontinuum-server is published under (`<zone>.<region>.<domain>`)                | *(empty)*                                                       |
+| `KONTINUUM_ACME_EMAIL`         | ACME account email used when the `zone` controller creates a joined zone's cert-manager `ClusterIssuer` | *(empty)*                                                       |
+| `KONTINUUM_ACME_SERVER`        | ACME directory URL used for the same `ClusterIssuer`                                                     | `https://acme-v02.api.letsencrypt.org/directory` (Let's Encrypt production) |
 
-`KONTINUUM_DOMAIN` is a related but separate case: it's read by the `kontinuum zone add` CLI itself, not by `kontinuum serve` — see [Add zone](workflows/zone-add.md) for why it isn't in the table above.
+Set `KONTINUUM_SERVER_DNS_DOMAIN` once, on the hub (or any instance sharing its storage) — `kontinuum zone add` never needs its own copy: it infers the domain from any already-registered `Kontinuum`'s own published config, the same way it infers the storage connection string. See [Add zone](workflows/zone-add.md) for the full mechanism.
 
 Flags override environment variables when explicitly set:
 
