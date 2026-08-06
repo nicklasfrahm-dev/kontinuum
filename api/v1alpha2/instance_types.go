@@ -40,8 +40,13 @@ type InstanceInterfaceStatus struct {
 // status.talos — currently just Version, but the natural home for
 // anything else Talos itself reports about this Instance later.
 type InstanceTalosStatus struct {
-	// Version is the Talos version this Instance reported while being
-	// probed.
+	// Version is the Talos version this Instance reported. Left empty by
+	// maintenance-mode discovery itself — current Talos releases reject the
+	// maintenance-mode Version RPC for any caller without an admin identity,
+	// which no not-yet-configured node can present — and instead populated
+	// later, once this Instance is claimed by a TalosCluster and its own
+	// config-apply gives it a real one (see pkg/domain/taloscluster's
+	// recordTalosVersions).
 	// +optional
 	Version string `json:"version"`
 }
