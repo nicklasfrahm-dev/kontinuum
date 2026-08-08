@@ -27,7 +27,7 @@ require (
 	github.com/lmittmann/tint v1.2.0
 	github.com/moby/moby/api v1.55.0
 	github.com/siderolabs/kms-client v0.2.0
-	github.com/siderolabs/talos/pkg/machinery v1.13.6
+	github.com/siderolabs/talos/pkg/machinery v1.13.7
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go v0.43.0
