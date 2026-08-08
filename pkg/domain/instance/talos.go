@@ -62,14 +62,22 @@ func (talosDiscoverer) Discover(
 	}
 	defer talosClient.Close() //nolint:errcheck // best-effort close of a short-lived discovery connection
 
-	versionResp, err := talosClient.Version(ctx)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to fetch talos version from %s: %w", endpoint, err)
-	}
-
+	// Version is best-effort: recent Talos releases gate the maintenance-mode
+	// Version RPC behind an os:admin role check (see
+	// internal/app/maintenance/server.go's assertAdminRole in siderolabs/talos),
+	// which no maintenance-mode caller can ever satisfy — there's no CA yet to
+	// issue that role's client cert from. Every other maintenance-mode caller,
+	// including talosctl itself, hits the same "API is not implemented in
+	// maintenance mode" error, so failing discovery over it would make
+	// candidates on affected Talos versions permanently undiscoverable. The
+	// version becomes known once the node is actually provisioned instead.
 	talosVersion := ""
-	if messages := versionResp.GetMessages(); len(messages) > 0 {
-		talosVersion = messages[0].GetVersion().GetTag()
+
+	versionResp, err := talosClient.Version(ctx)
+	if err == nil {
+		if messages := versionResp.GetMessages(); len(messages) > 0 {
+			talosVersion = messages[0].GetVersion().GetTag()
+		}
 	}
 
 	interfaces, err := discoverInterfaces(ctx, talosClient)

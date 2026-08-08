@@ -103,6 +103,8 @@ type TalosClusterStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
 // +kubebuilder:printcolumn:name="ControlPlanePool",type="string",JSONPath=".spec.controlPlane.poolRef.name"
+// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].status"
+// +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].reason"
 
 // TalosCluster represents one zone's real, Talos-bootstrapped Kubernetes
 // cluster — see issue #24's architecture decision 1/5. No controller is

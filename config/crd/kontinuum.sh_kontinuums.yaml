@@ -182,6 +182,24 @@ spec:
                   holds before that redaction — see pkg/cli/serve.go's displayConfig,
                   the one place that redaction happens.
                 properties:
+                  acme:
+                    description: |-
+                      KontinuumACMEConfigStatus is pkg/config's ACME.Email/ACME.Server —
+                      non-confidential, so (like Server/Log/OIDC) it's safe to show on every
+                      registered Kontinuum's own status.config. Used by pkg/domain/zone when
+                      creating a joined zone's cert-manager ClusterIssuer.
+                    properties:
+                      email:
+                        description: |-
+                          Email is the ACME account email used when creating a zone's
+                          cert-manager ClusterIssuer.
+                        type: string
+                      server:
+                        description: |-
+                          Server is the ACME directory URL. Defaults to Let's Encrypt
+                          production, not staging.
+                        type: string
+                    type: object
                   insecureAllowAnonymous:
                     description: |-
                       InsecureAllowAnonymous must be explicitly set to "true" to start the
@@ -243,6 +261,23 @@ spec:
                         description: Addr is the listener address this process is
                           serving on.
                         type: string
+                      dns:
+                        description: |-
+                          KontinuumDNSConfigStatus groups DNS-related server config under its own
+                          namespace, room to grow beyond just Domain later without crowding
+                          KontinuumServerConfigStatus itself.
+                        properties:
+                          domain:
+                            description: |-
+                              Domain is the base domain a zone's own kontinuum-server is published
+                              under (<zone>.<region>.<domain> — see ZoneSpec.Domain's own doc). Not
+                              confidential, so — unlike Storage — it's published here directly
+                              rather than through the Secret KontinuumStatus.SecretRef points to:
+                              pkg/domain/zone's Add fan-out infers a new zone's own domain from
+                              this same field on any already-registered Kontinuum, exactly
+                              mirroring how it infers Storage from that Secret.
+                            type: string
+                        type: object
                       region:
                         description: Region duplicates spec.region — see this type's
                           own doc.

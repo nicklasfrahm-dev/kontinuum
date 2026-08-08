@@ -125,12 +125,15 @@ func generateConfigs(
 }
 
 // configBytes generates and encodes machineType's machine config from
-// input.
+// input, with its install disk left to Talos's own auto-selection — see
+// applyAutoInstallDiskSelector's own doc.
 func configBytes(input *generate.Input, machineType machine.Type) ([]byte, error) {
 	provider, err := input.Config(machineType)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate %s config: %w", machineType, err)
 	}
+
+	applyAutoInstallDiskSelector(provider)
 
 	data, err := provider.Bytes()
 	if err != nil {
@@ -138,4 +141,24 @@ func configBytes(input *generate.Input, machineType machine.Type) ([]byte, error
 	}
 
 	return data, nil
+}
+
+// applyAutoInstallDiskSelector sets an empty InstallDiskSelector on
+// provider's generated config, letting Talos pick the install disk itself
+// instead of requiring one hardcoded up front — this repo has no idea what
+// a given bare-metal/VM candidate's disks are named (/dev/sda, /dev/vda,
+// /dev/nvme0n1, ...) at config-generation time, and generate.NewInput's own
+// options only cover a fixed InstallDisk path (generate.WithInstallDisk),
+// never a selector. Left unset entirely (generate.NewInput's own default),
+// Talos's own config validation rejects the result outright the moment a
+// real, non-container node (mode.RequiresInstall() — see
+// v1alpha1_validation.go) tries to apply it: "either install disk or
+// diskSelector should be defined". An InstallDiskSelector with every field
+// left zero isn't a no-op, either — Talos's own DiskMatchExpression (see
+// siderolabs/talos's InstallConfig) always excludes read-only disks and
+// CD-ROMs regardless, then installs to the first disk still matching; this
+// is Talos's own built-in "any disk" mechanism, not a kontinuum-specific
+// workaround.
+func applyAutoInstallDiskSelector(provider talosconfig.Provider) {
+	provider.RawV1Alpha1().MachineConfig.MachineInstall.InstallDiskSelector = &v1alpha1.InstallDiskSelector{}
 }

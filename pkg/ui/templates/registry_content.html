@@ -1,18 +1,25 @@
 {{define "content"}}
 <div id="registry-content" hx-get="/app/kontinuums" hx-trigger="every 15s" hx-select="#registry-content" hx-swap="outerHTML">
-    <div class="mb-6 flex items-center gap-4">
-        <div class="text-accent [&>svg]:h-10 [&>svg]:w-10">
-            {{template "icon-registry"}}
+    <div class="mb-6 flex items-center justify-between gap-4">
+        <div class="flex items-center gap-4">
+            <div class="text-accent [&>svg]:h-10 [&>svg]:w-10">
+                {{template "icon-registry"}}
+            </div>
+            <div>
+                <h1 class="text-xl font-bold text-white">Registry</h1>
+                <p class="mt-1 text-sm text-neutral-500">Kontinuum instances registered in the server registry.</p>
+            </div>
         </div>
-        <div>
-            <h1 class="text-xl font-bold text-white">Registry</h1>
-            <p class="mt-1 text-sm text-neutral-500">Kontinuum instances registered in the server registry.</p>
-        </div>
+        <button type="button" onclick="openZoneAddModal()"
+                class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium uppercase tracking-wider rounded-lg bg-accent text-neutral-950 hover:bg-accent/90 transition-colors">
+            {{template "icon-globe"}}
+            Add zone
+        </button>
     </div>
 
     <div class="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
         <div class="px-6 py-3 border-b border-neutral-800">
-            <h2 class="text-sm font-bold text-white uppercase tracking-wider">All Instances <span class="text-neutral-500">{{len .Instances}}</span></h2>
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider">Kontinuum Instances <span class="text-neutral-500">{{len .Instances}}</span></h2>
         </div>
 
         {{if .Instances}}
@@ -71,5 +78,83 @@
         </div>
         {{end}}
     </div>
+
+    <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+        <div class="px-6 py-3 border-b border-neutral-800">
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider">Zones <span class="text-neutral-500">{{len .Zones}}</span></h2>
+        </div>
+
+        {{if .Zones}}
+        <table class="w-full">
+            <thead>
+                <tr class="border-b border-neutral-800">
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Region</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Name</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Condition</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Message</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Age</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .Zones}}
+                <tr class="border-b border-neutral-800 last:border-b-0 hover:bg-neutral-800/50 transition-colors">
+                    <td class="px-6 py-2 text-sm text-neutral-400">{{if .Region}}{{.Region}}{{else}}-{{end}}</td>
+                    <td class="px-6 py-2 text-sm font-medium text-white">{{.Name}}</td>
+                    <td class="px-6 py-2">
+                        {{if .Condition}}
+                        {{if .ConditionOK}}
+                        <span class="inline-flex items-center gap-1.5 bg-green-900/40 border border-green-700 rounded-full px-2.5 py-1 text-xs font-medium text-green-300">{{.Condition}}</span>
+                        {{else}}
+                        <span class="inline-flex items-center gap-1.5 bg-blue-900/40 border border-blue-700 rounded-full px-2.5 py-1 text-xs font-medium text-blue-300">{{.Condition}}</span>
+                        {{end}}
+                        {{else}}
+                        <span class="text-sm text-neutral-400">-</span>
+                        {{end}}
+                    </td>
+                    <td class="px-6 py-2 text-sm text-neutral-400">{{if .Message}}{{.Message}}{{else}}-{{end}}</td>
+                    <td class="px-6 py-2 text-sm text-neutral-400">{{.Age}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+        {{else}}
+        <div class="px-6 py-16 text-center">
+            <h3 class="text-sm font-bold text-white uppercase tracking-wider">No zones found</h3>
+            <p class="mt-2 text-sm text-neutral-500">No zones have been added yet.</p>
+        </div>
+        {{end}}
+    </div>
 </div>
+
+<!-- Deliberately outside #registry-content: that div's own 15s poll
+     (hx-swap="outerHTML" above) would otherwise wipe out an open dialog or
+     a form the user is mid-typing every time the instance list refreshes. -->
+{{template "zone-add-modal" .}}
+
+<script>
+    // Captured once, before any submission can mutate #zone-add-modal-body
+    // — restored on every open so a previous success/error state (or
+    // partially-filled form) never lingers into a fresh "Add zone" attempt.
+    var zoneAddModalPristineHTML = document.getElementById('zone-add-modal-body').innerHTML;
+
+    function openZoneAddModal() {
+        var body = document.getElementById('zone-add-modal-body');
+        body.innerHTML = zoneAddModalPristineHTML;
+        // Raw innerHTML assignment doesn't run through htmx's own swap
+        // pipeline, so the freshly-inserted <form>'s hx-post would
+        // otherwise never get bound — htmx.process wires it up exactly
+        // as if this had been a normal htmx-driven swap.
+        htmx.process(body);
+        document.getElementById('zone-add-modal').showModal();
+    }
+
+    // <dialog> has no built-in "click outside to close" — close only when
+    // the click lands on the dialog element itself (the backdrop area),
+    // not when it bubbles up from a click inside the dialog's own content.
+    document.getElementById('zone-add-modal').addEventListener('click', function (event) {
+        if (event.target === this) {
+            this.close();
+        }
+    });
+</script>
 {{end}}

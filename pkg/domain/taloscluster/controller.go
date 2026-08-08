@@ -198,7 +198,7 @@ func (r *Reconciler) reconcileControlPlane(
 
 	controlPlaneNodes := r.applyControlPlaneConfig(ctx, cluster, members, cpBytes)
 
-	return r.bootstrapAndCheckHealth(ctx, cluster, controlPlaneAddr, controlPlaneNodes, talosCfg)
+	return r.bootstrapAndCheckHealth(ctx, cluster, controlPlaneAddr, controlPlaneNodes, members, talosCfg)
 }
 
 // applyControlPlaneConfig best-effort applies cpBytes to every member —
@@ -238,7 +238,7 @@ func (r *Reconciler) applyControlPlaneConfig(
 // ControlPlaneReady on Ready in Go.
 func (r *Reconciler) bootstrapAndCheckHealth(
 	ctx context.Context, cluster *v1alpha2.TalosCluster, controlPlaneAddr string, controlPlaneNodes []string,
-	talosCfg *clientconfig.Config,
+	members []v1alpha2.Instance, talosCfg *clientconfig.Config,
 ) (ctrl.Result, error) {
 	err := r.Bootstrapper.Bootstrap(ctx, controlPlaneAddr, talosCfg)
 	if err != nil {
@@ -277,6 +277,12 @@ func (r *Reconciler) bootstrapAndCheckHealth(
 		Type: BootstrappedConditionType, Status: metav1.ConditionTrue, Reason: reasonHealthy,
 		Message: "cluster bootstrapped",
 	})
+
+	// HealthCheck passing already proves every member in controlPlaneNodes
+	// is up and reachable with its real, post-config mTLS identity — the
+	// one precondition instance.Discoverer's own maintenance-mode Version
+	// call can no longer rely on (see its doc).
+	r.recordTalosVersions(ctx, cluster, members, controlPlaneAddr, talosCfg)
 
 	controlPlaneResult, err := r.setControlPlaneCondition(ctx, cluster, metav1.ConditionTrue, reasonHealthy,
 		"control plane is healthy")
@@ -372,13 +378,13 @@ func (r *Reconciler) reconcileWorkers(
 	// version (see KubernetesSpec's own doc), so the machine config is
 	// generated once here and reused for every pool below, rather than
 	// per-pool as when versions could differ per worker.
-	_, workerBytes, _, err := generateConfigs(bundle, cluster, controlPlaneAddr)
+	_, workerBytes, talosCfg, err := generateConfigs(bundle, cluster, controlPlaneAddr)
 	if err != nil {
 		return fmt.Errorf("failed to generate worker config for %q: %w", cluster.Name, err)
 	}
 
 	for _, worker := range cluster.Spec.Workers {
-		err := r.reconcileWorkerPool(ctx, cluster, worker, workerBytes)
+		err := r.reconcileWorkerPool(ctx, cluster, worker, workerBytes, controlPlaneAddr, talosCfg)
 		if err != nil {
 			return err
 		}
@@ -388,9 +394,15 @@ func (r *Reconciler) reconcileWorkers(
 }
 
 // reconcileWorkerPool applies workerBytes to every member claimed by
-// worker.PoolRef.
+// worker.PoolRef, then best-effort records their real Talos version — see
+// recordTalosVersions' own doc. A worker just joined by config-apply may
+// still be mid-reboot, so this frequently fails on its first attempt; that's
+// fine, it's retried on every future reconcile pass until Ready (see
+// Reconcile), same tolerance recordTalosVersions already documents for
+// control-plane members.
 func (r *Reconciler) reconcileWorkerPool(
 	ctx context.Context, cluster *v1alpha2.TalosCluster, worker v1alpha2.TalosClusterWorkerSpec, workerBytes []byte,
+	controlPlaneAddr string, talosCfg *clientconfig.Config,
 ) error {
 	members, err := resolveMembers(ctx, r.Client, worker.PoolRef)
 	if err != nil {
@@ -407,7 +419,46 @@ func (r *Reconciler) reconcileWorkerPool(
 		}
 	}
 
+	r.recordTalosVersions(ctx, cluster, members, controlPlaneAddr, talosCfg)
+
 	return nil
+}
+
+// recordTalosVersions best-effort fetches and persists each of members' real
+// Talos version, skipping any that already have one recorded. Once a
+// maintenance-mode member has had its config applied, its own
+// maintenance-mode Version RPC becomes permanently unreachable — its apid
+// has moved on to the real, non-maintenance-mode server — so dialAddr (any
+// already-configured, reachable cluster member) and talosCfg's admin
+// identity are used instead, targeting each member individually via
+// client.WithNode (see ClusterBootstrapper.Version's own doc). Failures are
+// logged, not fatal or returned: a member that hasn't finished rebooting
+// into its new config yet just tries again on the next reconcile.
+func (r *Reconciler) recordTalosVersions(
+	ctx context.Context, cluster *v1alpha2.TalosCluster, members []v1alpha2.Instance, dialAddr string,
+	talosCfg *clientconfig.Config,
+) {
+	for _, member := range members {
+		if member.Status.Talos.Version != "" {
+			continue
+		}
+
+		version, err := r.Bootstrapper.Version(ctx, dialAddr, dialAddress(member), talosCfg)
+		if err != nil {
+			r.Logger.Warn("failed to fetch talos version for member, may still be rebooting into its new configuration",
+				"cluster", cluster.Name, "instance", member.Name, "error", err)
+
+			continue
+		}
+
+		member.Status.Talos.Version = version
+
+		err = r.Client.Status().Update(ctx, &member)
+		if err != nil {
+			r.Logger.Warn("failed to persist discovered talos version",
+				"cluster", cluster.Name, "instance", member.Name, "error", err)
+		}
+	}
 }
 
 // setControlPlaneCondition sets ControlPlaneReadyConditionType and

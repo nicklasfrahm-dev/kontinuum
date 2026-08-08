@@ -55,6 +55,14 @@ type ClusterBootstrapper interface {
 	) error
 	// Kubeconfig fetches the cluster's kubeconfig via addr.
 	Kubeconfig(ctx context.Context, addr string, talosCfg *clientconfig.Config) ([]byte, error)
+	// Version fetches the Talos version reported by node, dialing endpoint
+	// with the real (non-maintenance-mode) admin identity in talosCfg and
+	// routing the request to node via client.WithNode — see this
+	// interface's own Version implementation doc for why maintenance-mode
+	// discovery (pkg/domain/instance's own Discoverer) can no longer learn
+	// this on current Talos releases, making endpoint/node's post-config
+	// identity the only place left to fetch it.
+	Version(ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config) (string, error)
 }
 
 // talosBootstrapper is ClusterBootstrapper's production implementation.
@@ -185,6 +193,41 @@ func (t talosBootstrapper) Kubeconfig(ctx context.Context, addr string, talosCfg
 	}
 
 	return kubeconfig, nil
+}
+
+// Version implements ClusterBootstrapper. Unlike ApplyConfiguration, this
+// deliberately doesn't dial node directly in maintenance mode: recent Talos
+// releases gate the maintenance-mode Version RPC behind an os:admin role
+// check that no maintenance-mode caller — kontinuum's discoverer or
+// talosctl alike — can ever satisfy, since there's no CA yet to issue that
+// role's client cert from (see pkg/domain/instance/talos.go's own Discover
+// doc). Once node has moved past maintenance mode, though, talosCfg's real
+// admin identity satisfies that check, so this dials endpoint (any
+// reachable, already-configured cluster member) and targets node via
+// client.WithNode, the same way talosctl -n routes a single dial to any
+// cluster member.
+func (t talosBootstrapper) Version(
+	ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config,
+) (string, error) {
+	talosClient, err := t.dial(ctx, endpoint, talosCfg)
+	if err != nil {
+		return "", err
+	}
+	defer talosClient.Close() //nolint:errcheck // best-effort close of a short-lived version-fetch connection
+
+	rpcCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+
+	versionResp, err := talosClient.Version(talosclient.WithNode(rpcCtx, node))
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch talos version for %s via %s: %w", node, endpoint, err)
+	}
+
+	if messages := versionResp.GetMessages(); len(messages) > 0 {
+		return messages[0].GetVersion().GetTag(), nil
+	}
+
+	return "", nil
 }
 
 // dial connects to addr with talosCfg's real (non-maintenance-mode) admin

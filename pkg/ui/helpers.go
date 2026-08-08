@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"time"
+	"unicode"
 )
 
 const hoursPerDay = 24
@@ -54,4 +55,19 @@ func formatAge(t time.Time) string {
 	default:
 		return fmt.Sprintf("%dd", int(elapsed.Hours()/hoursPerDay))
 	}
+}
+
+// capitalizeFirst upper-cases s' first rune, leaving the rest untouched —
+// condition messages (e.g. Zone/TalosCluster's own status.conditions
+// entries) are sentence fragments a controller wrote assuming they'd be
+// read alongside their Reason, not shown as a standalone table cell.
+func capitalizeFirst(s string) string {
+	if s == "" {
+		return s
+	}
+
+	runes := []rune(s)
+	runes[0] = unicode.ToUpper(runes[0])
+
+	return string(runes)
 }

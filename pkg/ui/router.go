@@ -9,6 +9,7 @@ import (
 	"embed"
 	"fmt"
 	"html/template"
+	"maps"
 	"net/http"
 	"sort"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	"github.com/nicklasfrahm/kontinuum/pkg/auth"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/adminrbac"
+	zonedomain "github.com/nicklasfrahm/kontinuum/pkg/domain/zone"
 )
 
 // NamespaceLister is the subset of the Kubernetes API the UI needs to list
@@ -53,6 +55,14 @@ type KontinuumClient interface {
 // NamespaceListerFactory, which follows the same per-request-identity
 // pattern.
 type KontinuumClientFactory func(ctx context.Context) (KontinuumClient, error)
+
+// ZoneClientFactory builds a client scoped to ctx for the "Add zone" form
+// — see NamespaceListerFactory for the same per-request-identity pattern.
+// Unlike KontinuumClient/NamespaceLister, this isn't narrowed to a small
+// interface: it's handed straight to pkg/domain/zone.Add, the same
+// shared fan-out function kontinuum zone add calls, which itself expects
+// a full controller-runtime client.Client — see that function's own doc.
+type ZoneClientFactory func(ctx context.Context) (client.Client, error)
 
 // SessionInvalidator ends the caller's session and sends them back to the
 // login page with message shown as a human-readable error. Called when a
@@ -103,6 +113,7 @@ func mustParsePage(content ...string) *template.Template {
 type Router struct {
 	namespacesFor     NamespaceListerFactory
 	kontinuumsFor     KontinuumClientFactory
+	zonesFor          ZoneClientFactory
 	pages             map[string]*template.Template
 	version           string
 	cfg               config.Config
@@ -110,21 +121,25 @@ type Router struct {
 	invalidateSession SessionInvalidator
 }
 
-// NewRouter creates a new UI router backed by namespacesFor and
-// kontinuumsFor. cfg is shown on the settings page and is expected to
+// NewRouter creates a new UI router backed by namespacesFor, kontinuumsFor,
+// and zonesFor. cfg is shown on the settings page and is expected to
 // already be redacted (see config.Config.Redact) — Router does not redact it
-// itself. authEnabled shows or hides the nav's logout link; pass true only
+// itself. The "Add zone" form leaves zonedomain.AddOptions.Domain empty for
+// pkg/domain/zone.Add to infer from an already-registered Kontinuum — see
+// that field's own doc — rather than this Router needing a domain of its
+// own. authEnabled shows or hides the nav's logout link; pass true only
 // when a /app/logout route is actually registered (see pkg/auth), since
 // otherwise the link would 404. invalidateSession may be nil (see
 // SessionInvalidator).
 func NewRouter(
-	namespacesFor NamespaceListerFactory, kontinuumsFor KontinuumClientFactory,
+	namespacesFor NamespaceListerFactory, kontinuumsFor KontinuumClientFactory, zonesFor ZoneClientFactory,
 	version string, cfg config.Config, authEnabled bool, invalidateSession SessionInvalidator,
 ) *Router {
 	pages := map[string]*template.Template{
 		pageHome: mustParsePage("templates/home_content.html"),
 		pageRegistry: mustParsePage("templates/registry_content.html",
-			"templates/components/icon_trash.html"),
+			"templates/components/icon_trash.html", "templates/components/icon_globe.html",
+			"templates/components/zone_add_modal.html"),
 		pageInstance: mustParsePage("templates/instance_content.html",
 			"templates/components/icon_server.html",
 			"templates/components/icon_chevron_left.html", "templates/components/icon_eye.html",
@@ -142,6 +157,7 @@ func NewRouter(
 	return &Router{
 		namespacesFor:     namespacesFor,
 		kontinuumsFor:     kontinuumsFor,
+		zonesFor:          zonesFor,
 		pages:             pages,
 		version:           version,
 		cfg:               cfg,
@@ -184,6 +200,7 @@ func (r *Router) RegisterRoutes(
 	mux.HandleFunc("GET /app/kontinuums", protect(r.renderRegistry))
 	mux.HandleFunc("GET /app/kontinuums/{name}", protect(r.handleInstanceDetail))
 	mux.HandleFunc("DELETE /app/kontinuums/{name}", protect(r.handleDeleteInstance))
+	mux.HandleFunc("POST /app/zones/add", protect(r.handleZoneAdd))
 	mux.HandleFunc("GET /app/iam", protect(r.handleIAM))
 	mux.HandleFunc("GET /app/settings", protect(r.handleSettings))
 }
@@ -271,6 +288,24 @@ type instance struct {
 	Age           string
 	APIVersion    string
 	Version       string
+}
+
+// zoneRow is a Zone object rendered as a row in the registry page's own
+// zones table. Condition/Message reflect whichever of status.conditions
+// most recently transitioned (see latestCondition) — a Zone only ever
+// carries ClusterReady and Installed (see ZoneStatus's own doc), so
+// showing "whichever changed last" is a reasonable single-glance summary
+// without needing a column per condition type.
+type zoneRow struct {
+	Name      string
+	Region    string
+	Age       string
+	Condition string
+	// ConditionOK is whether Condition's own status is True — the zones
+	// table's badge template colors on this rather than parsing Condition's
+	// "Type=Status" string back apart.
+	ConditionOK bool
+	Message     string
 }
 
 // handleDeleteInstance deletes the Kontinuum object named by the {name}
@@ -365,13 +400,200 @@ func (r *Router) renderRegistry(writer http.ResponseWriter, request *http.Reques
 
 	sort.Slice(instances, func(i, j int) bool { return instances[i].Name < instances[j].Name })
 
-	r.render(writer, pageRegistry, map[string]any{
+	zones, err := r.listZoneRows(writer, request)
+	if err != nil {
+		return
+	}
+
+	data := map[string]any{
 		"Title":       "Registry",
 		"ActiveMenu":  "registry",
 		"Version":     r.version,
 		"Instances":   instances,
+		"Zones":       zones,
 		"AuthEnabled": r.authEnabled,
+	}
+
+	// The "Add zone" modal's own fragment data — always empty on a plain
+	// page load, since only a submission (see handleZoneAdd) ever carries
+	// a preserved/error/success state. Merged in here so the same
+	// "zone-add-modal-body" template works whether it's embedded on
+	// initial page load or swapped in on submit.
+	maps.Copy(data, r.zoneAddFormData(zoneAddFields{}, "", ""))
+
+	r.render(writer, pageRegistry, data)
+}
+
+// listZoneRows lists Zone objects and maps them to zoneRow, sorted by name
+// — the registry page's own zones table. On error it writes the
+// appropriate HTTP response itself (same as renderRegistry's own
+// kontinuums.List handling) and returns a non-nil error so the caller
+// knows not to render the page.
+func (r *Router) listZoneRows(writer http.ResponseWriter, request *http.Request) ([]zoneRow, error) {
+	zones, err := r.zonesFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return nil, fmt.Errorf("failed to build kubernetes client: %w", err)
+	}
+
+	var list v1alpha2.ZoneList
+
+	err = zones.List(request.Context(), &list)
+	if err != nil {
+		// Forbidden means the signed-in identity is authenticated but not
+		// authorized — the session itself isn't the problem, but there's
+		// no reason to keep it either, so send the caller back to sign in
+		// rather than leave them stuck on a page they can't use.
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return nil, fmt.Errorf("forbidden: %w", err)
+		}
+
+		http.Error(writer, "failed to list zones: "+err.Error(), http.StatusBadGateway)
+
+		return nil, fmt.Errorf("failed to list zones: %w", err)
+	}
+
+	rows := make([]zoneRow, 0, len(list.Items))
+
+	for _, item := range list.Items {
+		row := zoneRow{Name: item.Name, Region: item.Spec.Region, Age: formatAge(item.CreationTimestamp.Time)}
+
+		if cond := latestCondition(item.Status.Conditions); cond != nil {
+			row.Condition = cond.Type + "=" + string(cond.Status)
+			row.ConditionOK = cond.Status == metav1.ConditionTrue
+			row.Message = capitalizeFirst(cond.Message)
+		}
+
+		rows = append(rows, row)
+	}
+
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
+
+	return rows, nil
+}
+
+// latestCondition returns whichever of conditions most recently
+// transitioned, or nil if conditions is empty — see zoneRow's own doc for
+// why "most recent" is the summary this package shows.
+func latestCondition(conditions []metav1.Condition) *metav1.Condition {
+	var latest *metav1.Condition
+
+	for index := range conditions {
+		cond := &conditions[index]
+		if latest == nil || cond.LastTransitionTime.After(latest.LastTransitionTime.Time) {
+			latest = cond
+		}
+	}
+
+	return latest
+}
+
+// maxZoneAddFormBytes bounds the "Add zone" form's request body — every
+// field is a short identifier/address, so this is generous, not tight.
+const maxZoneAddFormBytes = 1 << 16
+
+// zoneAddFormData is the "zone-add-modal-body" fragment's template data —
+// fields is the (possibly just-submitted) form state, createdZone/formErr
+// surface a just-completed submission's outcome. Rendered three times: once
+// embedded in the registry page's own initial render (always empty — see
+// renderRegistry), and again by handleZoneAdd on every submission.
+func (r *Router) zoneAddFormData(fields zoneAddFields, createdZone, formErr string) map[string]any {
+	return map[string]any{
+		"Region":            fields.region,
+		"Zone":              fields.zone,
+		"TalosAddress":      fields.talosAddress,
+		"TalosVersion":      fields.talosVersion,
+		"KubernetesVersion": fields.kubernetesVersion,
+		"CreatedZone":       createdZone,
+		"Error":             formErr,
+	}
+}
+
+// zoneAddFields is "Add zone"'s parsed form fields.
+type zoneAddFields struct {
+	region            string
+	zone              string
+	talosAddress      string
+	talosVersion      string
+	kubernetesVersion string
+}
+
+// renderZoneAddModalBody renders just the "zone-add-modal-body" fragment
+// (not a full page via layout.html) — the registry page's own dialog swaps
+// #zone-add-modal-body's innerHTML with this on every form submission, so
+// the modal never navigates away from the registry page.
+func (r *Router) renderZoneAddModalBody(writer http.ResponseWriter, data map[string]any) {
+	var buf bytes.Buffer
+
+	err := r.pages[pageRegistry].ExecuteTemplate(&buf, "zone-add-modal-body", data)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = buf.WriteTo(writer)
+}
+
+// handleZoneAdd is POST /app/zones/add's handler — it creates the
+// submitted zone's four hub-side objects via the same shared
+// pkg/domain/zone.Add fan-out `kontinuum zone add` calls, so the CLI and
+// UI never construct these objects differently. On success it swaps the
+// modal body to a success message; on failure it re-renders the form with
+// the submitted values preserved and an error message, so the user doesn't
+// have to retype everything to fix one field. Either way the response stays
+// a fragment — the registry page underneath is never navigated away from.
+func (r *Router) handleZoneAdd(writer http.ResponseWriter, request *http.Request) {
+	// Every field here is a short identifier/address, never a bulk upload —
+	// bound the body before ParseForm reads it into memory.
+	request.Body = http.MaxBytesReader(writer, request.Body, maxZoneAddFormBytes)
+
+	err := request.ParseForm()
+	if err != nil {
+		http.Error(writer, "failed to parse form: "+err.Error(), http.StatusBadRequest)
+
+		return
+	}
+
+	fields := zoneAddFields{
+		region:            request.PostFormValue("region"),
+		zone:              request.PostFormValue("zone"),
+		talosAddress:      request.PostFormValue("talos-address"),
+		talosVersion:      request.PostFormValue("talos-version"),
+		kubernetesVersion: request.PostFormValue("kubernetes-version"),
+	}
+
+	zones, err := r.zonesFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	createdZone, err := zonedomain.Add(request.Context(), zones, zonedomain.AddOptions{
+		Region:            fields.region,
+		Zone:              fields.zone,
+		TalosAddress:      fields.talosAddress,
+		TalosVersion:      fields.talosVersion,
+		KubernetesVersion: fields.kubernetesVersion,
 	})
+	if err != nil {
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return
+		}
+
+		r.renderZoneAddModalBody(writer, r.zoneAddFormData(fields, "", err.Error()))
+
+		return
+	}
+
+	r.renderZoneAddModalBody(writer, r.zoneAddFormData(zoneAddFields{}, createdZone.Name, ""))
 }
 
 // handleInstanceDetail is GET /app/kontinuums/{name}'s handler — it shows one
