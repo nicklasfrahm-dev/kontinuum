@@ -47,6 +47,23 @@ func TestNewControllerKeepsExplicitIntervals(t *testing.T) {
 	assert.Equal(t, 10*time.Second, controller.Config.StaleThreshold)
 }
 
+// TestControllerDeregisterNoOpsBeforeSetupWithManager covers the guard on
+// Controller.Deregister's heartbeat == nil case: SetupWithManager (which
+// builds the Heartbeat Deregister delegates to) needs a real controller-
+// runtime Manager, out of scope for this package's other, fake-client-based
+// unit tests — but runServe could in principle call Deregister before
+// startup ever reaches SetupWithManager, and that must not panic.
+func TestControllerDeregisterNoOpsBeforeSetupWithManager(t *testing.T) {
+	t.Parallel()
+
+	controller := registry.NewController(registry.Config{
+		Role:   "ControlPlane",
+		Logger: slog.Default(),
+	})
+
+	assert.NoError(t, controller.Deregister(context.Background()))
+}
+
 func TestInstanceNameLowercasesHostname(t *testing.T) {
 	t.Parallel()
 
