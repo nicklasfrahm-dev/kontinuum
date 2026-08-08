@@ -18,6 +18,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
@@ -26,6 +27,7 @@ import (
 	"github.com/nicklasfrahm/kontinuum/pkg/auth"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/adminrbac"
+	instancedomain "github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
 	zonedomain "github.com/nicklasfrahm/kontinuum/pkg/domain/zone"
 )
 
@@ -81,8 +83,17 @@ const (
 	pageHome     = "home"
 	pageRegistry = "registry"
 	pageInstance = "instance"
-	pageIAM      = "iam"
-	pageSettings = "settings"
+	// pageMachines and pageMachineDetail back /app/instances and
+	// /app/instances/{name} — the Instance CRD (api/v1alpha2.Instance, a
+	// bare-metal or provider-backed machine InstancePool/TalosCluster claim
+	// from). Named "machine" rather than reusing "instance" above, which
+	// already renders a completely different object: a registered Kontinuum
+	// server process. See issue #52 for why these stay separate pages/routes
+	// despite the CRD itself being called Instance.
+	pageMachines      = "machines"
+	pageMachineDetail = "machine-detail"
+	pageIAM           = "iam"
+	pageSettings      = "settings"
 )
 
 // mustParsePage parses the layout and partials shared by every page, plus
@@ -97,6 +108,7 @@ func mustParsePage(content ...string) *template.Template {
 		"templates/components/nav.html",
 		"templates/components/icon_tenants.html",
 		"templates/components/icon_registry.html",
+		"templates/components/icon_server.html",
 		"templates/components/icon_shield.html",
 		"templates/components/icon_settings.html",
 		"templates/components/icon_logout.html",
@@ -141,11 +153,13 @@ func NewRouter(
 			"templates/components/icon_trash.html", "templates/components/icon_globe.html",
 			"templates/components/zone_add_modal.html"),
 		pageInstance: mustParsePage("templates/instance_content.html",
-			"templates/components/icon_server.html",
 			"templates/components/icon_chevron_left.html", "templates/components/icon_eye.html",
 			"templates/components/icon_eye_off.html", "templates/components/icon_copy.html",
 			"templates/components/icon_check.html", "templates/components/icon_key.html",
 			"templates/components/icon_info.html"),
+		pageMachines: mustParsePage("templates/machines_content.html"),
+		pageMachineDetail: mustParsePage("templates/machine_detail_content.html",
+			"templates/components/icon_chevron_left.html", "templates/components/icon_info.html"),
 		pageIAM: mustParsePage("templates/iam_content.html",
 			"templates/components/icon_key.html", "templates/components/icon_info.html"),
 		pageSettings: mustParsePage("templates/settings_content.html",
@@ -201,6 +215,8 @@ func (r *Router) RegisterRoutes(
 	mux.HandleFunc("GET /app/kontinuums/{name}", protect(r.handleInstanceDetail))
 	mux.HandleFunc("DELETE /app/kontinuums/{name}", protect(r.handleDeleteInstance))
 	mux.HandleFunc("POST /app/zones/add", protect(r.handleZoneAdd))
+	mux.HandleFunc("GET /app/instances", protect(r.handleMachines))
+	mux.HandleFunc("GET /app/instances/{name}", protect(r.handleMachineDetail))
 	mux.HandleFunc("GET /app/iam", protect(r.handleIAM))
 	mux.HandleFunc("GET /app/settings", protect(r.handleSettings))
 }
@@ -838,6 +854,193 @@ func (r *Router) listAdminGroupBindings(writer http.ResponseWriter, request *htt
 	sort.Slice(bindings, func(i, j int) bool { return bindings[i].Subject < bindings[j].Subject })
 
 	return bindings, nil
+}
+
+// machineRow is one api/v1alpha2.Instance object rendered as a row on the
+// /app/instances list — see pageMachines' own doc for why this isn't named
+// "instance", which already means something else in this file.
+type machineRow struct {
+	Name         string
+	TalosVersion string
+	Discovered   bool
+	Reason       string
+	ClaimedBy    string
+	Age          string
+}
+
+// machineRowFrom builds one /app/instances row from item.
+func machineRowFrom(item v1alpha2.Instance) machineRow {
+	row := machineRow{
+		Name:         item.Name,
+		TalosVersion: item.Status.Talos.Version,
+		ClaimedBy:    item.Labels[v1alpha2.LabelClaimedBy],
+		Age:          formatAge(item.CreationTimestamp.Time),
+	}
+
+	if cond := meta.FindStatusCondition(item.Status.Conditions, instancedomain.DiscoveredConditionType); cond != nil {
+		row.Discovered = cond.Status == metav1.ConditionTrue
+		row.Reason = cond.Reason
+	}
+
+	return row
+}
+
+// handleMachines is GET /app/instances's handler — it lists Instance CRD
+// objects (api/v1alpha2.Instance: bare-metal or provider-backed machines
+// InstancePool/TalosCluster claim from — see issue #24's architecture) as a
+// read-only browse page. Claiming/unclaiming isn't exposed here, per issue
+// #52's explicit scope.
+func (r *Router) handleMachines(writer http.ResponseWriter, request *http.Request) {
+	kontinuums, err := r.kontinuumsFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	var list v1alpha2.InstanceList
+
+	err = kontinuums.List(request.Context(), &list)
+	if err != nil {
+		// Forbidden means the signed-in identity is authenticated but not
+		// authorized — the session itself isn't the problem, but there's
+		// no reason to keep it either, so send the caller back to sign in
+		// rather than leave them stuck on a page they can't use.
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return
+		}
+
+		http.Error(writer, "failed to list instances: "+err.Error(), http.StatusBadGateway)
+
+		return
+	}
+
+	rows := make([]machineRow, 0, len(list.Items))
+	for _, item := range list.Items {
+		rows = append(rows, machineRowFrom(item))
+	}
+
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
+
+	r.render(writer, pageMachines, map[string]any{
+		"Title":       "Instances",
+		"ActiveMenu":  "instances",
+		"Version":     r.version,
+		"AuthEnabled": r.authEnabled,
+		"Machines":    rows,
+	})
+}
+
+// machineInterfaceRow is one discovered network interface, shown on the
+// instance detail page's own interfaces table.
+type machineInterfaceRow struct {
+	Name       string
+	MACAddress string
+	Addresses  string
+}
+
+// machineConditionRow is one status.conditions entry, shown on the instance
+// detail page's own conditions table.
+type machineConditionRow struct {
+	Type    string
+	Status  string
+	OK      bool
+	Reason  string
+	Message string
+	Age     string
+}
+
+// handleMachineDetail is GET /app/instances/{name}'s handler — it shows one
+// Instance CRD object's discovery result: Talos version, discovered network
+// interfaces, and status.conditions, plus which InstancePool (if any) has
+// claimed it (see api/v1alpha2.LabelClaimedBy — claiming isn't recorded
+// anywhere else on Instance itself). No link is rendered to the claiming
+// InstancePool: that CRD has no UI page of its own yet (tracked separately,
+// see issue #52's "explicitly out of scope").
+func (r *Router) handleMachineDetail(writer http.ResponseWriter, request *http.Request) {
+	kontinuums, err := r.kontinuumsFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	var item v1alpha2.Instance
+
+	name := request.PathValue("name")
+
+	err = kontinuums.Get(request.Context(), client.ObjectKey{Name: name}, &item)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			http.NotFound(writer, request)
+
+			return
+		}
+
+		// Forbidden means the signed-in identity is authenticated but not
+		// authorized — the session itself isn't the problem, but there's
+		// no reason to keep it either, so send the caller back to sign in
+		// rather than leave them stuck on a page they can't use.
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return
+		}
+
+		http.Error(writer, "failed to get instance: "+err.Error(), http.StatusBadGateway)
+
+		return
+	}
+
+	r.render(writer, pageMachineDetail, machineDetailData(item, r.version, r.authEnabled))
+}
+
+// machineDetailData builds handleMachineDetail's template data from item —
+// factored out purely to keep that function short, same as
+// instanceDetailData does for the Kontinuum instance page above.
+func machineDetailData(item v1alpha2.Instance, version string, authEnabled bool) map[string]any {
+	interfaces := make([]machineInterfaceRow, 0, len(item.Status.Interfaces))
+	for _, iface := range item.Status.Interfaces {
+		interfaces = append(interfaces, machineInterfaceRow{
+			Name:       iface.Name,
+			MACAddress: iface.MACAddress,
+			Addresses:  strings.Join(iface.Addresses, ", "),
+		})
+	}
+
+	conditions := make([]machineConditionRow, 0, len(item.Status.Conditions))
+	for _, cond := range item.Status.Conditions {
+		conditions = append(conditions, machineConditionRow{
+			Type:    cond.Type,
+			Status:  string(cond.Status),
+			OK:      cond.Status == metav1.ConditionTrue,
+			Reason:  cond.Reason,
+			Message: capitalizeFirst(cond.Message),
+			Age:     formatAge(cond.LastTransitionTime.Time),
+		})
+	}
+
+	discoverySource := "Bare metal (spec.interfaces)"
+	if item.Spec.ProviderRef != nil {
+		discoverySource = fmt.Sprintf("%s/%s", item.Spec.ProviderRef.Kind, item.Spec.ProviderRef.Name)
+	}
+
+	return map[string]any{
+		"Title":           item.Name,
+		"ActiveMenu":      "instances",
+		"Version":         version,
+		"AuthEnabled":     authEnabled,
+		"Name":            item.Name,
+		"Age":             formatAge(item.CreationTimestamp.Time),
+		"TalosVersion":    item.Status.Talos.Version,
+		"Discovered":      meta.IsStatusConditionTrue(item.Status.Conditions, instancedomain.DiscoveredConditionType),
+		"DiscoverySource": discoverySource,
+		"ClaimedBy":       item.Labels[v1alpha2.LabelClaimedBy],
+		"Interfaces":      interfaces,
+		"Conditions":      conditions,
+	}
 }
 
 func (r *Router) handleSettings(writer http.ResponseWriter, request *http.Request) {
