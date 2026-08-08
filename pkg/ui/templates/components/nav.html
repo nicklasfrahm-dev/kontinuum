@@ -6,6 +6,10 @@
         {{if .Version}}<span class="text-[10px] text-neutral-500 tracking-wider">{{.Version}}</span>{{end}}
     </span>
     <div class="flex items-center gap-1">
+        <a href="/app/instances"
+           class="p-2 rounded-lg {{if eq .ActiveMenu "instances"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
+            {{template "icon-server"}}
+        </a>
         <a href="/app/home"
            class="p-2 rounded-lg {{if eq .ActiveMenu "home"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-tenants"}}
@@ -13,10 +17,6 @@
         <a href="/app/kontinuums"
            class="p-2 rounded-lg {{if eq .ActiveMenu "registry"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-registry"}}
-        </a>
-        <a href="/app/instances"
-           class="p-2 rounded-lg {{if eq .ActiveMenu "instances"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
-            {{template "icon-server"}}
         </a>
         <a href="/app/iam"
            class="p-2 rounded-lg {{if eq .ActiveMenu "iam"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
@@ -44,6 +44,11 @@
         </span>
     </div>
     <nav class="flex flex-col gap-1 px-3 py-4 flex-1">
+        <a href="/app/instances"
+           class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "instances"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
+            {{template "icon-server"}}
+            Instances
+        </a>
         <a href="/app/home"
            class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "home"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-tenants"}}
@@ -54,11 +59,6 @@
            class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "registry"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-registry"}}
             Registry
-        </a>
-        <a href="/app/instances"
-           class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "instances"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
-            {{template "icon-server"}}
-            Instances
         </a>
         <a href="/app/iam"
            class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "iam"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
