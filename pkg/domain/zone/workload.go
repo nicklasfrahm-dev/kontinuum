@@ -27,7 +27,9 @@ const (
 	envConfigMapName = "kontinuum-env"
 	deploymentName   = "kontinuum"
 	serviceName      = "kontinuum"
-	servicePort      = 8080
+	portName         = "http"
+	containerPort    = 8080
+	servicePort      = 80
 )
 
 // ensureNamespace creates namespace on the downstream cluster if it
@@ -131,10 +133,68 @@ func deploymentLabels() map[string]string {
 	return map[string]string{"app.kubernetes.io/name": deploymentName}
 }
 
+// nonRootUID is the distroless "nonroot" user's own UID/GID — baked into
+// every distroless/static-debian13 image regardless of tag (see
+// Containerfile), so setting it explicitly here works even though that
+// image's default tag still runs as root. Used for both RunAsUser and
+// FSGroup: FSGroup makes the tmpVolume emptyDir (see tmpVolumeMount)
+// group-writable by this same UID, since a Pod's fsGroup only takes
+// effect for volumes, never the container's own already-baked-in
+// filesystem.
+const nonRootUID = 65532
+
+// tmpVolumeName and tmpVolumeMountPath back the one writable path this
+// container gets under its own readOnlyRootFilesystem — see
+// podSecurityContext's own doc for why a fully read-only root still needs
+// this.
+const (
+	tmpVolumeName      = "tmp"
+	tmpVolumeMountPath = "/tmp"
+)
+
+// podSecurityContext and containerSecurityContext satisfy the
+// "restricted" Pod Security Standard: no privilege escalation, every
+// Linux capability dropped, a non-root user, the runtime's default
+// seccomp profile, and a read-only root filesystem. The root filesystem
+// being read-only means this container has nowhere left to write — except
+// tmpVolumeMountPath's own emptyDir (see ensureDeployment), needed because
+// this same binary's own addon installer (pkg/domain/addon/installer.go's
+// writeTempKubeconfig) calls os.CreateTemp("", ...) when this downstream
+// instance goes on to run its own Zone controller for a further zone.
+func podSecurityContext() *corev1.PodSecurityContext {
+	runAsNonRoot := true
+	runAsUser := int64(nonRootUID)
+	runAsGroup := int64(nonRootUID)
+	fsGroup := int64(nonRootUID)
+
+	return &corev1.PodSecurityContext{
+		RunAsNonRoot: &runAsNonRoot,
+		RunAsUser:    &runAsUser,
+		RunAsGroup:   &runAsGroup,
+		FSGroup:      &fsGroup,
+		SeccompProfile: &corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeRuntimeDefault,
+		},
+	}
+}
+
+func containerSecurityContext() *corev1.SecurityContext {
+	allowPrivilegeEscalation := false
+	readOnlyRootFilesystem := true
+
+	return &corev1.SecurityContext{
+		AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+		ReadOnlyRootFilesystem:   &readOnlyRootFilesystem,
+		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+	}
+}
+
 // ensureDeployment upserts the kontinuum Deployment — a single replica
 // running image, with no command/args override (Containerfile's own
 // ENTRYPOINT already runs `serve`), sourcing all of its configuration from
 // the kontinuum-env Secret/ConfigMap ensureSecret/ensureConfigMap maintain.
+// Hardened to the "restricted" Pod Security Standard — see
+// podSecurityContext/containerSecurityContext's own doc.
 func ensureDeployment(ctx context.Context, downstream client.Client, namespace, image string) error {
 	labels := deploymentLabels()
 	replicas := int32(1)
@@ -147,10 +207,12 @@ func ensureDeployment(ctx context.Context, downstream client.Client, namespace, 
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{
+					SecurityContext: podSecurityContext(),
 					Containers: []corev1.Container{{
-						Name:  deploymentName,
-						Image: image,
-						Ports: []corev1.ContainerPort{{ContainerPort: servicePort}},
+						Name:            deploymentName,
+						Image:           image,
+						Ports:           []corev1.ContainerPort{{Name: portName, ContainerPort: containerPort}},
+						SecurityContext: containerSecurityContext(),
 						EnvFrom: []corev1.EnvFromSource{
 							{SecretRef: &corev1.SecretEnvSource{
 								LocalObjectReference: corev1.LocalObjectReference{Name: envSecretName},
@@ -159,7 +221,15 @@ func ensureDeployment(ctx context.Context, downstream client.Client, namespace, 
 								LocalObjectReference: corev1.LocalObjectReference{Name: envConfigMapName},
 							}},
 						},
+						VolumeMounts: []corev1.VolumeMount{
+							{Name: tmpVolumeName, MountPath: tmpVolumeMountPath},
+						},
 					}},
+					Volumes: []corev1.Volume{
+						{Name: tmpVolumeName, VolumeSource: corev1.VolumeSource{
+							EmptyDir: &corev1.EmptyDirVolumeSource{},
+						}},
+					},
 				},
 			},
 		},
@@ -199,8 +269,9 @@ func ensureService(ctx context.Context, downstream client.Client, namespace stri
 		Spec: corev1.ServiceSpec{
 			Selector: deploymentLabels(),
 			Ports: []corev1.ServicePort{{
+				Name:       portName,
 				Port:       servicePort,
-				TargetPort: intstr.FromInt32(servicePort),
+				TargetPort: intstr.FromString(portName),
 			}},
 		},
 	}

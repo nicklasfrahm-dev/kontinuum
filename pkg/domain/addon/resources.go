@@ -37,19 +37,28 @@ func EnsureBuiltinSeeds(ctx context.Context, kubeClient client.Client, cluster *
 }
 
 // ensureBuiltinAddonSeed is EnsureBuiltinSeeds' own per-addon body. The
-// seeded spec bakes in this built-in's own default namespace/priority
-// explicitly (read once, at creation time, from its embedded
-// values/<name>.yaml) rather than leaving spec.namespace/spec.lifecycle
-// empty and relying on resolveAddon's own invisible fallback — so
-// `kubectl get addon -o yaml` is self-documenting instead of requiring a
-// reader to know the built-in fallback exists at all. Chart/Values are
-// still left unset: unlike namespace/priority, they're not something a
-// reader benefits from seeing spelled out redundantly, and leaving them
-// unset is what lets resolveAddon's own chart-version fallback keep
-// tracking a bumped default (e.g. a chart version bump in
-// values/cilium.yaml) after this seed was first created — namespace and
-// priority essentially never change post-creation, so baking those in
-// costs nothing.
+// seeded spec bakes in this built-in's own default namespace/priority/
+// provisioning method explicitly (read once, at creation time, from its
+// embedded values/<name>.yaml) rather than leaving spec.namespace/
+// spec.lifecycle empty and relying on resolveAddon's own invisible
+// fallback — so `kubectl get addon -o yaml` is self-documenting instead
+// of requiring a reader to know the built-in fallback exists at all.
+// Provisioning.Method in particular MUST be baked in here, not left
+// empty: AddonProvisioningSpec.Method carries a
+// +kubebuilder:default=HelmUpgradeInstall marker, so the apiserver's own
+// CRD defaulting fills the empty field in at admission time, before
+// addonMethod's own "empty means fall back to this built-in's own
+// default" logic ever runs — leaving it unset here would silently and
+// permanently lock every built-in (e.g. gateway-api-crds, whose own
+// default is KubectlApply because its CRDs are too large for a Helm
+// release Secret) onto HelmUpgradeInstall instead. Chart/Values are
+// still left unset: unlike namespace/priority/provisioning, they're not
+// something a reader benefits from seeing spelled out redundantly, and
+// leaving them unset is what lets resolveAddon's own chart-version
+// fallback keep tracking a bumped default (e.g. a chart version bump in
+// values/cilium.yaml) after this seed was first created — namespace,
+// priority, and provisioning method essentially never change
+// post-creation, so baking those in costs nothing.
 func ensureBuiltinAddonSeed(
 	ctx context.Context, kubeClient client.Client, cluster *v1alpha2.TalosCluster, releaseName string,
 ) error {
@@ -71,11 +80,19 @@ func ensureBuiltinAddonSeed(
 
 	priority := def.Lifecycle.Priority
 
+	method := def.Lifecycle.Provisioning.Method
+	if method == "" {
+		method = v1alpha2.AddonProvisioningMethodHelmUpgradeInstall
+	}
+
 	seed.Spec = v1alpha2.AddonSpec{
 		TalosClusterRef: v1alpha2.TalosClusterReference{Name: cluster.Name},
 		ReleaseName:     releaseName,
 		Namespace:       def.Namespace,
-		Lifecycle:       v1alpha2.AddonLifecycleSpec{Priority: &priority},
+		Lifecycle: v1alpha2.AddonLifecycleSpec{
+			Priority:     &priority,
+			Provisioning: v1alpha2.AddonProvisioningSpec{Method: method},
+		},
 	}
 
 	err = controllerutil.SetControllerReference(cluster, seed, kubeClient.Scheme())
