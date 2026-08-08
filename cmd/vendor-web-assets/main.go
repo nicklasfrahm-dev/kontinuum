@@ -298,6 +298,15 @@ func fetchAndLog(client *http.Client, out string, entry asset) error {
 }
 
 func fetch(client *http.Client, out string, entry asset) error {
+	dest := filepath.Join(out, entry.dest)
+
+	// dest joins the -out flag with one of vendoredAssets'/fontSubsets' own
+	// hardcoded filenames, not untrusted input.
+	cached, err := os.ReadFile(dest) //nolint:gosec // not untrusted input, see comment above
+	if err == nil && matchesChecksum(cached, entry.checksum) {
+		return nil
+	}
+
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, entry.url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to build request for %s: %w", entry.url, err)
@@ -326,10 +335,20 @@ func fetch(client *http.Client, out string, entry asset) error {
 		return fmt.Errorf("%w for %s: got %s, want %s", errChecksumMismatch, entry.url, got, entry.checksum)
 	}
 
-	err = os.WriteFile(filepath.Join(out, entry.dest), body, filePerm)
+	err = os.WriteFile(dest, body, filePerm)
 	if err != nil {
 		return fmt.Errorf("failed to write %s: %w", entry.dest, err)
 	}
 
 	return nil
+}
+
+// matchesChecksum reports whether body's SHA-256 hex digest equals want —
+// shared by fetch's pre-download cache check and its post-download
+// verification so a file already vendored with the exact bytes a pinned
+// checksum expects is trusted without re-fetching it from the network.
+func matchesChecksum(body []byte, want string) bool {
+	sum := sha256.Sum256(body)
+
+	return hex.EncodeToString(sum[:]) == want
 }
