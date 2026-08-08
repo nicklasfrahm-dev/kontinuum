@@ -10,6 +10,8 @@ import (
 	"github.com/siderolabs/talos/pkg/machinery/config/configloader"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -40,6 +42,7 @@ type fakeBootstrapper struct {
 	// TestReconcileGeneratesInstallableConfigs' own use.
 	appliedConfigs [][]byte
 	bootstrapCalls []string
+	bootstrapErr   error
 	healthCheckErr error
 	kubeconfig     []byte
 	kubeconfigErr  error
@@ -58,7 +61,7 @@ func (f *fakeBootstrapper) ApplyConfiguration(_ context.Context, addr string, da
 func (f *fakeBootstrapper) Bootstrap(_ context.Context, addr string, _ *clientconfig.Config) error {
 	f.bootstrapCalls = append(f.bootstrapCalls, addr)
 
-	return nil
+	return f.bootstrapErr
 }
 
 func (f *fakeBootstrapper) HealthCheck(
@@ -215,7 +218,65 @@ func TestReconcileControlPlaneNotYetHealthy(t *testing.T) {
 	cond := meta.FindStatusCondition(got.Status.Conditions, taloscluster.ControlPlaneReadyConditionType)
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
-	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, taloscluster.BootstrappedConditionType))
+	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, taloscluster.BootstrappedConditionType),
+		"Bootstrap succeeding is independent of ControlPlaneReady — it doesn't wait on HealthCheck")
+}
+
+// TestReconcileNeverRepeatsBootstrapOnceSucceeded covers ensureBootstrapped:
+// once Bootstrapped is true, a later reconcile — still not ControlPlaneReady,
+// e.g. HealthCheck still failing — must not call Bootstrap again.
+func TestReconcileNeverRepeatsBootstrapOnceSucceeded(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", controlPlaneInstanceAddress)
+
+	fakeClient := newFakeClient(t, cluster, cpInstance)
+
+	bootstrapper := &fakeBootstrapper{healthCheckErr: assert.AnError}
+	reconciler := newReconciler(fakeClient, bootstrapper)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName}}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, []string{controlPlaneInstanceAddress}, bootstrapper.bootstrapCalls)
+
+	_, err = reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, []string{controlPlaneInstanceAddress}, bootstrapper.bootstrapCalls,
+		"a second reconcile must not call Bootstrap again once it already succeeded once")
+}
+
+// TestReconcileTreatsAlreadyExistsAsBootstrapped covers ensureBootstrapped's
+// other success path: a Bootstrap call failing with codes.AlreadyExists
+// (etcd's data directory already populated) proves the cluster was already
+// bootstrapped, even though this TalosCluster's own status doesn't reflect
+// that yet — so it must still mark Bootstrapped true, not just log and
+// retry forever.
+func TestReconcileTreatsAlreadyExistsAsBootstrapped(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", controlPlaneInstanceAddress)
+
+	fakeClient := newFakeClient(t, cluster, cpInstance)
+
+	bootstrapper := &fakeBootstrapper{
+		bootstrapErr:   status.Error(codes.AlreadyExists, "etcd data directory is not empty"),
+		healthCheckErr: assert.AnError,
+	}
+	reconciler := newReconciler(fakeClient, bootstrapper)
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: testClusterName},
+	})
+	require.NoError(t, err)
+
+	var got v1alpha2.TalosCluster
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: testClusterName}, &got))
+	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, taloscluster.BootstrappedConditionType))
 }
 
 // TestReconcileSeedsBuiltinAddonsOnlyWhenMissing covers
