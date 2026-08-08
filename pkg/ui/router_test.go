@@ -45,6 +45,18 @@ const (
 // NotFound/Forbidden errors for the config-secret reveal tests below.
 const secretsResource = "secrets"
 
+// testTalosClusterName is the shared fixture name reused across the
+// clusters list/detail/kubeconfig-download tests below (see
+// talosClusterFixture) and TestHandleZoneAddCreatesZoneAndReturnsSuccessFragment,
+// where it coincidentally matches zone-add's own <region>-<zone> naming
+// (region "eu", zone "eu-1a" — see addObjectName's doc).
+const testTalosClusterName = "eu-eu-1a"
+
+// talosClustersResource is the GroupResource "resource" name used to build
+// fake NotFound/Forbidden errors for the clusters pages' tests below — see
+// secretsResource for the equivalent used by the config-secret tests.
+const talosClustersResource = "talosclusters"
+
 // stubNamespaceLister is a fixed-response ui.NamespaceLister for tests.
 type stubNamespaceLister struct {
 	list *corev1.NamespaceList
@@ -85,6 +97,23 @@ type stubKontinuumLister struct {
 	// instance detail page (see handleMachineDetail). Separate from getErr,
 	// which Get uses for *v1alpha2.Kontinuum.
 	machineGetErr error
+	// talosClusters backs List calls for a *v1alpha2.TalosClusterList and
+	// Get calls for a *v1alpha2.TalosCluster — used by the clusters pages
+	// (see handleTalosClusters/handleTalosClusterDetail). talosClustersErr,
+	// when set, is returned by List instead; talosClusterGetErr, when set,
+	// is returned by Get instead — kept separate since a detail-page test
+	// only ever needs one or the other.
+	talosClusters      []v1alpha2.TalosCluster
+	talosClustersErr   error
+	talosClusterGetErr error
+	// zones backs Get calls for a *v1alpha2.Zone — used by
+	// handleTalosClusterDetail's owning-Zone lookup (see fetchOwningZone).
+	// Kept separate from zoneFactory's own fake client, which only ever
+	// backs the "Add zone" form/registry page's own zones table.
+	zones []v1alpha2.Zone
+	// pools backs Get calls for a *v1alpha2.InstancePool — used by
+	// handleTalosClusterDetail's pool breakdown (see fetchPoolRow).
+	pools []v1alpha2.InstancePool
 }
 
 // Get looks up either a Kontinuum by name in items or, for a *corev1.Secret,
@@ -100,6 +129,12 @@ func (s stubKontinuumLister) Get(
 		return s.getSecret(key, target)
 	case *v1alpha2.Instance:
 		return s.getMachine(key, target)
+	case *v1alpha2.TalosCluster:
+		return s.getTalosCluster(key, target)
+	case *v1alpha2.Zone:
+		return s.getZone(key, target)
+	case *v1alpha2.InstancePool:
+		return s.getInstancePool(key, target)
 	default:
 		if s.getErr != nil {
 			return s.getErr
@@ -139,6 +174,12 @@ func (s stubKontinuumLister) List(_ context.Context, list client.ObjectList, _ .
 		}
 
 		target.Items = s.machines
+	case *v1alpha2.TalosClusterList:
+		if s.talosClustersErr != nil {
+			return s.talosClustersErr
+		}
+
+		target.Items = s.talosClusters
 	}
 
 	return nil
@@ -181,6 +222,53 @@ func (s stubKontinuumLister) getMachine(key client.ObjectKey, target *v1alpha2.I
 	}
 
 	return apierrors.NewNotFound(schema.GroupResource{Group: v1alpha2.GroupName, Resource: "instances"}, key.Name)
+}
+
+// getTalosCluster backs Get's *v1alpha2.TalosCluster case.
+func (s stubKontinuumLister) getTalosCluster(key client.ObjectKey, target *v1alpha2.TalosCluster) error {
+	if s.talosClusterGetErr != nil {
+		return s.talosClusterGetErr
+	}
+
+	for _, item := range s.talosClusters {
+		if item.Name == key.Name {
+			*target = item
+
+			return nil
+		}
+	}
+
+	notFoundResource := schema.GroupResource{Group: v1alpha2.GroupName, Resource: talosClustersResource}
+
+	return apierrors.NewNotFound(notFoundResource, key.Name)
+}
+
+// getZone backs Get's *v1alpha2.Zone case — used by
+// handleTalosClusterDetail's owning-Zone lookup (see fetchOwningZone).
+func (s stubKontinuumLister) getZone(key client.ObjectKey, target *v1alpha2.Zone) error {
+	for _, item := range s.zones {
+		if item.Name == key.Name {
+			*target = item
+
+			return nil
+		}
+	}
+
+	return apierrors.NewNotFound(schema.GroupResource{Group: v1alpha2.GroupName, Resource: "zones"}, key.Name)
+}
+
+// getInstancePool backs Get's *v1alpha2.InstancePool case — used by
+// handleTalosClusterDetail's pool breakdown (see fetchPoolRow).
+func (s stubKontinuumLister) getInstancePool(key client.ObjectKey, target *v1alpha2.InstancePool) error {
+	for _, item := range s.pools {
+		if item.Name == key.Name {
+			*target = item
+
+			return nil
+		}
+	}
+
+	return apierrors.NewNotFound(schema.GroupResource{Group: v1alpha2.GroupName, Resource: "instancepools"}, key.Name)
 }
 
 // zoneFactory is a fixed ui.ZoneClientFactory for tests that don't exercise
@@ -1531,13 +1619,13 @@ func TestHandleZoneAddCreatesZoneAndReturnsSuccessFragment(t *testing.T) {
 
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	assert.Contains(t, string(body), "eu-eu-1a")
+	assert.Contains(t, string(body), testTalosClusterName)
 	// The form itself is gone from a success response — nothing left to
 	// resubmit.
 	assert.NotContains(t, string(body), `name="talos-address"`)
 
 	var got v1alpha2.Zone
-	require.NoError(t, zoneClient.Get(context.Background(), client.ObjectKey{Name: "eu-eu-1a"}, &got))
+	require.NoError(t, zoneClient.Get(context.Background(), client.ObjectKey{Name: testTalosClusterName}, &got))
 	assert.Equal(t, "example.com", got.Spec.Domain)
 }
 
@@ -1848,4 +1936,359 @@ func TestHandleMachineDetailInvalidatesSessionOnForbidden(t *testing.T) {
 	}
 
 	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/instances/node-a"), kontinuumFactory)
+}
+
+// talosClusterFixture builds a TalosCluster fixture named
+// testTalosClusterName, with a control-plane pool, one named worker pool,
+// and a Ready condition — shared by the clusters list/detail tests below.
+func talosClusterFixture(ready metav1.ConditionStatus) v1alpha2.TalosCluster {
+	return v1alpha2.TalosCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: testTalosClusterName},
+		Spec: v1alpha2.TalosClusterSpec{
+			Talos:      v1alpha2.TalosSpec{Version: "v1.13.0"},
+			Kubernetes: v1alpha2.KubernetesSpec{Version: "v1.32.0"},
+			ControlPlane: v1alpha2.TalosClusterMemberSpec{
+				PoolRef: v1alpha2.InstancePoolReference{Name: testTalosClusterName},
+			},
+			Workers: []v1alpha2.TalosClusterWorkerSpec{
+				{Name: "default", PoolRef: v1alpha2.InstancePoolReference{Name: testTalosClusterName + "-default"}},
+			},
+		},
+		Status: v1alpha2.TalosClusterStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type: "Ready", Status: ready, Reason: "ClusterReady", Message: "cluster is ready",
+					LastTransitionTime: metav1.Now(),
+				},
+			},
+			SecretRef: v1alpha2.SecretReference{
+				Name: "taloscluster-" + testTalosClusterName, Namespace: v1alpha2.DefaultSecretNamespace,
+			},
+		},
+	}
+}
+
+func TestHandleTalosClustersRendersList(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{talosClusters: []v1alpha2.TalosCluster{
+			talosClusterFixture(metav1.ConditionTrue),
+		}}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "eu-eu-1a")
+	assert.Contains(t, string(body), "v1.13.0")
+	assert.Contains(t, string(body), "v1.32.0")
+	assert.Contains(t, string(body), "Ready=True")
+	assert.Contains(t, string(body), `href="/app/talosclusters/eu-eu-1a"`)
+	assert.Contains(t, string(body), `href="/app/talosclusters"`, "the nav's own Clusters link")
+}
+
+func TestHandleTalosClustersShowsEmptyState(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "No clusters found")
+}
+
+func TestHandleTalosClustersReturnsServerErrorWhenFactoryFails(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return nil, errFactory }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+}
+
+func TestHandleTalosClustersInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: talosClustersResource}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{talosClustersErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
+	}
+
+	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/talosclusters"), kontinuumFactory)
+}
+
+func TestHandleTalosClusterDetailRendersOverviewPoolsAndConditions(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	cluster := talosClusterFixture(metav1.ConditionTrue)
+	zone := v1alpha2.Zone{
+		ObjectMeta: metav1.ObjectMeta{Name: "eu-eu-1a"},
+		Spec:       v1alpha2.ZoneSpec{Region: "eu", Zone: "eu-1a", Domain: "example.com"},
+	}
+	controlPlanePool := v1alpha2.InstancePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "eu-eu-1a"},
+		Spec:       v1alpha2.InstancePoolSpec{Replicas: 1},
+		Status:     v1alpha2.InstancePoolStatus{ReadyReplicas: 1},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "taloscluster-eu-eu-1a", Namespace: v1alpha2.DefaultSecretNamespace},
+		Data:       map[string][]byte{"kubeconfig": []byte("apiVersion: v1\nkind: Config\n")},
+	}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{
+			talosClusters: []v1alpha2.TalosCluster{cluster},
+			zones:         []v1alpha2.Zone{zone},
+			pools:         []v1alpha2.InstancePool{controlPlanePool},
+			secret:        secret,
+		}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters/eu-eu-1a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "eu-eu-1a")
+	assert.Contains(t, string(body), "v1.13.0")
+	assert.Contains(t, string(body), "v1.32.0")
+	assert.Contains(t, string(body), "eu/eu-1a")
+	assert.Contains(t, string(body), "1/1", "the control-plane pool's ready/replicas count")
+	assert.Contains(t, string(body), "Pending", "the worker pool's InstancePool doesn't exist yet")
+	assert.Contains(t, string(body), "Cluster is ready", "the Ready condition's own message, capitalized")
+	assert.Contains(t, string(body), `href="/app/talosclusters/eu-eu-1a/kubeconfig"`)
+	assert.NotContains(t, string(body), "apiVersion: v1\nkind: Config",
+		"the kubeconfig's own contents must never be rendered into the page")
+}
+
+func TestHandleTalosClusterDetailShowsNoKubeconfigMessageWhenNotReady(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	cluster := talosClusterFixture(metav1.ConditionFalse)
+	cluster.Status.SecretRef = v1alpha2.SecretReference{}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{talosClusters: []v1alpha2.TalosCluster{cluster}}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters/eu-eu-1a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "No kubeconfig is available yet")
+	assert.NotContains(t, string(body), "Download kubeconfig")
+	assert.NotContains(t, string(body), "eu/eu-1a", "no Zone shares this cluster's name")
+}
+
+func TestHandleTalosClusterDetailReturnsNotFoundForUnknownCluster(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters/missing"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestHandleTalosClusterDetailInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: talosClustersResource}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{talosClusterGetErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
+	}
+
+	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/talosclusters/eu-eu-1a"), kontinuumFactory)
+}
+
+func TestHandleTalosClusterKubeconfigDownloadServesFileWithHeaders(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	cluster := talosClusterFixture(metav1.ConditionTrue)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "taloscluster-eu-eu-1a", Namespace: v1alpha2.DefaultSecretNamespace},
+		Data:       map[string][]byte{"kubeconfig": []byte("apiVersion: v1\nkind: Config\n")},
+	}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{talosClusters: []v1alpha2.TalosCluster{cluster}, secret: secret}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters/eu-eu-1a/kubeconfig"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, `attachment; filename="eu-eu-1a-kubeconfig.yaml"`, resp.Header.Get("Content-Disposition"))
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, "apiVersion: v1\nkind: Config\n", string(body))
+}
+
+func TestHandleTalosClusterKubeconfigDownloadReturnsNotFoundWhenNotReady(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	cluster := talosClusterFixture(metav1.ConditionFalse)
+	cluster.Status.SecretRef = v1alpha2.SecretReference{}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{talosClusters: []v1alpha2.TalosCluster{cluster}}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters/eu-eu-1a/kubeconfig"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestHandleTalosClusterKubeconfigDownloadReturnsNotFoundForUnknownCluster(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters/missing/kubeconfig"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestHandleTalosClusterKubeconfigDownloadInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: talosClustersResource}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{talosClusterGetErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
+	}
+
+	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/talosclusters/eu-eu-1a/kubeconfig"), kontinuumFactory)
 }
