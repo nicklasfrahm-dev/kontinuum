@@ -1,0 +1,63 @@
+{{define "content"}}
+<div>
+    <div class="mb-6 flex items-center gap-4">
+        <div class="text-accent [&>svg]:h-10 [&>svg]:w-10">
+            {{template "icon-server"}}
+        </div>
+        <div>
+            <h1 class="text-xl font-bold text-white">Instances</h1>
+            <p class="mt-1 text-sm text-neutral-500">Bare-metal and provider-backed machines discovered for InstancePool/TalosCluster to claim.</p>
+        </div>
+    </div>
+
+    <div class="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+        <div class="px-6 py-3 border-b border-neutral-800">
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider">Machines <span class="text-neutral-500">{{len .Machines}}</span></h2>
+        </div>
+
+        {{if .Machines}}
+        <table class="w-full">
+            <thead>
+                <tr class="border-b border-neutral-800">
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Name</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Talos version</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Discovered</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Claimed by</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Age</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .Machines}}
+                <tr class="border-b border-neutral-800 last:border-b-0 hover:bg-neutral-800/50 transition-colors">
+                    <td class="px-6 py-2 text-sm font-medium text-white">
+                        <a href="/app/instances/{{.Name}}" hx-boost="false" class="hover:text-accent hover:underline">{{.Name}}</a>
+                    </td>
+                    <td class="px-6 py-2 text-sm text-neutral-400">{{if .TalosVersion}}{{.TalosVersion}}{{else}}-{{end}}</td>
+                    <td class="px-6 py-2">
+                        {{if .Discovered}}
+                        <span class="inline-flex items-center gap-1.5 bg-green-900/40 border border-green-700 rounded-full px-2.5 py-1 text-xs font-medium text-green-300">Discovered</span>
+                        {{else}}
+                        <span class="inline-flex items-center gap-1.5 bg-neutral-800 border border-neutral-700 rounded-full px-2.5 py-1 text-xs font-medium text-neutral-400">{{if .Reason}}{{.Reason}}{{else}}Pending{{end}}</span>
+                        {{end}}
+                    </td>
+                    <td class="px-6 py-2">
+                        {{if .ClaimedBy}}
+                        <span class="inline-flex items-center gap-1.5 bg-accent/10 border border-accent/30 rounded-full px-2.5 py-1 text-xs font-medium text-accent">{{.ClaimedBy}}</span>
+                        {{else}}
+                        <span class="text-sm text-neutral-500">Unclaimed</span>
+                        {{end}}
+                    </td>
+                    <td class="px-6 py-2 text-sm text-neutral-400">{{.Age}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+        {{else}}
+        <div class="px-6 py-16 text-center">
+            <h3 class="text-sm font-bold text-white uppercase tracking-wider">No instances found</h3>
+            <p class="mt-2 text-sm text-neutral-500">No Instance objects have been discovered yet.</p>
+        </div>
+        {{end}}
+    </div>
+</div>
+{{end}}

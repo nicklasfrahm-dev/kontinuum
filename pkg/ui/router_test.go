@@ -75,6 +75,16 @@ type stubKontinuumLister struct {
 	// list kind independently.
 	bindings []rbacv1.ClusterRoleBinding
 	listErr  error
+	// machines and machineErr back List calls for a *v1alpha2.InstanceList —
+	// used by the /app/instances page (see handleMachines). Separate from
+	// items/err, which List uses for *v1alpha2.KontinuumList, so a single
+	// test can control each list kind independently.
+	machines   []v1alpha2.Instance
+	machineErr error
+	// machineGetErr backs Get calls for a *v1alpha2.Instance — used by the
+	// instance detail page (see handleMachineDetail). Separate from getErr,
+	// which Get uses for *v1alpha2.Kontinuum.
+	machineGetErr error
 }
 
 // Get looks up either a Kontinuum by name in items or, for a *corev1.Secret,
@@ -87,17 +97,9 @@ func (s stubKontinuumLister) Get(
 ) error {
 	switch target := obj.(type) {
 	case *corev1.Secret:
-		if s.secretGetErr != nil {
-			return s.secretGetErr
-		}
-
-		if s.secret != nil && s.secret.Name == key.Name && s.secret.Namespace == key.Namespace {
-			*target = *s.secret
-
-			return nil
-		}
-
-		return apierrors.NewNotFound(schema.GroupResource{Resource: secretsResource}, key.Name)
+		return s.getSecret(key, target)
+	case *v1alpha2.Instance:
+		return s.getMachine(key, target)
 	default:
 		if s.getErr != nil {
 			return s.getErr
@@ -131,6 +133,12 @@ func (s stubKontinuumLister) List(_ context.Context, list client.ObjectList, _ .
 		}
 
 		target.Items = s.bindings
+	case *v1alpha2.InstanceList:
+		if s.machineErr != nil {
+			return s.machineErr
+		}
+
+		target.Items = s.machines
 	}
 
 	return nil
@@ -138,6 +146,41 @@ func (s stubKontinuumLister) List(_ context.Context, list client.ObjectList, _ .
 
 func (s stubKontinuumLister) Delete(_ context.Context, _ client.Object, _ ...client.DeleteOption) error {
 	return s.deleteErr
+}
+
+// getSecret looks up the fixed s.secret field by name/namespace — factored
+// out of Get purely to keep that function's cyclomatic complexity down, same
+// as getMachine below.
+func (s stubKontinuumLister) getSecret(key client.ObjectKey, target *corev1.Secret) error {
+	if s.secretGetErr != nil {
+		return s.secretGetErr
+	}
+
+	if s.secret != nil && s.secret.Name == key.Name && s.secret.Namespace == key.Namespace {
+		*target = *s.secret
+
+		return nil
+	}
+
+	return apierrors.NewNotFound(schema.GroupResource{Resource: secretsResource}, key.Name)
+}
+
+// getMachine looks up an Instance by name in s.machines — factored out of
+// Get purely to keep that function's cyclomatic complexity down.
+func (s stubKontinuumLister) getMachine(key client.ObjectKey, target *v1alpha2.Instance) error {
+	if s.machineGetErr != nil {
+		return s.machineGetErr
+	}
+
+	for _, item := range s.machines {
+		if item.Name == key.Name {
+			*target = item
+
+			return nil
+		}
+	}
+
+	return apierrors.NewNotFound(schema.GroupResource{Group: v1alpha2.GroupName, Resource: "instances"}, key.Name)
 }
 
 // zoneFactory is a fixed ui.ZoneClientFactory for tests that don't exercise
@@ -1588,4 +1631,221 @@ func TestHandleZoneAddInvalidatesSessionOnForbidden(t *testing.T) {
 
 	assert.Equal(t, http.StatusFound, resp.StatusCode)
 	assert.NotEmpty(t, invalidatedWith)
+}
+
+// discoveredInstance builds a v1alpha2.Instance with the Discovered
+// condition set true, name and talosVersion as given — the shape
+// TestHandleMachinesRendersInstances/TestHandleMachineDetail* both need.
+func discoveredInstance(name, talosVersion string) v1alpha2.Instance {
+	return v1alpha2.Instance{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Status: v1alpha2.InstanceStatus{
+			Talos: v1alpha2.InstanceTalosStatus{Version: talosVersion},
+			Interfaces: []v1alpha2.InstanceInterfaceStatus{
+				{Name: "eth0", MACAddress: "aa:bb:cc:dd:ee:ff", Addresses: []string{"10.0.0.5/24"}},
+			},
+			Conditions: []metav1.Condition{
+				{
+					Type: "Discovered", Status: metav1.ConditionTrue,
+					Reason: "Discovered", Message: "discovered via 10.0.0.5",
+				},
+			},
+		},
+	}
+}
+
+func TestHandleMachinesRendersInstances(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+
+	claimed := discoveredInstance("node-a", "v1.9.0")
+	claimed.Labels = map[string]string{v1alpha2.LabelClaimedBy: "control-plane"}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{machines: []v1alpha2.Instance{
+			claimed,
+			{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}},
+		}}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/instances"))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), "node-a")
+	assert.Contains(t, string(body), "v1.9.0")
+	assert.Contains(t, string(body), "control-plane")
+	assert.Contains(t, string(body), "node-b")
+	assert.Contains(t, string(body), "Unclaimed")
+}
+
+func TestHandleMachinesShowsEmptyState(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/instances"))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), "No instances found")
+}
+
+func TestHandleMachinesReturnsServerErrorWhenFactoryFails(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return nil, errFactory }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/instances"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+}
+
+func TestHandleMachinesInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: "instances"}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{machineErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
+	}
+
+	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/instances"), kontinuumFactory)
+}
+
+func TestHandleMachineDetailRendersInstance(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+
+	claimed := discoveredInstance("node-a", "v1.9.0")
+	claimed.Labels = map[string]string{v1alpha2.LabelClaimedBy: "control-plane"}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{machines: []v1alpha2.Instance{claimed}}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/instances/node-a"))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), "node-a")
+	assert.Contains(t, string(body), "v1.9.0")
+	assert.Contains(t, string(body), "eth0")
+	assert.Contains(t, string(body), "aa:bb:cc:dd:ee:ff")
+	assert.Contains(t, string(body), "10.0.0.5/24")
+	assert.Contains(t, string(body), "control-plane")
+	assert.Contains(t, string(body), "Discovered via 10.0.0.5")
+}
+
+func TestHandleMachineDetailReturnsNotFoundForUnknownInstance(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/instances/does-not-exist"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestHandleMachineDetailReturnsServerErrorWhenFactoryFails(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return nil, errFactory }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/instances/node-a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+}
+
+func TestHandleMachineDetailInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: "instances"}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{
+			machineGetErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden),
+		}, nil
+	}
+
+	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/instances/node-a"), kontinuumFactory)
 }
