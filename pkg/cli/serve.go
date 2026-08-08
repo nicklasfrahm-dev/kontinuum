@@ -91,7 +91,7 @@ func runServe(cmd *cobra.Command, addr string, storage string) error {
 		return err
 	}
 
-	server, err := buildServer(cfg, logger, authOpts, oidcHandler)
+	server, registryController, err := buildServer(cfg, logger, authOpts, oidcHandler)
 	if err != nil {
 		return err
 	}
@@ -120,6 +120,16 @@ func runServe(cmd *cobra.Command, addr string, storage string) error {
 		return nil
 	case sig := <-sigChan:
 		logger.Info("Received signal, shutting down", "signal", sig.String())
+	}
+
+	// Deregister this process's own Kontinuum registration before touching
+	// the server at all — ctx is still live here (see the doc below on why
+	// it's deliberately not canceled yet), so the manager and its webhook
+	// server are too. See Controller.Deregister's doc for why that ordering
+	// matters.
+	err = registryController.Deregister(ctx)
+	if err != nil {
+		logger.Error("Failed to deregister server before shutdown", "error", err)
 	}
 
 	// Deliberately not cancel()ing ctx here: ListenAndServe derives its own
@@ -194,10 +204,11 @@ func loadServeConfig(cmd *cobra.Command, addr string, storage string) (*config.C
 
 // buildServer creates the libkapi server with custom handlers. authOpts and
 // oidcHandler come from configureOIDC; oidcHandler is nil when OIDC is not
-// configured.
+// configured. The returned *registry.Controller is what runServe calls
+// Deregister on before shutting the server down — see its doc.
 func buildServer(
 	cfg *config.Config, logger *slog.Logger, authOpts []libkapi.Option, oidcHandler *auth.Handler,
-) (*libkapi.Server, error) {
+) (*libkapi.Server, *registry.Controller, error) {
 	// oidcHandler is nil when OIDC isn't configured — leave invalidateSession
 	// nil too rather than binding a method value to a nil receiver.
 	var invalidateSession ui.SessionInvalidator
@@ -209,7 +220,7 @@ func buildServer(
 
 	err := v1alpha2.AddToScheme(scheme)
 	if err != nil {
-		return nil, fmt.Errorf("failed to register kontinuum.sh/v1alpha2 scheme: %w", err)
+		return nil, nil, fmt.Errorf("failed to register kontinuum.sh/v1alpha2 scheme: %w", err)
 	}
 
 	// v1alpha1 must be in the same scheme too — not because anything here
@@ -218,7 +229,7 @@ func buildServer(
 	// both GVKs against this scheme to convert between them.
 	err = v1alpha1.AddToScheme(scheme)
 	if err != nil {
-		return nil, fmt.Errorf("failed to register kontinuum.sh/v1alpha1 scheme: %w", err)
+		return nil, nil, fmt.Errorf("failed to register kontinuum.sh/v1alpha1 scheme: %w", err)
 	}
 
 	// core/v1 is needed too: mgr.GetClient() (built off this same scheme —
@@ -228,7 +239,7 @@ func buildServer(
 	// recognize even though the server itself already serves core/v1.
 	err = corev1.AddToScheme(scheme)
 	if err != nil {
-		return nil, fmt.Errorf("failed to register core/v1 scheme: %w", err)
+		return nil, nil, fmt.Errorf("failed to register core/v1 scheme: %w", err)
 	}
 
 	// rbac.authorization.k8s.io/v1 is needed for the same reason as core/v1
@@ -238,7 +249,7 @@ func buildServer(
 	// resolve ClusterRole/ClusterRoleBinding's GVKs against it.
 	err = rbacv1.AddToScheme(scheme)
 	if err != nil {
-		return nil, fmt.Errorf("failed to register rbac.authorization.k8s.io/v1 scheme: %w", err)
+		return nil, nil, fmt.Errorf("failed to register rbac.authorization.k8s.io/v1 scheme: %w", err)
 	}
 
 	uiRouter := ui.NewRouter(
@@ -246,9 +257,9 @@ func buildServer(
 		zoneClientFactory(cfg.Server.Addr, scheme),
 		version, cfg.Redact(), oidcHandler != nil, invalidateSession)
 
-	registryOpts, err := registryOptions(cfg, logger, scheme)
+	registryOpts, registryController, err := registryOptions(cfg, logger, scheme)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Deliberately not passing libkapi.WithGarbageCollector here, despite
@@ -276,10 +287,10 @@ func buildServer(
 	// that drives ListenAndServe.
 	server, err := libkapi.New(context.Background(), opts...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to build server: %w", err)
+		return nil, nil, fmt.Errorf("failed to build server: %w", err)
 	}
 
-	return server, nil
+	return server, registryController, nil
 }
 
 // registryOptions builds the libkapi options that wire kontinuum's server
@@ -292,11 +303,15 @@ func buildServer(
 // v1alpha1<->v1alpha2 conversion (registered by Controller.SetupWithManager)
 // answers on; and WithController hands the TTL reconciler and heartbeat
 // runnable off to libkapi's own Manager lifecycle, started once the server
-// is serving, stopped before the HTTP listener closes on Shutdown.
-func registryOptions(cfg *config.Config, logger *slog.Logger, scheme *runtime.Scheme) ([]libkapi.Option, error) {
+// is serving, stopped before the HTTP listener closes on Shutdown. The
+// returned *registry.Controller is buildServer's own return value, passed
+// through unchanged — see its doc.
+func registryOptions(
+	cfg *config.Config, logger *slog.Logger, scheme *runtime.Scheme,
+) ([]libkapi.Option, *registry.Controller, error) {
 	role, err := registry.Role(cfg.Server.Region, cfg.Server.Zone)
 	if err != nil {
-		return nil, fmt.Errorf("failed to determine server registry role: %w", err)
+		return nil, nil, fmt.Errorf("failed to determine server registry role: %w", err)
 	}
 
 	// Provisioned here, before ListenAndServe, rather than left to
@@ -306,7 +321,7 @@ func registryOptions(cfg *config.Config, logger *slog.Logger, scheme *runtime.Sc
 	// bytes on its very first apply.
 	caBundle, err := registry.EnsureConversionWebhookCert()
 	if err != nil {
-		return nil, fmt.Errorf("failed to provision conversion webhook certificate: %w", err)
+		return nil, nil, fmt.Errorf("failed to provision conversion webhook certificate: %w", err)
 	}
 
 	registryLogger := logger.With("component", "registry")
@@ -330,7 +345,7 @@ func registryOptions(cfg *config.Config, logger *slog.Logger, scheme *runtime.Sc
 		libkapi.WithPostStartHook(ensureCRD),
 		libkapi.WithController(controller),
 		libkapi.WithWebhookServer(libkapi.WebhookConfig{Port: registry.ConversionWebhookPort}),
-	}, nil
+	}, controller, nil
 }
 
 // instanceOptions builds the libkapi options that wire the zone-join
