@@ -189,17 +189,17 @@ func containerSecurityContext() *corev1.SecurityContext {
 	}
 }
 
-// ensureDeployment upserts the kontinuum Deployment — a single replica
-// running image, with no command/args override (Containerfile's own
+// buildDeployment returns the desired kontinuum Deployment — a single
+// replica running image, with no command/args override (Containerfile's own
 // ENTRYPOINT already runs `serve`), sourcing all of its configuration from
 // the kontinuum-env Secret/ConfigMap ensureSecret/ensureConfigMap maintain.
 // Hardened to the "restricted" Pod Security Standard — see
 // podSecurityContext/containerSecurityContext's own doc.
-func ensureDeployment(ctx context.Context, downstream client.Client, namespace, image string) error {
+func buildDeployment(namespace, image string) *appsv1.Deployment {
 	labels := deploymentLabels()
 	replicas := int32(1)
 
-	deployment := &appsv1.Deployment{
+	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: deploymentName, Namespace: namespace},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
@@ -234,6 +234,11 @@ func ensureDeployment(ctx context.Context, downstream client.Client, namespace, 
 			},
 		},
 	}
+}
+
+// ensureDeployment upserts the Deployment buildDeployment describes.
+func ensureDeployment(ctx context.Context, downstream client.Client, namespace, image string) error {
+	deployment := buildDeployment(namespace, image)
 
 	err := downstream.Create(ctx, deployment)
 	if apierrors.IsAlreadyExists(err) {
