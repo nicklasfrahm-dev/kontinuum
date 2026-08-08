@@ -18,6 +18,12 @@ spec:
     - jsonPath: .spec.controlPlane.poolRef.name
       name: ControlPlanePool
       type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].reason
+      name: Reason
+      type: string
     name: v1alpha2
     schema:
       openAPIV3Schema:

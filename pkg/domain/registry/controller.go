@@ -66,6 +66,10 @@ type Config struct {
 // Manager. See NewController.
 type Controller struct {
 	Config Config
+
+	// heartbeat is set by SetupWithManager, once mgr.GetClient() exists to
+	// build it from — nil before then. Deregister uses it.
+	heartbeat *Heartbeat
 }
 
 // NewController builds a Controller from cfg, defaulting HeartbeatInterval
@@ -118,6 +122,8 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 
 	combined := &CombinedReconciler{TTL: reconciler, Heartbeat: heartbeat}
 
+	c.heartbeat = heartbeat
+
 	err := ctrl.NewControllerManagedBy(mgr).For(&v1alpha2.Kontinuum{}).Complete(combined)
 	if err != nil {
 		return fmt.Errorf("failed to register server controller: %w", err)
@@ -135,6 +141,29 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 	mgr.GetWebhookServer().Register(conversionWebhookPath, conversionwebhook.NewWebhookHandler(mgr.GetScheme()))
 
 	return nil
+}
+
+// Deregister deletes this process's own Kontinuum registration, bounded by
+// deregisterTimeout. A no-op if SetupWithManager hasn't run yet.
+//
+// Meant to be called by runServe before Shutdown tears the controller
+// manager down: the manager owns both the heartbeat/TTL reconciler's watch
+// on Kontinuum and the webhook server that watch's conversion (v1alpha1<->
+// v1alpha2) depends on, and stopping the manager signals both to stop at
+// once, racing the webhook's teardown against any watch event still needing
+// it. Deregistering here, while the manager (and so the webhook) is still
+// fully up, means the resulting DELETE's watch event is delivered while the
+// webhook can still answer it, instead of landing in that race and logging
+// repeated conversion failures.
+func (c *Controller) Deregister(ctx context.Context) error {
+	if c.heartbeat == nil {
+		return nil
+	}
+
+	deregisterCtx, cancel := context.WithTimeout(ctx, deregisterTimeout)
+	defer cancel()
+
+	return c.heartbeat.Deregister(deregisterCtx)
 }
 
 // CombinedReconciler runs TTLReconciler's staleness-based deletion and

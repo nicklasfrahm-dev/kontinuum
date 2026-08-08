@@ -49,6 +49,14 @@ type ZoneStatus struct {
 // +kubebuilder:printcolumn:name="Region",type="string",JSONPath=".spec.region"
 // +kubebuilder:printcolumn:name="Zone",type="string",JSONPath=".spec.zone"
 // +kubebuilder:printcolumn:name="Domain",type="string",JSONPath=".spec.domain"
+// The line exceeds this repo's normal length limit, but splitting a
+// kubebuilder marker across lines isn't supported, so it's exempted rather
+// than shortened — same convention as api/v1alpha2/kontinuum_types.go's own
+// region/zone rule.
+//
+//nolint:lll
+// +kubebuilder:printcolumn:name="Installed",type="string",JSONPath=".status.conditions[?(@.type==\"Installed\")].status"
+// +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.conditions[?(@.type==\"Installed\")].reason"
 
 // Zone represents a single availability zone — a pure identity/DNS anchor
 // mapping 1:1 to exactly one TalosCluster (see issue #24's architecture

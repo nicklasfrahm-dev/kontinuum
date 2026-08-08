@@ -32,6 +32,7 @@ import (
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instancepool"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/registry"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/taloscluster"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/zone"
 	"github.com/nicklasfrahm/kontinuum/pkg/logging"
 	"github.com/nicklasfrahm/kontinuum/pkg/ui"
 )
@@ -90,7 +91,7 @@ func runServe(cmd *cobra.Command, addr string, storage string) error {
 		return err
 	}
 
-	server, err := buildServer(cfg, logger, authOpts, oidcHandler)
+	server, registryController, err := buildServer(cfg, logger, authOpts, oidcHandler)
 	if err != nil {
 		return err
 	}
@@ -121,8 +122,29 @@ func runServe(cmd *cobra.Command, addr string, storage string) error {
 		logger.Info("Received signal, shutting down", "signal", sig.String())
 	}
 
-	cancel()
+	// Deregister this process's own Kontinuum registration before touching
+	// the server at all — ctx is still live here (see the doc below on why
+	// it's deliberately not canceled yet), so the manager and its webhook
+	// server are too. See Controller.Deregister's doc for why that ordering
+	// matters.
+	err = registryController.Deregister(ctx)
+	if err != nil {
+		logger.Error("Failed to deregister server before shutdown", "error", err)
+	}
 
+	// Deliberately not cancel()ing ctx here: ListenAndServe derives its own
+	// internal runCtx from ctx, and libkapi's Server watches runCtx with a
+	// shutdown goroutine that closes the HTTP listener the moment it's
+	// canceled — independently of, and unsequenced with, Shutdown's own
+	// "stop the controller manager (running registry.Heartbeat, whose
+	// deregister call needs a live listener to reach itself over) → run
+	// pre-shutdown hooks → only then close the listener" ordering. Canceling
+	// ctx early raced that internal watcher ahead of Shutdown's own
+	// sequencing, closing the listener out from under an in-flight
+	// deregister call. Shutdown cancels the same underlying context itself,
+	// at the correct point in that sequence — nothing here needs to. The
+	// deferred cancel() above still runs once runServe returns, as a safety
+	// net, but by then Shutdown has already finished.
 	err = shutdownServer(server, logger)
 	if err != nil {
 		<-serveErr
@@ -182,10 +204,11 @@ func loadServeConfig(cmd *cobra.Command, addr string, storage string) (*config.C
 
 // buildServer creates the libkapi server with custom handlers. authOpts and
 // oidcHandler come from configureOIDC; oidcHandler is nil when OIDC is not
-// configured.
+// configured. The returned *registry.Controller is what runServe calls
+// Deregister on before shutting the server down — see its doc.
 func buildServer(
 	cfg *config.Config, logger *slog.Logger, authOpts []libkapi.Option, oidcHandler *auth.Handler,
-) (*libkapi.Server, error) {
+) (*libkapi.Server, *registry.Controller, error) {
 	// oidcHandler is nil when OIDC isn't configured — leave invalidateSession
 	// nil too rather than binding a method value to a nil receiver.
 	var invalidateSession ui.SessionInvalidator
@@ -197,7 +220,7 @@ func buildServer(
 
 	err := v1alpha2.AddToScheme(scheme)
 	if err != nil {
-		return nil, fmt.Errorf("failed to register kontinuum.sh/v1alpha2 scheme: %w", err)
+		return nil, nil, fmt.Errorf("failed to register kontinuum.sh/v1alpha2 scheme: %w", err)
 	}
 
 	// v1alpha1 must be in the same scheme too — not because anything here
@@ -206,7 +229,7 @@ func buildServer(
 	// both GVKs against this scheme to convert between them.
 	err = v1alpha1.AddToScheme(scheme)
 	if err != nil {
-		return nil, fmt.Errorf("failed to register kontinuum.sh/v1alpha1 scheme: %w", err)
+		return nil, nil, fmt.Errorf("failed to register kontinuum.sh/v1alpha1 scheme: %w", err)
 	}
 
 	// core/v1 is needed too: mgr.GetClient() (built off this same scheme —
@@ -216,7 +239,7 @@ func buildServer(
 	// recognize even though the server itself already serves core/v1.
 	err = corev1.AddToScheme(scheme)
 	if err != nil {
-		return nil, fmt.Errorf("failed to register core/v1 scheme: %w", err)
+		return nil, nil, fmt.Errorf("failed to register core/v1 scheme: %w", err)
 	}
 
 	// rbac.authorization.k8s.io/v1 is needed for the same reason as core/v1
@@ -226,35 +249,48 @@ func buildServer(
 	// resolve ClusterRole/ClusterRoleBinding's GVKs against it.
 	err = rbacv1.AddToScheme(scheme)
 	if err != nil {
-		return nil, fmt.Errorf("failed to register rbac.authorization.k8s.io/v1 scheme: %w", err)
+		return nil, nil, fmt.Errorf("failed to register rbac.authorization.k8s.io/v1 scheme: %w", err)
 	}
 
 	uiRouter := ui.NewRouter(
 		namespaceListerFactory(cfg.Server.Addr), kontinuumListerFactory(cfg.Server.Addr, scheme),
+		zoneClientFactory(cfg.Server.Addr, scheme),
 		version, cfg.Redact(), oidcHandler != nil, invalidateSession)
 
-	registryOpts, err := registryOptions(cfg, logger, scheme)
+	registryOpts, registryController, err := registryOptions(cfg, logger, scheme)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
+	// Deliberately not passing libkapi.WithGarbageCollector here, despite
+	// several domain controllers already setting owner references that
+	// assume something cascades on them (see pkg/domain/zone/add.go,
+	// pkg/domain/addon/resources.go, pkg/domain/taloscluster/secrets.go):
+	// enabling it took the whole controller manager down, repeatedly
+	// failing "conversion webhook for kontinuum.sh/v1alpha2, Kind=Kontinuum
+	// ... connection refused" — its own discovery/informer machinery
+	// appears to hit Kontinuum's v1alpha1/v1alpha2 conversion webhook
+	// (registered by registry.Controller.SetupWithManager) in a way this
+	// hasn't been root-caused yet. Revisit once that's understood; until
+	// then, owner references are correct metadata (kubectl tree already
+	// reads them) that nothing acts on.
 	opts := slices.Concat([]libkapi.Option{
 		libkapi.WithAddr(cfg.Server.Addr),
 		libkapi.WithStorage(cfg.Server.Storage),
 		libkapi.WithLogger(logger),
 		libkapi.WithServerFactory(customHandlers(uiRouter, oidcHandler)),
 	}, authOpts, registryOpts, instanceOptions(logger), instancePoolOptions(logger), talosClusterOptions(logger),
-		addonOptions(logger), adminRBACOptions(cfg, logger))
+		addonOptions(logger), zoneOptions(cfg, logger), adminRBACOptions(cfg, logger))
 
 	// Storage is resolved against a background context so the backend
 	// is only torn down by Server.Shutdown, not by the signal context
 	// that drives ListenAndServe.
 	server, err := libkapi.New(context.Background(), opts...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to build server: %w", err)
+		return nil, nil, fmt.Errorf("failed to build server: %w", err)
 	}
 
-	return server, nil
+	return server, registryController, nil
 }
 
 // registryOptions builds the libkapi options that wire kontinuum's server
@@ -267,11 +303,15 @@ func buildServer(
 // v1alpha1<->v1alpha2 conversion (registered by Controller.SetupWithManager)
 // answers on; and WithController hands the TTL reconciler and heartbeat
 // runnable off to libkapi's own Manager lifecycle, started once the server
-// is serving, stopped before the HTTP listener closes on Shutdown.
-func registryOptions(cfg *config.Config, logger *slog.Logger, scheme *runtime.Scheme) ([]libkapi.Option, error) {
+// is serving, stopped before the HTTP listener closes on Shutdown. The
+// returned *registry.Controller is buildServer's own return value, passed
+// through unchanged — see its doc.
+func registryOptions(
+	cfg *config.Config, logger *slog.Logger, scheme *runtime.Scheme,
+) ([]libkapi.Option, *registry.Controller, error) {
 	role, err := registry.Role(cfg.Server.Region, cfg.Server.Zone)
 	if err != nil {
-		return nil, fmt.Errorf("failed to determine server registry role: %w", err)
+		return nil, nil, fmt.Errorf("failed to determine server registry role: %w", err)
 	}
 
 	// Provisioned here, before ListenAndServe, rather than left to
@@ -281,7 +321,7 @@ func registryOptions(cfg *config.Config, logger *slog.Logger, scheme *runtime.Sc
 	// bytes on its very first apply.
 	caBundle, err := registry.EnsureConversionWebhookCert()
 	if err != nil {
-		return nil, fmt.Errorf("failed to provision conversion webhook certificate: %w", err)
+		return nil, nil, fmt.Errorf("failed to provision conversion webhook certificate: %w", err)
 	}
 
 	registryLogger := logger.With("component", "registry")
@@ -305,7 +345,7 @@ func registryOptions(cfg *config.Config, logger *slog.Logger, scheme *runtime.Sc
 		libkapi.WithPostStartHook(ensureCRD),
 		libkapi.WithController(controller),
 		libkapi.WithWebhookServer(libkapi.WebhookConfig{Port: registry.ConversionWebhookPort}),
-	}, nil
+	}, controller, nil
 }
 
 // instanceOptions builds the libkapi options that wire the zone-join
@@ -360,6 +400,27 @@ func talosClusterOptions(logger *slog.Logger) []libkapi.Option {
 // ensured by instanceOptions' own ensureCRDs call.
 func addonOptions(logger *slog.Logger) []libkapi.Option {
 	controller := addon.NewController(addon.Config{Logger: logger.With("component", "addon")})
+
+	return []libkapi.Option{libkapi.WithController(controller)}
+}
+
+// zoneImage is the kontinuum container image zoneOptions deploys onto
+// every joined zone's downstream cluster — matches the image ci.yml pushes
+// (see .github/workflows/ci.yml), tagged with this repo's own build
+// version so a zone runs the exact same version its own hub does.
+const zoneImageRepo = "ghcr.io/nicklasfrahm/kontinuum"
+
+// zoneOptions builds the libkapi options that wire the Zone downstream-
+// install reconciler (see pkg/domain/zone) onto the Server. No
+// WithPostStartHook is needed — zones.kontinuum.sh's CRD is already
+// ensured by instanceOptions' own ensureCRDs call.
+func zoneOptions(cfg *config.Config, logger *slog.Logger) []libkapi.Option {
+	controller := zone.NewController(zone.Config{
+		Logger:     logger.With("component", "zone"),
+		ACMEEmail:  cfg.ACME.Email,
+		ACMEServer: cfg.ACME.Server,
+		Image:      zoneImageRepo + ":" + version,
+	})
 
 	return []libkapi.Option{libkapi.WithController(controller)}
 }
@@ -439,6 +500,28 @@ func kontinuumListerFactory(addr string, scheme *runtime.Scheme) ui.KontinuumCli
 		c, err := ctrlclient.New(restCfg, ctrlclient.Options{Scheme: scheme})
 		if err != nil {
 			return nil, fmt.Errorf("failed to build in-process kontinuum client: %w", err)
+		}
+
+		return c, nil
+	}
+}
+
+// zoneClientFactory builds a ui.ZoneClientFactory that calls back into this
+// same server over loopback HTTP, authenticated as whatever identity ctx
+// carries — see kontinuumListerFactory, which this mirrors exactly except
+// for its return type: ui.ZoneClientFactory hands the raw client.Client
+// straight to pkg/domain/zone.Add rather than a narrowed interface.
+func zoneClientFactory(addr string, scheme *runtime.Scheme) ui.ZoneClientFactory {
+	return func(ctx context.Context) (ctrlclient.Client, error) {
+		restCfg := &rest.Config{Host: localBaseURL(addr)}
+
+		if token := auth.TokenFromContext(ctx); token != "" {
+			restCfg.BearerToken = token
+		}
+
+		c, err := ctrlclient.New(restCfg, ctrlclient.Options{Scheme: scheme})
+		if err != nil {
+			return nil, fmt.Errorf("failed to build in-process zone client: %w", err)
 		}
 
 		return c, nil

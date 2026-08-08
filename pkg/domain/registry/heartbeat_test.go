@@ -275,3 +275,113 @@ func TestHeartbeatReconcileNoOpsWhenServerExists(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
 }
+
+func TestHeartbeatDeregisterIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	fakeClient := newFakeClient(t, &v1alpha2.Kontinuum{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-server"},
+	})
+
+	heartbeat := &registry.Heartbeat{
+		Client: fakeClient,
+		Name:   "test-server",
+		Logger: slog.Default(),
+	}
+
+	require.NoError(t, heartbeat.Deregister(context.Background()))
+
+	var server v1alpha2.Kontinuum
+
+	err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-server"}, &server)
+	assert.True(t, apierrors.IsNotFound(err), "Deregister should have deleted the object")
+
+	// A second call finds the object already gone — a NotFound from an
+	// already-completed delete is tolerated, not an error.
+	require.NoError(t, heartbeat.Deregister(context.Background()))
+}
+
+// TestHeartbeatDeregisterPreventsReconcileFromReregistering is the
+// regression test for the race Deregister's shuttingDown flag closes: before
+// it existed, Reconcile treated any NotFound — including one caused by
+// Deregister's own DELETE — as an external deletion to immediately undo.
+func TestHeartbeatDeregisterPreventsReconcileFromReregistering(t *testing.T) {
+	t.Parallel()
+
+	fakeClient := newFakeClient(t, &v1alpha2.Kontinuum{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-server"},
+	})
+
+	heartbeat := &registry.Heartbeat{
+		Client: fakeClient,
+		Name:   "test-server",
+		Role:   v1alpha2.RoleWorker,
+		Logger: slog.Default(),
+	}
+
+	require.NoError(t, heartbeat.Deregister(context.Background()))
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-server"}}
+
+	_, err := heartbeat.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	var server v1alpha2.Kontinuum
+
+	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-server"}, &server)
+	assert.True(t, apierrors.IsNotFound(err), "Reconcile must not recreate an object Deregister just deleted")
+}
+
+// TestHeartbeatDeregisterStopsBeatFromReregistering is beat's side of the
+// same race TestHeartbeatDeregisterPreventsReconcileFromReregistering
+// covers for Reconcile: Deregister is called directly, the way
+// Controller.Deregister calls it — before Start's own ctx.Done() case ever
+// fires, i.e. while Start's ticker is still live and could otherwise race
+// to self-heal the deletion on its next tick.
+func TestHeartbeatDeregisterStopsBeatFromReregistering(t *testing.T) {
+	t.Parallel()
+
+	fakeClient := newFakeClient(t)
+
+	heartbeat := &registry.Heartbeat{
+		Client:   fakeClient,
+		Name:     "test-server",
+		Role:     v1alpha2.RoleWorker,
+		Interval: testHeartbeatInterval,
+		Logger:   slog.Default(),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+
+	go func() { done <- heartbeat.Start(ctx) }()
+
+	var server v1alpha2.Kontinuum
+
+	require.Eventually(t, func() bool {
+		err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-server"}, &server)
+
+		return err == nil && !server.Status.LastHeartbeatTime.IsZero()
+	}, time.Second, time.Millisecond, "server was never created with a heartbeat")
+
+	require.NoError(t, heartbeat.Deregister(context.Background()))
+
+	// Give the still-running ticker several chances to fire and
+	// (incorrectly) recreate the object.
+	assert.Never(t, func() bool {
+		err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-server"}, &server)
+
+		return err == nil
+	}, 5*testHeartbeatInterval, testHeartbeatInterval, "beat must not recreate an object Deregister already deleted")
+
+	cancel()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Start did not return after ctx was canceled")
+	}
+}

@@ -62,6 +62,16 @@ type InstancePoolStatus struct {
 // +kubebuilder:resource:scope=Cluster
 // +kubebuilder:printcolumn:name="Replicas",type="integer",JSONPath=".spec.replicas"
 // +kubebuilder:printcolumn:name="Ready",type="integer",JSONPath=".status.readyReplicas"
+// The line exceeds this repo's normal length limit, but splitting a
+// kubebuilder marker across lines isn't supported, so it's exempted rather
+// than shortened — same convention as api/v1alpha2/kontinuum_types.go's own
+// region/zone rule.
+//
+//nolint:lll
+// +kubebuilder:printcolumn:name="InsufficientCapacity",type="string",JSONPath=".status.conditions[?(@.type==\"InsufficientCapacity\")].status"
+//
+//nolint:lll
+// +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.conditions[?(@.type==\"InsufficientCapacity\")].reason"
 
 // InstancePool claims (and optionally creates) a set of Instance objects to
 // satisfy Spec.Replicas — see issue #24's architecture decision 2/5. No

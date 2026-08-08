@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -32,18 +33,20 @@ func secretName(instanceName string) string {
 	return secretNamePrefix + instanceName
 }
 
-// deregisterTimeout bounds the final Delete call Heartbeat.Start makes
-// after its ctx is canceled.
+// deregisterTimeout bounds a Deregister call's own Delete request — used by
+// both Controller.Deregister and Start's ctx.Done() fallback.
 const deregisterTimeout = 5 * time.Second
 
 // Heartbeat registers this process as a Kontinuum object, keeps its
 // status.lastHeartbeatTime (and status.version, status.secretRef) fresh on
-// an interval, deletes it when ctx is canceled, and re-registers it
-// immediately if it's deleted out from under this process by anything
-// else. It implements both manager.Runnable (the heartbeat ticker, added
-// via mgr.Add — see Controller.SetupWithManager) and reconcile.Reconciler
-// (Reconcile, invoked for its own object by the combinedReconciler both
-// this and TTLReconciler are registered through).
+// an interval, deletes it on Deregister (normally called by
+// Controller.Deregister, or as a fallback when ctx is canceled — see
+// Start's doc), and re-registers it immediately if it's deleted out from
+// under this process by anything else before that. It implements both
+// manager.Runnable (the heartbeat ticker, added via mgr.Add — see
+// Controller.SetupWithManager) and reconcile.Reconciler (Reconcile, invoked
+// for its own object by the combinedReconciler both this and TTLReconciler
+// are registered through).
 type Heartbeat struct {
 	Client client.Client
 	Name   string
@@ -65,6 +68,14 @@ type Heartbeat struct {
 	// Config is this process's own non-confidential configuration, written
 	// to status.config on every heartbeat.
 	Config v1alpha2.KontinuumConfigStatus
+
+	// shuttingDown is set by Deregister, before it deletes this instance's
+	// own object. Reconcile and beat both treat a NotFound they observe
+	// afterward as that same deletion landing, not an external one to
+	// self-heal from — without this, either one racing Deregister's DELETE
+	// would immediately recreate the object Deregister is in the middle of
+	// removing.
+	shuttingDown atomic.Bool
 }
 
 // Reconcile implements reconcile.Reconciler, reacting to its own object's
@@ -79,6 +90,10 @@ func (h *Heartbeat) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resul
 
 	err := h.Client.Get(ctx, req.NamespacedName, &server)
 	if apierrors.IsNotFound(err) {
+		if h.shuttingDown.Load() {
+			return ctrl.Result{}, nil
+		}
+
 		h.Logger.Warn("Server object deleted, re-registering", "name", h.Name)
 		h.reregister(ctx, &server)
 
@@ -115,11 +130,47 @@ func (h *Heartbeat) Start(ctx context.Context) error {
 		case <-ticker.C:
 			h.beat(ctx, server)
 		case <-ctx.Done():
-			h.deregister(ctx, server)
+			// ctx is already canceled here, so stripped of that cancellation
+			// and given a fresh, bounded timeout — see Deregister's doc for
+			// why this is only a fallback: the normal path is
+			// Controller.Deregister running before the manager (and this
+			// ctx) is ever canceled.
+			deregisterCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deregisterTimeout)
+			defer cancel()
+
+			err := h.Deregister(deregisterCtx)
+			if err != nil {
+				h.Logger.Error("Failed to deregister server", "name", h.Name, "error", err)
+			}
 
 			return nil
 		}
 	}
+}
+
+// Deregister marks h as shutting down — so Reconcile and beat stop treating
+// a NotFound as an external deletion to self-heal from — and deletes h's own
+// Kontinuum object. This is what makes graceful shutdown delete the object
+// instead of waiting for the TTL reconciler.
+//
+// Called two ways: by Controller.Deregister, before the controller manager
+// (and the webhook server its conversion path depends on — see
+// Controller.Deregister's doc) is torn down; and, as a fallback, by Start's
+// own ctx.Done() case, in case Controller.Deregister was never called (e.g.
+// a test driving Heartbeat.Start directly). Idempotent — a NotFound from an
+// already-completed delete is not an error, so calling it from both places
+// in the same shutdown is safe.
+func (h *Heartbeat) Deregister(ctx context.Context) error {
+	h.shuttingDown.Store(true)
+
+	server := &v1alpha2.Kontinuum{ObjectMeta: metav1.ObjectMeta{Name: h.Name}}
+
+	err := h.Client.Delete(ctx, server)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("failed to deregister server %q: %w", h.Name, err)
+	}
+
+	return nil
 }
 
 // beat refreshes server's status.lastHeartbeatTime. It always re-fetches
@@ -138,6 +189,10 @@ func (h *Heartbeat) Start(ctx context.Context) error {
 func (h *Heartbeat) beat(ctx context.Context, server *v1alpha2.Kontinuum) {
 	err := h.Client.Get(ctx, client.ObjectKeyFromObject(server), server)
 	if apierrors.IsNotFound(err) {
+		if h.shuttingDown.Load() {
+			return
+		}
+
 		h.Logger.Warn("Server object missing, re-registering", "name", h.Name)
 		h.reregister(ctx, server)
 
@@ -281,20 +336,5 @@ func (h *Heartbeat) reregister(ctx context.Context, server *v1alpha2.Kontinuum) 
 	err = h.Client.Status().Update(ctx, server)
 	if err != nil {
 		h.Logger.Error("Failed to send server heartbeat after re-registering", "name", h.Name, "error", err)
-	}
-}
-
-// deregister deletes server. ctx is already canceled by the time deregister
-// is called (that cancellation is what triggers it), so its cancellation is
-// stripped and replaced with a fresh, bounded timeout — any request-scoped
-// values on ctx are kept. This is what makes graceful shutdown delete the
-// Kontinuum object instead of waiting for the TTL reconciler.
-func (h *Heartbeat) deregister(ctx context.Context, server *v1alpha2.Kontinuum) {
-	deregisterCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deregisterTimeout)
-	defer cancel()
-
-	err := h.Client.Delete(deregisterCtx, server)
-	if err != nil && !apierrors.IsNotFound(err) {
-		h.Logger.Error("Failed to deregister server", "name", h.Name, "error", err)
 	}
 }

@@ -21,6 +21,12 @@ spec:
     - jsonPath: .status.readyReplicas
       name: Ready
       type: integer
+    - jsonPath: .status.conditions[?(@.type=="InsufficientCapacity")].status
+      name: InsufficientCapacity
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="InsufficientCapacity")].reason
+      name: Reason
+      type: string
     name: v1alpha2
     schema:
       openAPIV3Schema:

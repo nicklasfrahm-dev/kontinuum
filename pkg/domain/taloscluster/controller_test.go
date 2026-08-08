@@ -7,8 +7,11 @@ import (
 	"time"
 
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
+	"github.com/siderolabs/talos/pkg/machinery/config/configloader"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,14 +37,23 @@ const (
 // touched until the control plane is ready).
 type fakeBootstrapper struct {
 	applyConfigCalls []string
-	bootstrapCalls   []string
-	healthCheckErr   error
-	kubeconfig       []byte
-	kubeconfigErr    error
+	// appliedConfigs mirrors applyConfigCalls, capturing the actual bytes
+	// each address's ApplyConfiguration call carried — see
+	// TestReconcileGeneratesInstallableConfigs' own use.
+	appliedConfigs [][]byte
+	bootstrapCalls []string
+	bootstrapErr   error
+	healthCheckErr error
+	kubeconfig     []byte
+	kubeconfigErr  error
+	versionCalls   []string
+	version        string
+	versionErr     error
 }
 
-func (f *fakeBootstrapper) ApplyConfiguration(_ context.Context, addr string, _ []byte) error {
+func (f *fakeBootstrapper) ApplyConfiguration(_ context.Context, addr string, data []byte) error {
 	f.applyConfigCalls = append(f.applyConfigCalls, addr)
+	f.appliedConfigs = append(f.appliedConfigs, data)
 
 	return nil
 }
@@ -49,7 +61,7 @@ func (f *fakeBootstrapper) ApplyConfiguration(_ context.Context, addr string, _ 
 func (f *fakeBootstrapper) Bootstrap(_ context.Context, addr string, _ *clientconfig.Config) error {
 	f.bootstrapCalls = append(f.bootstrapCalls, addr)
 
-	return nil
+	return f.bootstrapErr
 }
 
 func (f *fakeBootstrapper) HealthCheck(
@@ -66,6 +78,16 @@ func (f *fakeBootstrapper) Kubeconfig(_ context.Context, _ string, _ *clientconf
 	return f.kubeconfig, nil
 }
 
+func (f *fakeBootstrapper) Version(_ context.Context, _, node string, _ *clientconfig.Config) (string, error) {
+	f.versionCalls = append(f.versionCalls, node)
+
+	if f.versionErr != nil {
+		return "", f.versionErr
+	}
+
+	return f.version, nil
+}
+
 func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
 	t.Helper()
 
@@ -76,7 +98,7 @@ func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
 
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithStatusSubresource(&v1alpha2.TalosCluster{}, &v1alpha2.Addon{}).
+		WithStatusSubresource(&v1alpha2.TalosCluster{}, &v1alpha2.Addon{}, &v1alpha2.Instance{}).
 		WithObjects(objects...).
 		Build()
 }
@@ -196,7 +218,65 @@ func TestReconcileControlPlaneNotYetHealthy(t *testing.T) {
 	cond := meta.FindStatusCondition(got.Status.Conditions, taloscluster.ControlPlaneReadyConditionType)
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
-	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, taloscluster.BootstrappedConditionType))
+	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, taloscluster.BootstrappedConditionType),
+		"Bootstrap succeeding is independent of ControlPlaneReady — it doesn't wait on HealthCheck")
+}
+
+// TestReconcileNeverRepeatsBootstrapOnceSucceeded covers ensureBootstrapped:
+// once Bootstrapped is true, a later reconcile — still not ControlPlaneReady,
+// e.g. HealthCheck still failing — must not call Bootstrap again.
+func TestReconcileNeverRepeatsBootstrapOnceSucceeded(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", controlPlaneInstanceAddress)
+
+	fakeClient := newFakeClient(t, cluster, cpInstance)
+
+	bootstrapper := &fakeBootstrapper{healthCheckErr: assert.AnError}
+	reconciler := newReconciler(fakeClient, bootstrapper)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName}}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, []string{controlPlaneInstanceAddress}, bootstrapper.bootstrapCalls)
+
+	_, err = reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, []string{controlPlaneInstanceAddress}, bootstrapper.bootstrapCalls,
+		"a second reconcile must not call Bootstrap again once it already succeeded once")
+}
+
+// TestReconcileTreatsAlreadyExistsAsBootstrapped covers ensureBootstrapped's
+// other success path: a Bootstrap call failing with codes.AlreadyExists
+// (etcd's data directory already populated) proves the cluster was already
+// bootstrapped, even though this TalosCluster's own status doesn't reflect
+// that yet — so it must still mark Bootstrapped true, not just log and
+// retry forever.
+func TestReconcileTreatsAlreadyExistsAsBootstrapped(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", controlPlaneInstanceAddress)
+
+	fakeClient := newFakeClient(t, cluster, cpInstance)
+
+	bootstrapper := &fakeBootstrapper{
+		bootstrapErr:   status.Error(codes.AlreadyExists, "etcd data directory is not empty"),
+		healthCheckErr: assert.AnError,
+	}
+	reconciler := newReconciler(fakeClient, bootstrapper)
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: testClusterName},
+	})
+	require.NoError(t, err)
+
+	var got v1alpha2.TalosCluster
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: testClusterName}, &got))
+	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, taloscluster.BootstrappedConditionType))
 }
 
 // TestReconcileSeedsBuiltinAddonsOnlyWhenMissing covers
@@ -449,6 +529,121 @@ func TestReconcileFullSequence(t *testing.T) {
 	assert.Equal(t, testRetryInterval, result.RequeueAfter)
 	assert.Equal(t, []string{controlPlaneInstanceAddress, "10.0.0.2"}, bootstrapper.applyConfigCalls,
 		"the worker is only touched on the reconcile after ControlPlaneReady")
+}
+
+// TestReconcileRecordsTalosVersionOnceMembersAreConfigured covers
+// recordTalosVersions: instance.Discoverer's own maintenance-mode Version
+// call can no longer succeed on current Talos releases (see its own doc),
+// so status.talos.version is populated later instead — for control-plane
+// members once HealthCheck first passes, for worker members once their
+// config has been applied — dialing through any already-configured member
+// and targeting each individually. A member whose version is already known
+// is never re-fetched.
+func TestReconcileRecordsTalosVersionOnceMembersAreConfigured(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", controlPlaneInstanceAddress)
+	workerInstance := claimedDiscoveredInstance("worker-node-1", "worker-pool", "10.0.0.2")
+
+	fakeClient := newFakeClient(t, cluster, cpInstance, workerInstance)
+
+	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig"), version: "v1.9.0"}
+	reconciler := newReconciler(fakeClient, bootstrapper)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName}}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, []string{controlPlaneInstanceAddress}, bootstrapper.versionCalls,
+		"only the now-healthy control-plane member is checked on the first reconcile")
+
+	var afterFirst v1alpha2.Instance
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "cp-node-1"}, &afterFirst))
+	assert.Equal(t, "v1.9.0", afterFirst.Status.Talos.Version)
+
+	_, err = reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, []string{controlPlaneInstanceAddress, "10.0.0.2"}, bootstrapper.versionCalls,
+		"the control-plane member's already-known version is never re-fetched; "+
+			"the worker is checked once its config is applied")
+
+	var afterSecond v1alpha2.Instance
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "worker-node-1"}, &afterSecond))
+	assert.Equal(t, "v1.9.0", afterSecond.Status.Talos.Version)
+}
+
+// TestReconcileToleratesTalosVersionFetchFailure covers recordTalosVersions'
+// own tolerance of a member still rebooting into its new configuration —
+// the same best-effort handling as ApplyConfiguration's — leaving
+// status.talos.version empty rather than failing the reconcile.
+func TestReconcileToleratesTalosVersionFetchFailure(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	cluster.Spec.Workers = nil
+	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", controlPlaneInstanceAddress)
+
+	fakeClient := newFakeClient(t, cluster, cpInstance)
+
+	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig"), versionErr: assert.AnError}
+	reconciler := newReconciler(fakeClient, bootstrapper)
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: testClusterName},
+	})
+	require.NoError(t, err)
+
+	var got v1alpha2.Instance
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "cp-node-1"}, &got))
+	assert.Empty(t, got.Status.Talos.Version)
+}
+
+// TestReconcileGeneratesInstallableConfigs covers applyAutoInstallDiskSelector's
+// own contract, exercised through the full Reconcile path rather than
+// calling generateConfigs directly (config.go's own functions are
+// unexported, and this file's package is taloscluster_test — see this
+// repo's own testpackage lint convention): every config actually applied
+// to a real (non-container) candidate must carry a non-nil
+// InstallDiskSelector, or Talos's own config validation rejects it
+// outright with "either install disk or diskSelector should be defined" —
+// this repo has no way to know a candidate's real disk names
+// (/dev/sda, /dev/vda, /dev/nvme0n1, ...) at config-generation time, so
+// hardcoding install.disk was never an option; an empty selector is
+// Talos's own "any disk" mechanism instead (see config.go's own doc).
+func TestReconcileGeneratesInstallableConfigs(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", controlPlaneInstanceAddress)
+	workerInstance := claimedDiscoveredInstance("worker-node-1", "worker-pool", "10.0.0.2")
+
+	fakeClient := newFakeClient(t, cluster, cpInstance, workerInstance)
+
+	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig")}
+	reconciler := newReconciler(fakeClient, bootstrapper)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName}}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	_, err = reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	require.Len(t, bootstrapper.appliedConfigs, 2, "one control-plane apply, one worker apply")
+
+	for index, data := range bootstrapper.appliedConfigs {
+		provider, err := configloader.NewFromBytes(data)
+		require.NoError(t, err, "applied config %d", index)
+
+		install := provider.RawV1Alpha1().MachineConfig.MachineInstall
+		require.NotNil(t, install, "applied config %d", index)
+		assert.Empty(t, install.InstallDisk, "applied config %d", index)
+		assert.NotNil(t, install.InstallDiskSelector, "applied config %d", index)
+	}
 }
 
 func TestReconcileIgnoresMissingCluster(t *testing.T) {
