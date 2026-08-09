@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 
+	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
@@ -37,6 +38,24 @@ var errNoRegisteredKontinuum = errors.New("no registered kontinuum found")
 // configured" — a static sentinel for the same err113 reason as
 // errNoRegisteredKontinuum above.
 var errNoKontinuumDNSDomain = errors.New("no registered kontinuum publishes a DNS domain")
+
+// errNoKontinuumDNSCredential is findKontinuumDNSCredential's sentinel for
+// "a Kontinuum was found, but its own Secret has no DNS credential stored" —
+// the expected, common case for an operator who hasn't configured
+// KONTINUUM_SERVER_DNS_CREDENTIAL, not a real error (see reconcileDNS's own
+// doc for how this is used to skip DNS record management entirely).
+var errNoKontinuumDNSCredential = errors.New("no registered kontinuum has a DNS credential configured")
+
+// dnsCredentialSecretKey is the key a Kontinuum's own DNS provider
+// credential is stored under in the Secret its status.secretRef points to —
+// must match pkg/config's own env-var name for Server.DNS.Credential
+// (KONTINUUM_SERVER_DNS_CREDENTIAL) and
+// pkg/domain/registry.Controller.Config's own dnsCredentialSecretKey.
+// Duplicated rather than imported — same rationale as storageSecretKey's
+// own doc above.
+//
+//nolint:gosec // false positive: an env var / secret key name, not a credential value
+const dnsCredentialSecretKey = "KONTINUUM_SERVER_DNS_CREDENTIAL"
 
 // anyRegisteredKontinuum returns any one registered Kontinuum —
 // deterministically (name-sorted), not just "first in whatever order List
@@ -172,4 +191,37 @@ func findKontinuumVersion(ctx context.Context, hubClient client.Client) (string,
 	}
 
 	return kontinuum.Status.Version, nil
+}
+
+// findKontinuumDNSCredential returns the raw, credential-bearing DNS
+// provider credential from any registered Kontinuum's own Secret — set from
+// KONTINUUM_SERVER_DNS_CREDENTIAL (see
+// v1alpha2.KontinuumDNSConfigStatus.Credential's own doc) and stored
+// alongside storage in the same Secret (see registry.Controller's own
+// dnsCredentialSecretKey). Mirrors findKontinuumStorage exactly; a missing
+// key (the expected case when an operator hasn't configured DNS
+// credentials) returns errNoKontinuumDNSCredential, which reconcileDNS
+// treats as "skip DNS record management for this Zone", not a retryable
+// error.
+func findKontinuumDNSCredential(ctx context.Context, hubClient client.Client) (string, error) {
+	kontinuum, err := anyRegisteredKontinuum(ctx, hubClient)
+	if err != nil {
+		return "", err
+	}
+
+	ref := kontinuum.Status.SecretRef
+
+	var secret corev1.Secret
+
+	err = hubClient.Get(ctx, client.ObjectKey{Name: ref.Name, Namespace: ref.Namespace}, &secret)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch %q secret to load dns credentials: %w", ref.Name, err)
+	}
+
+	credential, ok := secret.Data[dnsCredentialSecretKey]
+	if !ok || len(credential) == 0 {
+		return "", fmt.Errorf("%w: %q has no stored dns credential", errNoKontinuumDNSCredential, ref.Name)
+	}
+
+	return string(credential), nil
 }

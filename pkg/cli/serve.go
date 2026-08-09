@@ -509,6 +509,7 @@ func registryOptions(
 		Logger:        registryLogger,
 		Version:       version,
 		Storage:       cfg.Server.Storage,
+		DNSCredential: cfg.Server.DNS.Credential,
 		DisplayConfig: displayConfig(cfg),
 	})
 

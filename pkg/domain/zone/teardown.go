@@ -106,13 +106,13 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, zoneObj *v1alpha2.Zo
 
 // teardownDownstream connects to zoneObj's own downstream cluster and
 // deletes everything reconcileInstall ever created there, in exactly the
-// reverse of installWorkload/installNetwork's own order: HTTPRoute,
-// Certificate, Gateway, ClusterIssuer (network.go), then Deployment,
-// Service, the kontinuum-env Secret/ConfigMap, and finally the
-// kontinuum-system namespace itself (workload.go) — deleting the namespace
-// last cascades away anything not explicitly listed here too (e.g.
-// cert-manager's own Certificate-issued TLS Secret, or any ACME challenge
-// objects it left behind).
+// reverse of installWorkload/installNetwork/reconcileDNS's own order:
+// DNSEndpoint, HTTPRoute, Certificate, Gateway, ClusterIssuer (network.go),
+// then Deployment, Service, the kontinuum-env Secret/ConfigMap, and finally
+// the kontinuum-system namespace itself (workload.go) — deleting the
+// namespace last cascades away anything not explicitly listed here too
+// (e.g. cert-manager's own Certificate-issued TLS Secret, or any ACME
+// challenge objects it left behind).
 //
 // A missing kubeconfig (cluster.Status.SecretRef never populated, or its
 // Secret already gone) means the downstream cluster never got far enough to
@@ -146,11 +146,16 @@ func (r *Reconciler) teardownDownstream(
 	return uninstallWorkload(ctx, downstream)
 }
 
-// uninstallNetwork deletes the ClusterIssuer, Gateway, Certificate, and
-// HTTPRoute installNetwork installs — see teardownDownstream's own doc for
-// ordering.
+// uninstallNetwork deletes the DNSEndpoint (if reconcileDNS ever created
+// one), ClusterIssuer, Gateway, Certificate, and HTTPRoute installNetwork/
+// reconcileDNS install — see teardownDownstream's own doc for ordering.
 func uninstallNetwork(ctx context.Context, downstream client.Client) error {
-	err := deleteHTTPRoute(ctx, downstream, downstreamNamespace, httpRouteName)
+	err := deleteDNSEndpoint(ctx, downstream, downstreamNamespace, dnsEndpointName)
+	if err != nil {
+		return err
+	}
+
+	err = deleteHTTPRoute(ctx, downstream, downstreamNamespace, httpRouteName)
 	if err != nil {
 		return err
 	}
