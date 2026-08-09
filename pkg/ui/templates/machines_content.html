@@ -1,5 +1,5 @@
 {{define "content"}}
-<div>
+<div id="instances-content" hx-get="/app/instances" hx-trigger="every 15s" hx-select="#instances-content" hx-swap="outerHTML">
     <div class="mb-6 flex items-center gap-4">
         <div class="text-accent [&>svg]:h-10 [&>svg]:w-10">
             {{template "icon-server"}}

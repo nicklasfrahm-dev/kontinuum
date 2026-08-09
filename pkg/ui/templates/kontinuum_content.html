@@ -124,107 +124,20 @@
                 <dd class="text-sm font-medium text-white break-all text-right">{{.SecretNamespace}}/{{.SecretName}}</dd>
             </div>
         </dl>
-        {{if .SecretDataYAML}}
+        {{if .SecretDataReady}}
         <div class="p-6 border-t border-neutral-800">
-            <div class="flex items-center justify-between gap-2 mb-3">
-                <span class="text-xs font-bold text-neutral-400 uppercase tracking-wider leading-none">DATA</span>
-                <button type="button" onclick="toggleSecretData(this)"
-                        class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium leading-none rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white hover:bg-neutral-700 transition-colors">
-                    <span data-icon-show>{{template "icon-eye"}}</span>
-                    <span data-icon-hide class="hidden">{{template "icon-eye-off"}}</span>
-                    <span data-label class="leading-none">Reveal</span>
-                </button>
-            </div>
-            <div id="secret-data-wrapper" class="overflow-hidden transition-[height] duration-200 ease-out">
-                <!-- See settings_content.html's kubeconfig-wrapper for why box
-                     styling lives on these wrapper divs, and why each panel
-                     carries its own copy of the actions button. Unlike that
-                     panel's always-long kubeconfig, a secret's data is often
-                     just one or two lines, so both states here use
-                     items-center — pinning the revealed view to items-start
-                     (as kubeconfig does) would float its actions button
-                     noticeably higher than the masked view's for typical
-                     short secrets. -->
-                <div id="secret-data-masked" class="flex items-center justify-between gap-3 bg-neutral-950 rounded-lg p-4 overflow-x-auto">
-                    <pre class="m-0 text-xs text-neutral-500">********************************</pre>
-                    {{template "secret-data-actions"}}
-                </div>
-                <div id="secret-data-content" class="hidden flex items-center justify-between gap-3 bg-neutral-950 rounded-lg p-4">
-                    <pre class="flex-1 min-w-0 m-0 text-xs overflow-x-auto"><code class="language-yaml">{{.SecretDataYAML}}</code></pre>
-                    {{template "secret-data-actions"}}
-                </div>
-            </div>
+            <!--
+                This is a raw Kubernetes Secret's data, so reveal-panel-script
+                fetches it on demand rather than this page embedding it
+                directly (see handleKontinuumSecretDownload's own doc).
+            -->
+            {{template "reveal-panel" (dict "ID" "secret-data" "Label" "DATA")}}
         </div>
         {{end}}
     </div>
 </div>
 
-{{if .SecretDataYAML}}
-<script>
-    Prism.highlightElement(document.querySelector('#secret-data-content code'));
-
-    var secretDataResetTimer = null;
-
-    // toggleSecretData mirrors settings_content.html's toggleKubeconfig — see
-    // that function's comments for why the height is pinned before the
-    // transition and why there's no opacity fade.
-    function toggleSecretData(button) {
-        var wrapper = document.getElementById('secret-data-wrapper');
-        var masked = document.getElementById('secret-data-masked');
-        var content = document.getElementById('secret-data-content');
-        var revealing = content.classList.contains('hidden');
-        var hideEl = revealing ? masked : content;
-        var showEl = revealing ? content : masked;
-
-        window.clearTimeout(secretDataResetTimer);
-
-        wrapper.style.height = wrapper.getBoundingClientRect().height + 'px';
-        void wrapper.offsetHeight;
-
-        hideEl.classList.add('hidden');
-        showEl.classList.remove('hidden');
-
-        wrapper.style.height = showEl.scrollHeight + 'px';
-
-        secretDataResetTimer = window.setTimeout(function () { wrapper.style.height = 'auto'; }, 200);
-
-        button.querySelector('[data-icon-show]').classList.toggle('hidden', revealing);
-        button.querySelector('[data-icon-hide]').classList.toggle('hidden', !revealing);
-        button.querySelector('[data-label]').textContent = revealing ? 'Hide' : 'Reveal';
-    }
-
-    function copySecretData(button) {
-        var content = document.getElementById('secret-data-content').textContent.trim();
-
-        navigator.clipboard.writeText(content).then(function () {
-            var iconCopy = button.querySelector('[data-icon-copy]');
-            var iconCopied = button.querySelector('[data-icon-copied]');
-
-            iconCopy.classList.add('hidden');
-            iconCopied.classList.remove('hidden');
-
-            setTimeout(function () {
-                iconCopy.classList.remove('hidden');
-                iconCopied.classList.add('hidden');
-            }, 1500);
-        });
-    }
-</script>
+{{if .SecretDataReady}}
+{{template "reveal-panel-script" (dict "ID" "secret-data" "URL" (print "/app/kontinuums/" .Name "/secret"))}}
 {{end}}
-{{end}}
-
-{{/*
-    secret-data-actions is the Copy button shown next to both the masked and
-    revealed config-secret panels above — factored out for the same reason as
-    settings_content.html's kubeconfig-actions: each panel needs its own copy
-    rather than one shared, absolutely-positioned one.
-*/}}
-{{define "secret-data-actions"}}
-<div class="shrink-0 flex items-center gap-1.5">
-    <button type="button" onclick="copySecretData(this)" title="Copy to clipboard"
-            class="inline-flex items-center gap-1.5 px-2 py-1.5 text-xs font-medium rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white hover:bg-neutral-700 transition-colors">
-        <span data-icon-copy>{{template "icon-copy"}}</span>
-        <span data-icon-copied class="hidden text-emerald-400">{{template "icon-check"}}</span>
-    </button>
-</div>
 {{end}}

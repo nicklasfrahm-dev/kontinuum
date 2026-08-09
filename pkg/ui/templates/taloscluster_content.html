@@ -1,5 +1,19 @@
 {{define "content"}}
-<div>
+<!--
+    hx-vals below re-adds ?reveal=<bool> to every 15s poll's own request,
+    read fresh from the browser's current location.search each time (see
+    reveal-panel-script's own setQueryParam, which keeps that in sync via
+    history.replaceState) — htmx.js captures hx-get's URL string once, when
+    this element is first processed, and reuses it verbatim on every later
+    poll tick, so baking ?reveal=true into hx-get here would only ever
+    reflect this page's very first server render, not anything toggled
+    afterwards. hx-vals is different: htmx re-evaluates it (and merges the
+    result into the request's own query string, for a GET) fresh on every
+    single request, which is what actually keeps the auto-refresh in sync.
+-->
+<div id="taloscluster-content" hx-get="/app/talosclusters/{{.Name}}" hx-trigger="every 15s"
+     hx-vals="js:{reveal: (new URLSearchParams(location.search).get('reveal') === 'true')}"
+     hx-select="#taloscluster-content" hx-swap="outerHTML">
     <a href="/app/talosclusters" class="inline-flex items-center gap-1.5 text-sm text-neutral-500 hover:text-white transition-colors mb-4">
         {{template "icon-chevron-left"}}
         Back to clusters
@@ -122,17 +136,27 @@
             {{template "icon-key"}}
             <h2 class="text-sm font-bold text-white uppercase tracking-wider">Kubeconfig</h2>
         </div>
-        <div class="px-6 py-4">
+        <div class="p-6">
             {{if .KubeconfigReady}}
-            <p class="text-sm text-neutral-500 mb-3">
-                A kubeconfig for this cluster is available. It carries real cluster-admin credentials, so it's
-                offered as a direct download rather than shown on this page.
+            <p class="text-sm text-neutral-500 mb-2">
+                Merge the kubeconfig below into your existing one with the kontinuum CLI:
             </p>
-            <a href="/app/talosclusters/{{.Name}}/kubeconfig" download hx-boost="false"
-               class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium uppercase tracking-wider rounded-lg bg-accent text-neutral-950 hover:bg-accent/90 transition-colors">
-                {{template "icon-download"}}
-                Download kubeconfig
-            </a>
+            {{template "copy-snippet" (dict "ID" "taloscluster-kubeconfig-import" "Command" "kontinuum config import")}}
+            <!--
+                This kubeconfig carries real cluster-admin credentials (see
+                handleTalosClusterKubeconfigDownload's own doc), so
+                reveal-panel-script fetches it on demand rather than this
+                page embedding it directly. This page also auto-refreshes
+                every 15s (hx-trigger="every 15s" on #taloscluster-content
+                above), replacing this whole card from scratch each time —
+                Open below renders it already in the right state (driven by
+                the same ?reveal=true query parameter the hx-vals attribute
+                on #taloscluster-content re-sends on every poll) instead of
+                always starting masked and fixing that up client-side after
+                the fact (see reveal-panel-script's own QueryParam doc for
+                the full mechanism).
+            -->
+            {{template "reveal-panel" (dict "ID" "taloscluster-kubeconfig" "Label" "KUBECONFIG" "DownloadURL" (print "/app/talosclusters/" .Name "/kubeconfig") "Open" .KubeconfigRevealed)}}
             {{else}}
             <p class="text-sm text-neutral-500">
                 No kubeconfig is available yet — this cluster hasn't finished bootstrapping.
@@ -140,5 +164,10 @@
             {{end}}
         </div>
     </div>
+
+    {{if .KubeconfigReady}}
+    {{template "copy-snippet-script" (dict "ID" "taloscluster-kubeconfig-import")}}
+    {{template "reveal-panel-script" (dict "ID" "taloscluster-kubeconfig" "URL" (print "/app/talosclusters/" .Name "/kubeconfig") "QueryParam" "reveal")}}
+    {{end}}
 </div>
 {{end}}
