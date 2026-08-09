@@ -3,6 +3,7 @@ package zone
 import (
 	"context"
 	"fmt"
+	"net"
 
 	acmev1 "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
 	certmanagerv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
@@ -13,6 +14,8 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 )
 
 // gatewayClassName is the GatewayClass every joined zone's Gateway
@@ -34,11 +37,20 @@ const (
 	certificateName   = "kontinuum"
 	httpRouteName     = "kontinuum"
 	certSecretName    = "kontinuum-tls"
+	dnsEndpointName   = "kontinuum"
 
 	httpListenerName  = "http"
 	httpsListenerName = "https"
 	httpPort          = 80
 	httpsPort         = 443
+
+	// dnsRecordTypeA, dnsRecordTypeAAAA, and dnsRecordTypeCNAME are the
+	// external-dns record types ensureDNSEndpoint chooses between, based on
+	// gatewayAddress' own resolved address shape — an IPv4 literal, an IPv6
+	// literal, or a Hostname-type Gateway address respectively.
+	dnsRecordTypeA     = "A"
+	dnsRecordTypeAAAA  = "AAAA"
+	dnsRecordTypeCNAME = "CNAME"
 )
 
 // installNetwork ensures the ClusterIssuer, Gateway, Certificate, and
@@ -389,4 +401,165 @@ func certificateReady(ctx context.Context, downstream client.Client, namespace, 
 	}
 
 	return false, nil
+}
+
+// gatewayAddress reads name's Gateway status.addresses[0] on downstream and
+// reports the DNS record shape ensureDNSEndpoint needs to point at it: the
+// address value itself, and which record type it needs (dnsRecordTypeCNAME
+// for a Hostname-type address, dnsRecordTypeA/AAAA for an IPv4/IPv6 literal
+// — see this package's own record type constants). ready is false, not an
+// error, both when the Gateway itself doesn't exist yet and when it exists
+// but its own LoadBalancer implementation (e.g. Cilium's) hasn't assigned it
+// an address yet — either way there's nothing to point a DNS record at, and
+// the caller just requeues.
+func gatewayAddress(
+	ctx context.Context, downstream client.Client, namespace, name string,
+) (string, string, bool, error) {
+	var gateway gatewayv1.Gateway
+
+	err := downstream.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, &gateway)
+	if apierrors.IsNotFound(err) {
+		return "", "", false, nil
+	}
+
+	if err != nil {
+		return "", "", false, fmt.Errorf("failed to fetch %q gateway: %w", name, err)
+	}
+
+	if len(gateway.Status.Addresses) == 0 {
+		return "", "", false, nil
+	}
+
+	address := gateway.Status.Addresses[0]
+	if address.Type != nil && *address.Type == gatewayv1.HostnameAddressType {
+		return address.Value, dnsRecordTypeCNAME, true, nil
+	}
+
+	if ip := net.ParseIP(address.Value); ip != nil && ip.To4() == nil {
+		return address.Value, dnsRecordTypeAAAA, true, nil
+	}
+
+	return address.Value, dnsRecordTypeA, true, nil
+}
+
+// ensureDNSEndpoint upserts a DNSEndpoint requesting a single record —
+// hostname pointing at target, as recordType (see gatewayAddress) — for
+// whatever external-dns instance is watching this cluster's own crd source
+// to pick up and reconcile against its own provider (see
+// pkg/domain/addon/values/external-dns.yaml's own doc for why kontinuum
+// itself never talks to a DNS provider directly).
+func ensureDNSEndpoint(
+	ctx context.Context, downstream client.Client, namespace, name, hostname, target, recordType string,
+) error {
+	endpoint := &DNSEndpoint{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: DNSEndpointSpec{
+			Endpoints: []Endpoint{{DNSName: hostname, Targets: []string{target}, RecordType: recordType}},
+		},
+	}
+
+	err := downstream.Create(ctx, endpoint)
+	if apierrors.IsAlreadyExists(err) {
+		var existing DNSEndpoint
+
+		err = downstream.Get(ctx, client.ObjectKeyFromObject(endpoint), &existing)
+		if err != nil {
+			return fmt.Errorf("failed to fetch existing %q dnsendpoint: %w", name, err)
+		}
+
+		existing.Spec = endpoint.Spec
+
+		err = downstream.Update(ctx, &existing)
+		if err != nil {
+			return fmt.Errorf("failed to update %q dnsendpoint: %w", name, err)
+		}
+
+		return nil
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to create %q dnsendpoint: %w", name, err)
+	}
+
+	return nil
+}
+
+// deleteDNSEndpoint deletes the DNSEndpoint ensureDNSEndpoint upserts,
+// tolerating NotFound.
+func deleteDNSEndpoint(ctx context.Context, downstream client.Client, namespace, name string) error {
+	endpoint := &DNSEndpoint{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
+
+	err := client.IgnoreNotFound(downstream.Delete(ctx, endpoint))
+	if err != nil {
+		return fmt.Errorf("failed to delete %q dnsendpoint: %w", name, err)
+	}
+
+	return nil
+}
+
+// reconcileDNS sets DNSRecordConditionType on zoneObj, in memory — the
+// caller (reconcileInstall) persists it together with InstalledConditionType
+// in a single Status().Update, same as installWorkload/installNetwork's own
+// errors already share that call. Returns a non-nil error only for a real
+// downstream API failure, so it's handled exactly like an installWorkload/
+// installNetwork failure (Installed flips False/InstallFailed, forcing a
+// retry) — every other outcome here is expected, not a failure, and is
+// recorded on the condition directly instead:
+//
+//   - No DNS credentials configured (see issue #51's own "must not require
+//     DNS credentials to reach Ready" requirement): False/
+//     reasonDNSCredentialsNotConfigured. Deliberately does not affect
+//     InstalledConditionType or force a retry of its own — see
+//     DNSRecordConditionType's own doc.
+//   - Credentials are configured, but hostname's own downstream Gateway has
+//     no address yet: False/reasonWaitingForGatewayAddress. Installed
+//     already can't reach True yet either in this case — the same ACME
+//     HTTP-01 challenge that gates certReady needs the hostname to resolve,
+//     which needs this very DNSEndpoint to exist and propagate first — so no
+//     separate retry wiring is needed here: reconcileInstall's own
+//     certReady-driven requeue already covers it.
+//   - DNSEndpoint upserted successfully: True/reasonDNSRecordCreated.
+func (r *Reconciler) reconcileDNS(
+	ctx context.Context, zoneObj *v1alpha2.Zone, downstream client.Client, hostname string,
+) error {
+	_, err := findKontinuumDNSCredential(ctx, r.Client)
+	if err != nil {
+		meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
+			Type: DNSRecordConditionType, Status: metav1.ConditionFalse, Reason: reasonDNSCredentialsNotConfigured,
+			Message: "no dns credentials configured — point " + hostname +
+				" at the downstream gateway's own address yourself; see docs/workflows/zone-add.md",
+		})
+
+		// Deliberate: an unconfigured DNS credential is the expected,
+		// common case (see this function's own doc), not a failure to
+		// surface as a retryable error.
+		//nolint:nilerr // see comment above
+		return nil
+	}
+
+	address, recordType, ready, err := gatewayAddress(ctx, downstream, downstreamNamespace, gatewayName)
+	if err != nil {
+		return err
+	}
+
+	if !ready {
+		meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
+			Type: DNSRecordConditionType, Status: metav1.ConditionFalse, Reason: reasonWaitingForGatewayAddress,
+			Message: "waiting for the downstream gateway to be assigned an address",
+		})
+
+		return nil
+	}
+
+	err = ensureDNSEndpoint(ctx, downstream, downstreamNamespace, dnsEndpointName, hostname, address, recordType)
+	if err != nil {
+		return err
+	}
+
+	meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
+		Type: DNSRecordConditionType, Status: metav1.ConditionTrue, Reason: reasonDNSRecordCreated,
+		Message: "created dns record for " + hostname,
+	})
+
+	return nil
 }

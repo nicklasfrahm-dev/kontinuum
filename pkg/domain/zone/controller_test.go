@@ -218,6 +218,7 @@ func newDownstreamFakeClient(t *testing.T) client.Client {
 	require.NoError(t, rbacv1.AddToScheme(scheme))
 	require.NoError(t, gatewayv1.Install(scheme))
 	require.NoError(t, certmanagerv1.AddToScheme(scheme))
+	zone.AddExternalDNSToScheme(scheme)
 
 	// Wrapped the same way newHubFakeClient is (see secretAdmissionClient's
 	// own doc) — ensureEtcdIdentity's own re-reconcile path (see auth.go)
@@ -290,6 +291,24 @@ func joinedKontinuum(name string) (*v1alpha2.Kontinuum, *corev1.Secret) {
 	kontinuum, secret := registeredKontinuum(name)
 	kontinuum.Spec = v1alpha2.KontinuumSpec{Region: testRegion, Zone: testZone}
 	kontinuum.Status.LastHeartbeatTime = metav1.Now()
+
+	return kontinuum, secret
+}
+
+// testDNSCredential is a fake DNS provider credential, not a real one.
+//
+//nolint:gosec // false positive: fixture data, not a real credential
+const testDNSCredential = "AKIAEXAMPLE:secret"
+
+// registeredKontinuumWithDNS extends registeredKontinuum with a DNS provider
+// credential stored under the same Secret — see
+// v1alpha2.KontinuumDNSConfigStatus.Credential's own doc for why it lives
+// alongside Storage. Named "hub", not parameterized: every dns_test.go
+// caller wants the same fixture, mirroring how those tests never need
+// registeredKontinuum's own multi-Kontinuum flexibility either.
+func registeredKontinuumWithDNS() (*v1alpha2.Kontinuum, *corev1.Secret) {
+	kontinuum, secret := registeredKontinuum("hub")
+	secret.Data["KONTINUUM_SERVER_DNS_CREDENTIAL"] = []byte(testDNSCredential)
 
 	return kontinuum, secret
 }

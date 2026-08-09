@@ -145,6 +145,46 @@ get gatewayclass cilium` against a real added zone; if it's ever missing,
 the `Gateway` simply never reports `Accepted`, which is a visible, easy to
 diagnose failure rather than a silent one.
 
+### DNS: automatic records via external-dns, or point it yourself
+
+`<zone>.<region>.<domain>` needs to actually resolve to the downstream
+`Gateway`'s own address before the ACME HTTP-01 challenge above can
+succeed — kontinuum can manage that record for you, or leave it to you,
+depending on whether `KONTINUUM_SERVER_DNS_CREDENTIAL` is configured on
+the hub:
+
+- **Not configured** (the default): the `zone` controller does nothing DNS-
+  related. Point `<zone>.<region>.<domain>` at the `Gateway`'s own address
+  yourself (`kubectl get gateway kontinuum -n kontinuum-system -o
+  jsonpath='{.status.addresses}'` against the zone's own downstream
+  cluster) — the `Zone`'s own `DNSRecord` status condition says as much
+  (`DNSCredentialsNotConfigured`). `Installed` still reaches `True` once
+  you've done this and the certificate issues; kontinuum never blocks on a
+  DNS credential existing.
+- **Configured**: once the downstream `Gateway` has an address, the `zone`
+  controller creates/updates a `DNSEndpoint` (the CRD
+  [external-dns](https://github.com/kubernetes-sigs/external-dns)' own
+  `crd` source watches) requesting an A/AAAA/CNAME record — whichever
+  matches the `Gateway`'s own address shape — for the zone's hostname. This
+  is provider-agnostic: kontinuum itself never talks to Route53/Azure DNS/
+  Cloudflare/etc. directly, and creates no records if nothing is watching
+  that `DNSEndpoint`. For a real DNS provider to reconcile it, install and
+  configure external-dns yourself against the zone's own downstream
+  cluster — a built-in `Addon` named `external-dns` (see
+  `pkg/domain/addon/values/external-dns.yaml`) supplies the `crd`-source
+  scaffolding every provider needs in common; your own `Addon`'s
+  `spec.values` supplies the provider name/credential, in whatever shape
+  that provider's own external-dns configuration expects. `Zone`'s own
+  `DNSRecord` status condition tracks this independently of `Installed` —
+  see `DNSRecordConditionType`'s own doc in `pkg/domain/zone/controller.go`.
+
+`KONTINUUM_SERVER_DNS_DOMAIN`/`_PROVIDER` are non-confidential and show up
+on a registered `Kontinuum`'s own `status.config.server.dns`;
+`KONTINUUM_SERVER_DNS_CREDENTIAL` is opaque (an API token, an access/secret
+key pair, a JSON config blob — whatever the provider you name in
+`_PROVIDER` expects) and, like storage, is redacted from status and instead
+stored in the Secret `status.secretRef` points to.
+
 ### Cluster bootstrap details
 
 #### Why Cilium installs before the cluster is "healthy"

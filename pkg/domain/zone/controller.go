@@ -68,6 +68,15 @@ const (
 	// setRegistryJoinedCondition), which is this reconciler's true terminal
 	// gate.
 	ReadyConditionType = "Ready"
+	// DNSRecordConditionType reports this zone's own DNS record management
+	// — see reconcileDNS's own doc. Unlike InstalledConditionType, a False
+	// status here doesn't necessarily mean something is wrong: the common,
+	// expected steady state for a deployment with no DNS credentials
+	// configured (see issue #51's own "must not require DNS credentials to
+	// reach Ready" requirement) is DNSRecordConditionType permanently False
+	// with reasonDNSCredentialsNotConfigured, while InstalledConditionType
+	// still reaches True.
+	DNSRecordConditionType = "DNSRecord"
 
 	reasonTalosClusterNotFound   = "TalosClusterNotFound"
 	reasonWaitingForTalosCluster = "WaitingForTalosCluster"
@@ -80,6 +89,13 @@ const (
 	reasonInstalled              = "Installed"
 	reasonWaitingForRegistry     = "WaitingForRegistry"
 	reasonRegistryJoined         = "RegistryJoined"
+
+	// reasonDNSCredentialsNotConfigured, reasonWaitingForGatewayAddress, and
+	// reasonDNSRecordCreated are DNSRecordConditionType's own reasons — see
+	// reconcileDNS.
+	reasonDNSCredentialsNotConfigured = "DNSCredentialsNotConfigured"
+	reasonWaitingForGatewayAddress    = "WaitingForGatewayAddress"
+	reasonDNSRecordCreated            = "DNSRecordCreated"
 
 	// reasonDownstreamTeardownFailed and reasonTalosClusterDeleteFailed are
 	// teardown.go's own retryable-failure reasons — see reconcileTeardown.
@@ -466,6 +482,11 @@ func (r *Reconciler) finishInstallWithDomain(
 	ctx context.Context, downstream client.Client, zoneObj *v1alpha2.Zone, hostname string,
 ) (ctrl.Result, error) {
 	certReady, err := r.installNetwork(ctx, downstream, hostname)
+	if err != nil {
+		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonInstallFailed, err.Error())
+	}
+
+	err = r.reconcileDNS(ctx, zoneObj, downstream, hostname)
 	if err != nil {
 		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonInstallFailed, err.Error())
 	}
