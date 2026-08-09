@@ -2070,8 +2070,13 @@ func TestHandleTalosClustersInvalidatesSessionOnForbidden(t *testing.T) {
 	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/talosclusters"), kontinuumFactory)
 }
 
-func TestHandleTalosClusterDetailRendersOverviewPoolsAndConditions(t *testing.T) {
-	t.Parallel()
+// newTalosClusterKubeconfigMux builds a router+mux serving a single ready
+// TalosCluster ("eu-eu-1a") with a control-plane pool and a kubeconfig
+// Secret — shared by the reveal-panel tests below so each test's own body
+// stays focused on the behavior it actually asserts, rather than repeating
+// this fixture setup.
+func newTalosClusterKubeconfigMux(t *testing.T) *http.ServeMux {
+	t.Helper()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
 		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
@@ -2105,6 +2110,14 @@ func TestHandleTalosClusterDetailRendersOverviewPoolsAndConditions(t *testing.T)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
+
+	return mux
+}
+
+func TestHandleTalosClusterDetailRendersOverviewPoolsAndConditions(t *testing.T) {
+	t.Parallel()
+
+	mux := newTalosClusterKubeconfigMux(t)
 
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters/eu-eu-1a"))
@@ -2129,8 +2142,11 @@ func TestHandleTalosClusterDetailRendersOverviewPoolsAndConditions(t *testing.T)
 		"the kubeconfig's own contents must never be rendered into the page")
 	assert.Contains(t, string(body), `hx-get="/app/talosclusters/eu-eu-1a"`,
 		"hx-get is always the plain URL — hx-vals carries ?reveal on every poll instead, see hx-vals assertion below")
-	assert.Contains(t, string(body), `hx-vals="js:{reveal: (new URLSearchParams(location.search).get('reveal') === 'true')}"`,
-		"the auto-refresh must re-derive ?reveal from the browser's current URL on every poll, not a value baked in at render time")
+
+	wantHxVals := `hx-vals="js:{reveal: (new URLSearchParams(location.search).get('reveal') === 'true')}"`
+	assert.Contains(t, string(body), wantHxVals,
+		"the auto-refresh must re-derive ?reveal from the browser's current URL on every poll, "+
+			"not a value baked in at render time")
 	assert.Regexp(t, `id="taloscluster-kubeconfig-masked"\s+class="relative`, string(body),
 		"the masked panel starts visible when the page loads without ?reveal=true")
 	assert.Regexp(t, `id="taloscluster-kubeconfig-content"\s+class="hidden relative`, string(body))
@@ -2139,38 +2155,7 @@ func TestHandleTalosClusterDetailRendersOverviewPoolsAndConditions(t *testing.T)
 func TestHandleTalosClusterDetailRevealsKubeconfigPanelViaQueryParam(t *testing.T) {
 	t.Parallel()
 
-	factory := func(context.Context) (ui.NamespaceLister, error) {
-		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
-	}
-
-	cluster := talosClusterFixture(metav1.ConditionTrue)
-	zone := v1alpha2.Zone{
-		ObjectMeta: metav1.ObjectMeta{Name: "eu-eu-1a"},
-		Spec:       v1alpha2.ZoneSpec{Region: "eu", Zone: "eu-1a", Domain: "example.com"},
-	}
-	controlPlanePool := v1alpha2.InstancePool{
-		ObjectMeta: metav1.ObjectMeta{Name: "eu-eu-1a"},
-		Spec:       v1alpha2.InstancePoolSpec{Replicas: 1},
-		Status:     v1alpha2.InstancePoolStatus{ReadyReplicas: 1},
-	}
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "taloscluster-eu-eu-1a", Namespace: v1alpha2.DefaultSecretNamespace},
-		Data:       map[string][]byte{"kubeconfig": []byte("apiVersion: v1\nkind: Config\n")},
-	}
-
-	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
-		return stubKontinuumLister{
-			talosClusters: []v1alpha2.TalosCluster{cluster},
-			zones:         []v1alpha2.Zone{zone},
-			pools:         []v1alpha2.InstancePool{controlPlanePool},
-			secret:        secret,
-		}, nil
-	}
-
-	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
-
-	mux := http.NewServeMux()
-	router.RegisterRoutes(mux, nil, nil)
+	mux := newTalosClusterKubeconfigMux(t)
 
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters/eu-eu-1a?reveal=true"))
@@ -2184,7 +2169,8 @@ func TestHandleTalosClusterDetailRevealsKubeconfigPanelViaQueryParam(t *testing.
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	assert.Contains(t, string(body), `hx-get="/app/talosclusters/eu-eu-1a"`,
-		"hx-get stays the plain URL even when the page itself loaded with ?reveal=true — see hx-vals in the sibling default-state test")
+		"hx-get stays the plain URL even when the page itself loaded with ?reveal=true — "+
+			"see hx-vals in the sibling default-state test")
 	assert.Regexp(t, `id="taloscluster-kubeconfig-masked"\s+class="hidden relative`, string(body),
 		"?reveal=true renders the masked panel already hidden")
 	assert.Regexp(t, `id="taloscluster-kubeconfig-content"\s+class="relative`, string(body),

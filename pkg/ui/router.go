@@ -100,33 +100,40 @@ const (
 	pageSettings      = "settings"
 )
 
-// templateFuncs are made available to every page's template tree (see
-// mustParsePage). dict is the only one: it lets a template call site build
-// an ad hoc map literal — e.g. {{template "reveal-panel" dict "ID" "foo"
-// "Label" "bar"}} — since html/template has no map-literal syntax of its
-// own, and the "reveal-panel"/"reveal-panel-script" components (see
-// templates/components/reveal_panel.html) both need several named fields
-// passed in at once, not just the page's own top-level data.
-var templateFuncs = template.FuncMap{
-	"dict": templateDict,
-}
+// dictPairSize is the number of arguments (one key, one value) templateDict
+// consumes per resulting map entry.
+const dictPairSize = 2
+
+// errDictOddArgs and errDictKeyType are templateDict's own sentinel errors —
+// wrapped with call-specific detail below rather than constructed inline,
+// since err113 requires dynamic error text to wrap a static base error.
+var (
+	errDictOddArgs = errors.New("dict requires an even number of arguments")
+	errDictKeyType = errors.New("dict key must be a string")
+)
 
 // templateDict builds a map[string]any from alternating key/value
-// arguments — see templateFuncs' own doc for why.
+// arguments — it lets a template call site build an ad hoc map literal —
+// e.g. {{template "reveal-panel" dict "ID" "foo" "Label" "bar"}} — since
+// html/template has no map-literal syntax of its own, and the
+// "reveal-panel"/"reveal-panel-script" components (see
+// templates/components/reveal_panel.html) both need several named fields
+// passed in at once, not just the page's own top-level data. Registered
+// with every page's template tree by mustParsePage.
 func templateDict(pairs ...any) (map[string]any, error) {
-	if len(pairs)%2 != 0 {
-		return nil, errors.New("dict requires an even number of arguments")
+	if len(pairs)%dictPairSize != 0 {
+		return nil, errDictOddArgs
 	}
 
-	dict := make(map[string]any, len(pairs)/2)
+	dict := make(map[string]any, len(pairs)/dictPairSize)
 
-	for i := 0; i < len(pairs); i += 2 {
-		key, ok := pairs[i].(string)
+	for idx := 0; idx < len(pairs); idx += dictPairSize {
+		key, ok := pairs[idx].(string)
 		if !ok {
-			return nil, fmt.Errorf("dict key %d must be a string, got %T", i/2, pairs[i])
+			return nil, fmt.Errorf("%w: pair %d, got %T", errDictKeyType, idx/dictPairSize, pairs[idx])
 		}
 
-		dict[key] = pairs[i+1]
+		dict[key] = pairs[idx+1]
 	}
 
 	return dict, nil
@@ -156,7 +163,11 @@ func mustParsePage(content ...string) *template.Template {
 	files = append(files, shared...)
 	files = append(files, content...)
 
-	return template.Must(template.New("").Funcs(templateFuncs).ParseFS(templatesFS, files...))
+	// dict is the only template func made available to every page's
+	// template tree — see templateDict's own doc for why.
+	funcs := template.FuncMap{"dict": templateDict}
+
+	return template.Must(template.New("").Funcs(funcs).ParseFS(templatesFS, files...))
 }
 
 // Router handles HTTP routing for the /app UI.
@@ -775,7 +786,9 @@ func (r *Router) handleKontinuumSecretDownload(writer http.ResponseWriter, reque
 // secretDataReady reports whether item's config Secret has data to reveal
 // (see fetchSecretDataYAML), without carrying the data itself: that's
 // fetched separately, on demand, by handleKontinuumSecretDownload.
-func kontinuumDetailData(item v1alpha2.Kontinuum, secretDataReady bool, version string, authEnabled bool) map[string]any {
+func kontinuumDetailData(
+	item v1alpha2.Kontinuum, secretDataReady bool, version string, authEnabled bool,
+) map[string]any {
 	cfg := item.Status.Config
 
 	return map[string]any{
@@ -1492,7 +1505,9 @@ func (r *Router) handleTalosClusterDetail(writer http.ResponseWriter, request *h
 
 	revealed := request.URL.Query().Get("reveal") == "true"
 
-	data := talosClusterDetailData(request.Context(), kontinuums, cluster, zone, kubeconfig, revealed, r.version, r.authEnabled)
+	data := talosClusterDetailData(
+		request.Context(), kontinuums, cluster, zone, kubeconfig, revealed, r.version, r.authEnabled,
+	)
 
 	r.render(writer, pageTalosCluster, data)
 }
@@ -1546,7 +1561,7 @@ func (r *Router) handleTalosClusterKubeconfigDownload(writer http.ResponseWriter
 	_, _ = writer.Write(kubeconfig)
 }
 
-func (r *Router) handleSettings(writer http.ResponseWriter, request *http.Request) {
+func (r *Router) handleSettings(writer http.ResponseWriter, _ *http.Request) {
 	data := map[string]any{
 		"Title":       "Settings",
 		"ActiveMenu":  "settings",
