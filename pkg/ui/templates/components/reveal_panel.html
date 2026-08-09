@@ -1,0 +1,160 @@
+{{/* reveal-panel is the masked/revealed toggle UI shared by every on-demand-
+fetched secret this UI shows (TalosCluster kubeconfig, the settings page's own
+kubeconfig, a Kontinuum's config Secret data) — see each page's own handler doc
+(e.g. handleTalosClusterKubeconfigDownload) for why the actual content is
+fetched on demand rather than embedded in the page's initial server-rendered
+HTML. Pair with "reveal-panel-script" to wire it up (see that template's own doc
+for the expected data fields). Expects a dict (see templateDict) with: ID -
+element id prefix; must match the ID passed to "reveal-panel-script". Label -
+small uppercase label above the toggle button, e.g. "KUBECONFIG" or "DATA".
+DownloadURL - optional. When set, both panels also show a direct download link
+to this URL (in addition to Copy). Open - optional bool. When true, renders the
+revealed panel initially visible (masked hidden) instead of the default
+masked-first state — driven by a query parameter on pages that use one (see
+taloscluster_content.html's own call and reveal-panel-script's QueryParam) so a
+page that reloads or auto-refreshes with that parameter present renders
+already-revealed server-side, with no client-side flash between the two states.
+The content itself is still never embedded — see reveal-panel-script. Every page
+that includes this file must also register icon_download.html, even one that
+always leaves DownloadURL unset: html/template's autoescaper statically walks
+both branches of {{if .DownloadURL}} below to determine the escaping context, so
+it looks up "icon-download" regardless of what DownloadURL evaluates to at
+runtime — omitting it fails every render on that page with "no such template",
+not just the ones that would have shown the download link. */}} {{define
+"reveal-panel"}}
+<div class="flex items-center justify-between gap-2 mb-3">
+  <span
+    class="text-xs font-bold text-neutral-400 uppercase tracking-wider leading-none"
+    >{{.Label}}</span
+  >
+  <button
+    type="button"
+    id="{{.ID}}-toggle"
+    class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium leading-none rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white hover:bg-neutral-700 transition-colors"
+  >
+    <span data-icon-show class="{{if .Open}}hidden{{end}}"
+      >{{template "icon-eye"}}</span
+    >
+    <span data-icon-hide class="{{if not .Open}}hidden{{end}}"
+      >{{template "icon-eye-off"}}</span
+    >
+    <span data-label class="leading-none"
+      >{{if .Open}}Hide{{else}}Reveal{{end}}</span
+    >
+  </button>
+</div>
+<div
+  id="{{.ID}}-wrapper"
+  class="overflow-hidden transition-[height] duration-200 ease-out"
+>
+  <!--
+        Box styling (background, radius, padding) lives on these wrapper
+        divs, not on the pre/code Prism touches inside — layout.html's own
+        pre[class*="language-"]/code[class*="language-"] rule sets
+        background/font there, and those would otherwise fight our Tailwind
+        utility classes for the same properties on the same element.
+
+        #{{.ID}}-content starts empty regardless of Open: reveal-panel-
+        script.js fetches it on demand rather than this template embedding
+        it directly. Both panels below still carry a working Copy (and, if
+        DownloadURL is set, Download) action — see reveal-panel-script's
+        own copy() for why it doesn't need the panel revealed first.
+
+        The actions row is pos-absolute (top-4 right-4), taken out of flow
+        entirely, rather than a flex sibling of the pre: an in-flow actions
+        button is taller than one line of text (its own py-1.5 plus border
+        adds ~14px beyond a text-xs line), so whichever cross-axis alignment
+        the row used, the text's own padding ended up fighting the button's
+        height instead of just being p-4 — that's the whole history behind
+        this file's earlier items-start/items-center/py-1.5/relative-top
+        churn. With the button out of flow, the pre is the only thing left
+        that sizes the box, so both panels get plain, identical p-4 padding
+        with nothing else able to disturb it — pr-24 on the box reserves
+        room on the right so wrapped text never runs under the button, and
+        min-h-16 keeps the box tall enough that the button (still ~30px
+        tall) never overflows a short single line of masked or revealed
+        text. The masked pre's own py-2 below gives its dots text the same
+        breathing room the button gets from the box's own p-4, independent
+        of the button, which stays anchored to the box's own p-4 corner.
+
+        The revealed pre carries no padding of its own — on purpose, not an
+        oversight: Prism.highlightElement() (see reveal-panel-script's
+        populateCode) tags the *pre* itself with the "language-yaml" class,
+        not just the code element inside it, the moment content is
+        revealed. That makes it match layout.html's own
+        "pre[class*='language-'] { padding: 0 }" reset (an attribute
+        selector, higher specificity than a plain Tailwind class), which
+        silently zeroes out any p-*/py-*/pt-* utility placed on this
+        specific pre regardless of value — confirmed via
+        getComputedStyle, not a guess. Masked never runs Prism, so its own
+        py-2 is real and unaffected.
+
+        On top of that, even matching padding wouldn't make the two panels
+        read as the same vertical rhythm anyway: "*" glyphs sit low in
+        their line box, while real text's cap-height reaches close to the
+        top of the same box. A few px of extra top breathing room on the
+        revealed side compensates for both of these.
+
+        Horizontal scroll (long unwrapped YAML lines) and this top nudge
+        both live on the same wrapping div around the pre, not on the pre
+        or code themselves: a native scrollbar renders inside its own
+        element's box, carving space out of the bottom of that box rather
+        than adding space below it, so without a reserved gap it paints
+        directly over the last line of code — and any padding placed on
+        the pre or code directly would be silently zeroed right back out
+        by layout.html's own "pre[class*='language-'], code[class*=
+        'language-'] { padding: 0 }" reset (an attribute selector, higher
+        specificity than a plain Tailwind class) the moment
+        Prism.highlightElement() tags them with the "language-yaml" class
+        — confirmed via getComputedStyle, not a guess. This wrapper div
+        never gets that class (Prism only tags code's *direct* parent and
+        code itself, confirmed the same way), so its own py-2 is real —
+        matching the masked pre's own py-2 exactly.
+    -->
+  <div
+    id="{{.ID}}-masked"
+    class="{{if .Open}}hidden {{end}}relative min-h-16 bg-neutral-950 rounded-lg p-4 pr-24"
+  >
+    <pre class="m-0 py-2 text-xs text-neutral-500">
+********************************</pre
+    >
+    {{template "reveal-panel-actions" .}}
+  </div>
+  <div
+    id="{{.ID}}-content"
+    class="{{if not .Open}}hidden {{end}}relative min-h-16 bg-neutral-950 rounded-lg p-4 pr-24"
+  >
+    <div class="overflow-x-auto overflow-y-hidden py-2">
+      <pre
+        class="m-0 text-xs"
+      ><code id="{{.ID}}-code" class="language-yaml"></code></pre>
+    </div>
+    {{template "reveal-panel-actions" .}}
+  </div>
+</div>
+{{end}} {{define "reveal-panel-actions"}}
+<div class="absolute top-4 right-4 z-10 shrink-0 flex items-center gap-1.5">
+  {{if .DownloadURL}}
+  <a
+    href="{{.DownloadURL}}"
+    download
+    hx-boost="false"
+    title="Download"
+    class="inline-flex items-center gap-1.5 px-2 py-1.5 text-xs font-medium rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white hover:bg-neutral-700 transition-colors"
+  >
+    {{template "icon-download"}}
+  </a>
+  {{end}}
+  <button
+    type="button"
+    data-copy-for="{{.ID}}"
+    title="Copy to clipboard"
+    class="inline-flex items-center gap-1.5 px-2 py-1.5 text-xs font-medium rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white hover:bg-neutral-700 transition-colors"
+  >
+    <span data-icon-copy>{{template "icon-copy"}}</span>
+    <span data-icon-copied class="hidden text-emerald-400"
+      >{{template "icon-check"}}</span
+    >
+  </button>
+</div>
+{{end}}

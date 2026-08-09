@@ -50,6 +50,10 @@
             background-attachment: fixed;
         }
 
+        ::selection {
+            background: rgb(224 146 79 / 35%);
+        }
+
         ::-webkit-scrollbar {
             width: 10px;
             height: 10px;
@@ -88,11 +92,6 @@
             margin: 0;
             padding: 0;
             color: #f5f5f5;
-        }
-
-        pre[class*="language-"] ::selection,
-        code[class*="language-"] ::selection {
-            background: rgb(224 146 79 / 35%);
         }
 
         /* Structural/muted tokens (comments, punctuation) — dimmed to

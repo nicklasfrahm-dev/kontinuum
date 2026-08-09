@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"html/template"
 	"maps"
@@ -80,21 +81,63 @@ type SessionInvalidator func(writer http.ResponseWriter, request *http.Request, 
 var templatesFS embed.FS
 
 const (
-	pageHome     = "home"
-	pageRegistry = "registry"
-	pageInstance = "instance"
+	pageHome      = "home"
+	pageRegistry  = "registry"
+	pageKontinuum = "kontinuum"
 	// pageMachines and pageMachineDetail back /app/instances and
 	// /app/instances/{name} — the Instance CRD (api/v1alpha2.Instance, a
 	// bare-metal or provider-backed machine InstancePool/TalosCluster claim
-	// from). Named "machine" rather than reusing "instance" above, which
-	// already renders a completely different object: a registered Kontinuum
-	// server process. See issue #52 for why these stay separate pages/routes
-	// despite the CRD itself being called Instance.
+	// from). Named "machine" rather than "instance", which would collide
+	// with pageKontinuum above: a registered Kontinuum server process,
+	// unrelated to the Instance CRD despite the name. See issue #52 for why
+	// these stay separate pages/routes despite the CRD itself being called
+	// Instance.
 	pageMachines      = "machines"
 	pageMachineDetail = "machine-detail"
+	pageTalosClusters = "talosclusters"
+	pageTalosCluster  = "taloscluster"
 	pageIAM           = "iam"
 	pageSettings      = "settings"
 )
+
+// dictPairSize is the number of arguments (one key, one value) templateDict
+// consumes per resulting map entry.
+const dictPairSize = 2
+
+// errDictOddArgs and errDictKeyType are templateDict's own sentinel errors —
+// wrapped with call-specific detail below rather than constructed inline,
+// since err113 requires dynamic error text to wrap a static base error.
+var (
+	errDictOddArgs = errors.New("dict requires an even number of arguments")
+	errDictKeyType = errors.New("dict key must be a string")
+)
+
+// templateDict builds a map[string]any from alternating key/value
+// arguments — it lets a template call site build an ad hoc map literal —
+// e.g. {{template "reveal-panel" dict "ID" "foo" "Label" "bar"}} — since
+// html/template has no map-literal syntax of its own, and the
+// "reveal-panel"/"reveal-panel-script" components (see
+// templates/components/reveal_panel.html) both need several named fields
+// passed in at once, not just the page's own top-level data. Registered
+// with every page's template tree by mustParsePage.
+func templateDict(pairs ...any) (map[string]any, error) {
+	if len(pairs)%dictPairSize != 0 {
+		return nil, errDictOddArgs
+	}
+
+	dict := make(map[string]any, len(pairs)/dictPairSize)
+
+	for idx := 0; idx < len(pairs); idx += dictPairSize {
+		key, ok := pairs[idx].(string)
+		if !ok {
+			return nil, fmt.Errorf("%w: pair %d, got %T", errDictKeyType, idx/dictPairSize, pairs[idx])
+		}
+
+		dict[key] = pairs[idx+1]
+	}
+
+	return dict, nil
+}
 
 // mustParsePage parses the layout and partials shared by every page, plus
 // the given page-specific content files, into their own template tree —
@@ -109,6 +152,8 @@ func mustParsePage(content ...string) *template.Template {
 		"templates/components/icon_tenants.html",
 		"templates/components/icon_registry.html",
 		"templates/components/icon_server.html",
+		"templates/components/icon_cluster.html",
+		"templates/components/icon_kubernetes.html",
 		"templates/components/icon_shield.html",
 		"templates/components/icon_settings.html",
 		"templates/components/icon_logout.html",
@@ -118,7 +163,11 @@ func mustParsePage(content ...string) *template.Template {
 	files = append(files, shared...)
 	files = append(files, content...)
 
-	return template.Must(template.New("").ParseFS(templatesFS, files...))
+	// dict is the only template func made available to every page's
+	// template tree — see templateDict's own doc for why.
+	funcs := template.FuncMap{"dict": templateDict}
+
+	return template.Must(template.New("").Funcs(funcs).ParseFS(templatesFS, files...))
 }
 
 // Router handles HTTP routing for the /app UI.
@@ -152,20 +201,31 @@ func NewRouter(
 		pageRegistry: mustParsePage("templates/registry_content.html",
 			"templates/components/icon_trash.html", "templates/components/icon_globe.html",
 			"templates/components/zone_add_modal.html"),
-		pageInstance: mustParsePage("templates/instance_content.html",
+		pageKontinuum: mustParsePage("templates/kontinuum_content.html",
 			"templates/components/icon_chevron_left.html", "templates/components/icon_eye.html",
 			"templates/components/icon_eye_off.html", "templates/components/icon_copy.html",
 			"templates/components/icon_check.html", "templates/components/icon_key.html",
-			"templates/components/icon_info.html"),
+			"templates/components/icon_info.html", "templates/components/icon_download.html",
+			"templates/components/reveal_panel.html", "templates/components/reveal_panel_script.html"),
 		pageMachines: mustParsePage("templates/machines_content.html"),
 		pageMachineDetail: mustParsePage("templates/machine_detail_content.html",
 			"templates/components/icon_chevron_left.html", "templates/components/icon_info.html"),
+		pageTalosClusters: mustParsePage("templates/talosclusters_content.html"),
+		pageTalosCluster: mustParsePage("templates/taloscluster_content.html",
+			"templates/components/icon_chevron_left.html", "templates/components/icon_info.html",
+			"templates/components/icon_key.html", "templates/components/icon_download.html",
+			"templates/components/icon_eye.html", "templates/components/icon_eye_off.html",
+			"templates/components/icon_copy.html", "templates/components/icon_check.html",
+			"templates/components/reveal_panel.html", "templates/components/reveal_panel_script.html",
+			"templates/components/copy_snippet.html"),
 		pageIAM: mustParsePage("templates/iam_content.html",
 			"templates/components/icon_key.html", "templates/components/icon_info.html"),
 		pageSettings: mustParsePage("templates/settings_content.html",
 			"templates/components/icon_copy.html", "templates/components/icon_download.html",
 			"templates/components/icon_eye.html", "templates/components/icon_eye_off.html",
-			"templates/components/icon_terminal.html", "templates/components/icon_check.html"),
+			"templates/components/icon_terminal.html", "templates/components/icon_check.html",
+			"templates/components/reveal_panel.html", "templates/components/reveal_panel_script.html",
+			"templates/components/copy_snippet.html"),
 	}
 
 	return &Router{
@@ -212,13 +272,18 @@ func (r *Router) RegisterRoutes(
 	mux.HandleFunc("GET /app", appRoot)
 	mux.HandleFunc("GET /app/home", protect(r.handleHome))
 	mux.HandleFunc("GET /app/kontinuums", protect(r.renderRegistry))
-	mux.HandleFunc("GET /app/kontinuums/{name}", protect(r.handleInstanceDetail))
+	mux.HandleFunc("GET /app/kontinuums/{name}", protect(r.handleKontinuumDetail))
+	mux.HandleFunc("GET /app/kontinuums/{name}/secret", protect(r.handleKontinuumSecretDownload))
 	mux.HandleFunc("DELETE /app/kontinuums/{name}", protect(r.handleDeleteInstance))
 	mux.HandleFunc("POST /app/zones/add", protect(r.handleZoneAdd))
 	mux.HandleFunc("GET /app/instances", protect(r.handleMachines))
 	mux.HandleFunc("GET /app/instances/{name}", protect(r.handleMachineDetail))
+	mux.HandleFunc("GET /app/talosclusters", protect(r.handleTalosClusters))
+	mux.HandleFunc("GET /app/talosclusters/{name}", protect(r.handleTalosClusterDetail))
+	mux.HandleFunc("GET /app/talosclusters/{name}/kubeconfig", protect(r.handleTalosClusterKubeconfigDownload))
 	mux.HandleFunc("GET /app/iam", protect(r.handleIAM))
 	mux.HandleFunc("GET /app/settings", protect(r.handleSettings))
+	mux.HandleFunc("GET /app/settings/kubeconfig", protect(r.handleSettingsKubeconfigDownload))
 }
 
 func handleRoot(writer http.ResponseWriter, request *http.Request) {
@@ -612,12 +677,12 @@ func (r *Router) handleZoneAdd(writer http.ResponseWriter, request *http.Request
 	r.renderZoneAddModalBody(writer, r.zoneAddFormData(zoneAddFields{}, createdZone.Name, ""))
 }
 
-// handleInstanceDetail is GET /app/kontinuums/{name}'s handler — it shows one
+// handleKontinuumDetail is GET /app/kontinuums/{name}'s handler — it shows one
 // Kontinuum instance's own settings (status.config, status.secretRef),
 // sourced from the shared Kontinuum object store rather than this
 // process's own local config, so it renders the same regardless of which
 // instance's UI you happen to be browsing from.
-func (r *Router) handleInstanceDetail(writer http.ResponseWriter, request *http.Request) {
+func (r *Router) handleKontinuumDetail(writer http.ResponseWriter, request *http.Request) {
 	kontinuums, err := r.kontinuumsFor(request.Context())
 	if err != nil {
 		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
@@ -657,14 +722,73 @@ func (r *Router) handleInstanceDetail(writer http.ResponseWriter, request *http.
 		return
 	}
 
-	r.render(writer, pageInstance, instanceDetailData(item, secretDataYAML, r.version, r.authEnabled))
+	r.render(writer, pageKontinuum, kontinuumDetailData(item, secretDataYAML != "", r.version, r.authEnabled))
 }
 
-// instanceDetailData builds handleInstanceDetail's template data from item
-// and its already-fetched secretDataYAML (see fetchSecretDataYAML) —
-// factored out of handleInstanceDetail purely to keep that function short;
-// it has no logic of its own beyond field selection.
-func instanceDetailData(item v1alpha2.Kontinuum, secretDataYAML, version string, authEnabled bool) map[string]any {
+// handleKontinuumSecretDownload is GET /app/kontinuums/{name}/secret's
+// handler — it serves the Kontinuum's own config Secret contents (see
+// fetchSecretDataYAML) as plain text, fetched on demand by
+// kontinuum_content.html's "Reveal" button rather than embedded in
+// handleKontinuumDetail's own page response, which only ever learns whether
+// a reveal panel should render at all (see kontinuumDetailData's
+// SecretDataReady). Mirrors handleTalosClusterKubeconfigDownload's same
+// on-demand-reveal pattern for a different secret.
+func (r *Router) handleKontinuumSecretDownload(writer http.ResponseWriter, request *http.Request) {
+	kontinuums, err := r.kontinuumsFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	var item v1alpha2.Kontinuum
+
+	name := request.PathValue("name")
+
+	err = kontinuums.Get(request.Context(), client.ObjectKey{Name: name}, &item)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			http.NotFound(writer, request)
+
+			return
+		}
+
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return
+		}
+
+		http.Error(writer, "failed to get kontinuum instance: "+err.Error(), http.StatusBadGateway)
+
+		return
+	}
+
+	secretDataYAML, ok := r.fetchSecretDataYAML(writer, request, kontinuums, item.Status.SecretRef)
+	if !ok {
+		return
+	}
+
+	if secretDataYAML == "" {
+		http.NotFound(writer, request)
+
+		return
+	}
+
+	writer.Header().Set("Content-Type", "application/yaml")
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write([]byte(secretDataYAML))
+}
+
+// kontinuumDetailData builds handleKontinuumDetail's template data from
+// item — factored out of handleKontinuumDetail purely to keep that function
+// short; it has no logic of its own beyond field selection.
+// secretDataReady reports whether item's config Secret has data to reveal
+// (see fetchSecretDataYAML), without carrying the data itself: that's
+// fetched separately, on demand, by handleKontinuumSecretDownload.
+func kontinuumDetailData(
+	item v1alpha2.Kontinuum, secretDataReady bool, version string, authEnabled bool,
+) map[string]any {
 	cfg := item.Status.Config
 
 	return map[string]any{
@@ -685,7 +809,7 @@ func instanceDetailData(item v1alpha2.Kontinuum, secretDataYAML, version string,
 		"StorageTarget":   cfg.Server.Storage,
 		"SecretName":      item.Status.SecretRef.Name,
 		"SecretNamespace": item.Status.SecretRef.Namespace,
-		"SecretDataYAML":  secretDataYAML,
+		"SecretDataReady": secretDataReady,
 		"LogLevel":        cfg.Log.Level,
 		"LogFormat":       cfg.Log.Format,
 		"OIDCEnabled":     cfg.OIDC.Enabled,
@@ -696,16 +820,17 @@ func instanceDetailData(item v1alpha2.Kontinuum, secretDataYAML, version string,
 	}
 }
 
-// fetchSecretDataYAML fetches the Secret backing ref (the instance page's
-// status.secretRef) through kontinuums — the same identity-scoped client
-// handleInstanceDetail already used to fetch the Kontinuum object itself, so
-// a viewer sees the config secret's contents exactly when RBAC would let
-// them `kubectl get secret` it directly, with no separate authorization path
-// to keep in sync. Returns ("", true) when there is no secret to show or it
-// can no longer be found, since either just means the instance page renders
-// without a reveal panel rather than that the request failed. The bool
-// result is false when the caller should stop: fetchSecretDataYAML has
-// already written the error (or forbidden-redirect) response itself.
+// fetchSecretDataYAML fetches the Secret backing ref (the Kontinuum detail
+// page's status.secretRef) through kontinuums — the same identity-scoped
+// client handleKontinuumDetail/handleKontinuumSecretDownload already used to
+// fetch the Kontinuum object itself, so a viewer sees the config secret's
+// contents exactly when RBAC would let them `kubectl get secret` it
+// directly, with no separate authorization path to keep in sync. Returns
+// ("", true) when there is no secret to show or it can no longer be found,
+// since either just means the caller renders without a reveal panel rather
+// than that the request failed. The bool result is false when the caller
+// should stop: fetchSecretDataYAML has already written the error (or
+// forbidden-redirect) response itself.
 func (r *Router) fetchSecretDataYAML(
 	writer http.ResponseWriter, request *http.Request,
 	kontinuums KontinuumClient, ref v1alpha2.KontinuumSecretReference,
@@ -999,7 +1124,7 @@ func (r *Router) handleMachineDetail(writer http.ResponseWriter, request *http.R
 
 // machineDetailData builds handleMachineDetail's template data from item —
 // factored out purely to keep that function short, same as
-// instanceDetailData does for the Kontinuum instance page above.
+// kontinuumDetailData does for the Kontinuum detail page above.
 func machineDetailData(item v1alpha2.Instance, version string, authEnabled bool) map[string]any {
 	interfaces := make([]machineInterfaceRow, 0, len(item.Status.Interfaces))
 	for _, iface := range item.Status.Interfaces {
@@ -1043,20 +1168,429 @@ func machineDetailData(item v1alpha2.Instance, version string, authEnabled bool)
 	}
 }
 
-func (r *Router) handleSettings(writer http.ResponseWriter, request *http.Request) {
-	// kubeconfig itself branches on whether OIDC is configured (see its own
-	// doc) — kontinuum's default is no authentication at all, not "no
-	// access," so there's always a working kubeconfig to show here, not
-	// just when OIDC happens to be enabled.
+// talosKubeconfigSecretKey is the key a TalosCluster's own kubeconfig is
+// stored under on its status.secretRef Secret — mirrors
+// pkg/domain/taloscluster/secrets.go's own unexported kubeconfigKey. Kept as
+// a separate copy (rather than exporting that package's constant) since this
+// is the only thing pkg/ui needs from that package, and pulling in the
+// domain package itself would be a much bigger dependency than one string.
+const talosKubeconfigSecretKey = "kubeconfig"
+
+// talosClusterRow is a TalosCluster object rendered as a row on the list
+// page — see handleTalosClusters.
+type talosClusterRow struct {
+	Name              string
+	ControlPlanePool  string
+	TalosVersion      string
+	KubernetesVersion string
+	Ready             string
+	ReadyOK           bool
+	Age               string
+}
+
+// handleTalosClusters is GET /app/talosclusters's handler — it lists every
+// TalosCluster and renders the list page, following the same "browse/inspect
+// a real object, not a form" precedent as handleIAM (see issue #53's own
+// reference to #38).
+func (r *Router) handleTalosClusters(writer http.ResponseWriter, request *http.Request) {
+	kontinuums, err := r.kontinuumsFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	var list v1alpha2.TalosClusterList
+
+	err = kontinuums.List(request.Context(), &list)
+	if err != nil {
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return
+		}
+
+		http.Error(writer, "failed to list taloscluster instances: "+err.Error(), http.StatusBadGateway)
+
+		return
+	}
+
+	clusters := make([]talosClusterRow, 0, len(list.Items))
+	for _, item := range list.Items {
+		row := talosClusterRow{
+			Name:              item.Name,
+			ControlPlanePool:  item.Spec.ControlPlane.PoolRef.Name,
+			TalosVersion:      item.Spec.Talos.Version,
+			KubernetesVersion: item.Spec.Kubernetes.Version,
+			Age:               formatAge(item.CreationTimestamp.Time),
+		}
+
+		if cond := conditionOfType(item.Status.Conditions, "Ready"); cond != nil {
+			row.Ready = string(cond.Status)
+			row.ReadyOK = cond.Status == metav1.ConditionTrue
+		}
+
+		clusters = append(clusters, row)
+	}
+
+	sort.Slice(clusters, func(i, j int) bool { return clusters[i].Name < clusters[j].Name })
+
+	r.render(writer, pageTalosClusters, map[string]any{
+		"Title":         "Clusters",
+		"ActiveMenu":    "talosclusters",
+		"Version":       r.version,
+		"AuthEnabled":   r.authEnabled,
+		"TalosClusters": clusters,
+	})
+}
+
+// conditionOfType returns the entry in conditions whose Type matches
+// conditionType, or nil if there is none — used instead of
+// renderRegistry/listZoneRows' own latestCondition where the UI wants one
+// specific, named condition (e.g. "Ready") rather than whichever changed
+// most recently.
+func conditionOfType(conditions []metav1.Condition, conditionType string) *metav1.Condition {
+	for index := range conditions {
+		if conditions[index].Type == conditionType {
+			return &conditions[index]
+		}
+	}
+
+	return nil
+}
+
+// poolRow is an InstancePool referenced by a TalosCluster's control plane or
+// a named worker pool, rendered on the detail page's pool breakdown. Name is
+// "Control plane" for the control-plane row, which has no name of its own
+// (see TalosClusterMemberSpec) — every other row is a worker pool, named per
+// TalosClusterWorkerSpec.Name. Found is false when the referenced
+// InstancePool doesn't exist yet (or this viewer's RBAC hides it) — a
+// TalosCluster only ever references a pool by name (see
+// InstancePoolReference's own doc), so that's "not provisioned yet," not a
+// page-load failure.
+type poolRow struct {
+	Name          string
+	PoolRef       string
+	ReadyReplicas int32
+	Replicas      int32
+	Found         bool
+}
+
+// fetchPoolRow looks up the InstancePool named poolName and summarizes it as
+// a poolRow — see that type's own doc for why a missing pool isn't treated
+// as an error. Errors other than NotFound (e.g. Forbidden) are folded into
+// the same "not found" rendering rather than failing the whole detail page:
+// kontinuum's RBAC model is all-or-nothing per admin group (see handleIAM's
+// own doc), so a viewer who can already read the TalosCluster itself is
+// never expected to be selectively denied one of its InstancePools.
+func fetchPoolRow(ctx context.Context, kontinuums KontinuumClient, rowName, poolName string) poolRow {
+	var pool v1alpha2.InstancePool
+
+	err := kontinuums.Get(ctx, client.ObjectKey{Name: poolName}, &pool)
+	if err != nil {
+		return poolRow{Name: rowName, PoolRef: poolName}
+	}
+
+	return poolRow{
+		Name: rowName, PoolRef: poolName, Found: true,
+		ReadyReplicas: pool.Status.ReadyReplicas, Replicas: pool.Spec.Replicas,
+	}
+}
+
+// conditionRow is one status.conditions entry rendered on the detail page's
+// full condition list.
+type conditionRow struct {
+	Type    string
+	Status  string
+	OK      bool
+	Reason  string
+	Message string
+	Age     string
+}
+
+// fetchOwningZone looks up the Zone sharing cluster's own name. zone-add
+// creates Zone/InstancePool/TalosCluster all under one shared
+// <region>-<zone> name (see pkg/domain/zone/add.go's BuildAddObjects) — the
+// same name-matching the Zone controller itself relies on to find "its"
+// TalosCluster (see pkg/domain/zone/controller.go's mapTalosClusterToZone).
+// Returns a zero Zone, ok=true when none is found: a TalosCluster doesn't
+// require an owning Zone to exist (e.g. one created outside the zone-add
+// flow), so that's "nothing to show," not a failure. ok is false only when
+// fetchOwningZone has already written the error (or forbidden-redirect)
+// response itself.
+func (r *Router) fetchOwningZone(
+	writer http.ResponseWriter, request *http.Request, kontinuums KontinuumClient, clusterName string,
+) (v1alpha2.Zone, bool) {
+	var zone v1alpha2.Zone
+
+	err := kontinuums.Get(request.Context(), client.ObjectKey{Name: clusterName}, &zone)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return v1alpha2.Zone{}, true
+		}
+
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return v1alpha2.Zone{}, false
+		}
+
+		http.Error(writer, "failed to get owning zone: "+err.Error(), http.StatusBadGateway)
+
+		return v1alpha2.Zone{}, false
+	}
+
+	return zone, true
+}
+
+// fetchTalosClusterKubeconfig fetches the kubeconfig stored under ref (a
+// TalosCluster's own status.secretRef) — see talosKubeconfigSecretKey's own
+// doc for the key it reads. A cluster with no secretRef yet, or whose Secret
+// doesn't yet carry a kubeconfig (bootstrap still in progress), returns
+// (nil, true): that's not a request failure, just "not ready yet". The bool
+// result is false only when fetchTalosClusterKubeconfig has already written
+// the error (or forbidden-redirect) response itself — mirrors
+// fetchSecretDataYAML's identical contract.
+func (r *Router) fetchTalosClusterKubeconfig(
+	writer http.ResponseWriter, request *http.Request, kontinuums KontinuumClient, ref v1alpha2.SecretReference,
+) ([]byte, bool) {
+	if ref.Name == "" {
+		return nil, true
+	}
+
+	var secret corev1.Secret
+
+	err := kontinuums.Get(request.Context(), client.ObjectKey{Name: ref.Name, Namespace: ref.Namespace}, &secret)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, true
+		}
+
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return nil, false
+		}
+
+		http.Error(writer, "failed to get taloscluster kubeconfig secret: "+err.Error(), http.StatusBadGateway)
+
+		return nil, false
+	}
+
+	return secret.Data[talosKubeconfigSecretKey], true
+}
+
+// fetchTalosCluster fetches the TalosCluster named name — shared by
+// handleTalosClusterDetail and handleTalosClusterKubeconfigDownload, which
+// both start from "look up this one TalosCluster" before doing their own,
+// different thing with it. ok is false only when fetchTalosCluster has
+// already written the response itself: NotFound, a forbidden-redirect, or a
+// bad-gateway error.
+func (r *Router) fetchTalosCluster(
+	writer http.ResponseWriter, request *http.Request, kontinuums KontinuumClient, name string,
+) (v1alpha2.TalosCluster, bool) {
+	var cluster v1alpha2.TalosCluster
+
+	err := kontinuums.Get(request.Context(), client.ObjectKey{Name: name}, &cluster)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			http.NotFound(writer, request)
+
+			return v1alpha2.TalosCluster{}, false
+		}
+
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return v1alpha2.TalosCluster{}, false
+		}
+
+		http.Error(writer, "failed to get taloscluster: "+err.Error(), http.StatusBadGateway)
+
+		return v1alpha2.TalosCluster{}, false
+	}
+
+	return cluster, true
+}
+
+// talosClusterDetailData builds handleTalosClusterDetail's template data
+// from cluster and its already-fetched zone/kubeconfig (see
+// fetchOwningZone/fetchTalosClusterKubeconfig) — factored out of
+// handleTalosClusterDetail purely to keep that function short, mirroring
+// kontinuumDetailData's identical role for the Kontinuum detail page.
+// revealed is handleTalosClusterDetail's own ?reveal=true query parameter,
+// passed straight through as KubeconfigRevealed — see
+// taloscluster_content.html's own reveal-panel/reveal-panel-script calls
+// for why the page renders itself already open when set, instead of
+// always starting masked and fixing that up client-side.
+func talosClusterDetailData(
+	ctx context.Context, kontinuums KontinuumClient, cluster v1alpha2.TalosCluster, zone v1alpha2.Zone,
+	kubeconfig []byte, revealed bool, version string, authEnabled bool,
+) map[string]any {
+	pools := make([]poolRow, 0, len(cluster.Spec.Workers)+1)
+	pools = append(pools,
+		fetchPoolRow(ctx, kontinuums, "Control plane", cluster.Spec.ControlPlane.PoolRef.Name))
+
+	for _, worker := range cluster.Spec.Workers {
+		pools = append(pools, fetchPoolRow(ctx, kontinuums, worker.Name, worker.PoolRef.Name))
+	}
+
+	conditions := make([]conditionRow, 0, len(cluster.Status.Conditions))
+	for _, cond := range cluster.Status.Conditions {
+		conditions = append(conditions, conditionRow{
+			Type: cond.Type, Status: string(cond.Status), OK: cond.Status == metav1.ConditionTrue,
+			Reason: cond.Reason, Message: capitalizeFirst(cond.Message), Age: formatAge(cond.LastTransitionTime.Time),
+		})
+	}
+
+	data := map[string]any{
+		"Title":              cluster.Name,
+		"ActiveMenu":         "talosclusters",
+		"Version":            version,
+		"AuthEnabled":        authEnabled,
+		"Name":               cluster.Name,
+		"TalosVersion":       cluster.Spec.Talos.Version,
+		"KubernetesVersion":  cluster.Spec.Kubernetes.Version,
+		"Age":                formatAge(cluster.CreationTimestamp.Time),
+		"Pools":              pools,
+		"Conditions":         conditions,
+		"KubeconfigReady":    len(kubeconfig) > 0,
+		"KubeconfigRevealed": revealed,
+		"HasZone":            zone.Name != "",
+		"ZoneRegion":         zone.Spec.Region,
+		"ZoneName":           zone.Spec.Zone,
+	}
+
+	if readyCond := conditionOfType(cluster.Status.Conditions, "Ready"); readyCond != nil {
+		data["Ready"] = string(readyCond.Status)
+		data["ReadyOK"] = readyCond.Status == metav1.ConditionTrue
+	}
+
+	return data
+}
+
+// handleTalosClusterDetail is GET /app/talosclusters/{name}'s handler — one
+// TalosCluster's control-plane/worker pool breakdown, versions, full
+// condition list, and (see fetchTalosClusterKubeconfig) whether a
+// kubeconfig is available to download, without ever fetching or rendering
+// that kubeconfig's own contents into the page — see
+// handleTalosClusterKubeconfigDownload for the actual download. An
+// optional ?reveal=true query parameter (see talosClusterDetailData's own
+// KubeconfigRevealed field) renders the kubeconfig's reveal panel already
+// open, so a page reload or the 15s auto-refresh's own hx-get (see
+// taloscluster_content.html) can round-trip through this same parameter
+// and stay open without a client-side flash between states.
+func (r *Router) handleTalosClusterDetail(writer http.ResponseWriter, request *http.Request) {
+	kontinuums, err := r.kontinuumsFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	cluster, found := r.fetchTalosCluster(writer, request, kontinuums, request.PathValue("name"))
+	if !found {
+		return
+	}
+
+	zone, found := r.fetchOwningZone(writer, request, kontinuums, cluster.Name)
+	if !found {
+		return
+	}
+
+	kubeconfig, found := r.fetchTalosClusterKubeconfig(writer, request, kontinuums, cluster.Status.SecretRef)
+	if !found {
+		return
+	}
+
+	revealed := request.URL.Query().Get("reveal") == "true"
+
+	data := talosClusterDetailData(
+		request.Context(), kontinuums, cluster, zone, kubeconfig, revealed, r.version, r.authEnabled,
+	)
+
+	r.render(writer, pageTalosCluster, data)
+}
+
+// handleTalosClusterKubeconfigDownload is GET
+// /app/talosclusters/{name}/kubeconfig's handler — it streams the cluster's
+// kubeconfig (see fetchTalosClusterKubeconfig) straight to the response,
+// serving two different callers from taloscluster_content.html: the
+// `<a download>` link (browser save-as-file, via Content-Disposition below)
+// and reveal-panel-script's own on-demand fetch — triggered by a "Reveal"
+// click, or automatically when the page itself already rendered the panel
+// open (see handleTalosClusterDetail's own ?reveal=true) — which renders
+// the response text inline instead. Either way,
+// this TalosCluster kubeconfig — real cluster-admin credentials pulled from
+// a Secret, not a value this process can regenerate on demand — is never
+// part of handleTalosClusterDetail's own server-rendered page response; it
+// only ever reaches the browser through an explicit, separate request the
+// viewer triggers themselves, unlike settings_content.html's synthetic
+// OIDC-login kubeconfig, which that page's initial render embeds directly.
+// See issue #53's own explicit requirement, which this on-demand fetch
+// deliberately relaxes (the credential can now reach the page's DOM) while
+// still keeping it out of anything cached or logged as the page's own
+// response body.
+func (r *Router) handleTalosClusterKubeconfigDownload(writer http.ResponseWriter, request *http.Request) {
+	kontinuums, err := r.kontinuumsFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	cluster, found := r.fetchTalosCluster(writer, request, kontinuums, request.PathValue("name"))
+	if !found {
+		return
+	}
+
+	kubeconfig, found := r.fetchTalosClusterKubeconfig(writer, request, kontinuums, cluster.Status.SecretRef)
+	if !found {
+		return
+	}
+
+	if len(kubeconfig) == 0 {
+		http.NotFound(writer, request)
+
+		return
+	}
+
+	writer.Header().Set("Content-Type", "application/yaml")
+	writer.Header().Set("Content-Disposition", `attachment; filename="`+cluster.Name+`-kubeconfig.yaml"`)
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(kubeconfig)
+}
+
+func (r *Router) handleSettings(writer http.ResponseWriter, _ *http.Request) {
 	data := map[string]any{
 		"Title":       "Settings",
 		"ActiveMenu":  "settings",
 		"Version":     r.version,
 		"AuthEnabled": r.authEnabled,
-		"Kubeconfig":  kubeconfig(requestOrigin(request), request.Host, r.cfg.OIDC.IssuerURL, r.cfg.OIDC.ClientID),
 	}
 
 	r.render(writer, pageSettings, data)
+}
+
+// handleSettingsKubeconfigDownload is GET /app/settings/kubeconfig's
+// handler — it serves the same synthetic OIDC-login kubeconfig
+// settings_content.html's own kubectl-access card shows, computed by
+// kubeconfig() the same way handleSettings itself used to embed directly
+// into the page (kontinuum's default is no authentication at all, not "no
+// access," so there's always a working kubeconfig here, not just when OIDC
+// happens to be enabled). This is now its own endpoint instead, serving two
+// different callers: the page's `<a download>` link, and its "Reveal"
+// button, which fetches this same endpoint via JS only when clicked and
+// renders the response text inline — mirrors
+// handleTalosClusterKubeconfigDownload's identical dual role for a
+// different kubeconfig.
+func (r *Router) handleSettingsKubeconfigDownload(writer http.ResponseWriter, request *http.Request) {
+	content := kubeconfig(requestOrigin(request), request.Host, r.cfg.OIDC.IssuerURL, r.cfg.OIDC.ClientID)
+
+	writer.Header().Set("Content-Type", "application/yaml")
+	writer.Header().Set("Content-Disposition", `attachment; filename="kontinuum-kubeconfig.yaml"`)
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write([]byte(content))
 }
 
 func (r *Router) render(writer http.ResponseWriter, page string, data any) {

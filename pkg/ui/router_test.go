@@ -45,6 +45,18 @@ const (
 // NotFound/Forbidden errors for the config-secret reveal tests below.
 const secretsResource = "secrets"
 
+// testTalosClusterName is the shared fixture name reused across the
+// clusters list/detail/kubeconfig-download tests below (see
+// talosClusterFixture) and TestHandleZoneAddCreatesZoneAndReturnsSuccessFragment,
+// where it coincidentally matches zone-add's own <region>-<zone> naming
+// (region "eu", zone "eu-1a" — see addObjectName's doc).
+const testTalosClusterName = "eu-eu-1a"
+
+// talosClustersResource is the GroupResource "resource" name used to build
+// fake NotFound/Forbidden errors for the clusters pages' tests below — see
+// secretsResource for the equivalent used by the config-secret tests.
+const talosClustersResource = "talosclusters"
+
 // stubNamespaceLister is a fixed-response ui.NamespaceLister for tests.
 type stubNamespaceLister struct {
 	list *corev1.NamespaceList
@@ -85,13 +97,30 @@ type stubKontinuumLister struct {
 	// instance detail page (see handleMachineDetail). Separate from getErr,
 	// which Get uses for *v1alpha2.Kontinuum.
 	machineGetErr error
+	// talosClusters backs List calls for a *v1alpha2.TalosClusterList and
+	// Get calls for a *v1alpha2.TalosCluster — used by the clusters pages
+	// (see handleTalosClusters/handleTalosClusterDetail). talosClustersErr,
+	// when set, is returned by List instead; talosClusterGetErr, when set,
+	// is returned by Get instead — kept separate since a detail-page test
+	// only ever needs one or the other.
+	talosClusters      []v1alpha2.TalosCluster
+	talosClustersErr   error
+	talosClusterGetErr error
+	// zones backs Get calls for a *v1alpha2.Zone — used by
+	// handleTalosClusterDetail's owning-Zone lookup (see fetchOwningZone).
+	// Kept separate from zoneFactory's own fake client, which only ever
+	// backs the "Add zone" form/registry page's own zones table.
+	zones []v1alpha2.Zone
+	// pools backs Get calls for a *v1alpha2.InstancePool — used by
+	// handleTalosClusterDetail's pool breakdown (see fetchPoolRow).
+	pools []v1alpha2.InstancePool
 }
 
 // Get looks up either a Kontinuum by name in items or, for a *corev1.Secret,
 // the fixed secret field — dispatching on obj's concrete type the same way a
 // real controller-runtime client would. Matches a real client's NotFound
 // behavior when no item/secret matches — see
-// TestHandleInstanceDetailReturnsNotFoundForUnknownInstance.
+// TestHandleKontinuumDetailReturnsNotFoundForUnknownInstance.
 func (s stubKontinuumLister) Get(
 	_ context.Context, key client.ObjectKey, obj client.Object, _ ...client.GetOption,
 ) error {
@@ -100,6 +129,12 @@ func (s stubKontinuumLister) Get(
 		return s.getSecret(key, target)
 	case *v1alpha2.Instance:
 		return s.getMachine(key, target)
+	case *v1alpha2.TalosCluster:
+		return s.getTalosCluster(key, target)
+	case *v1alpha2.Zone:
+		return s.getZone(key, target)
+	case *v1alpha2.InstancePool:
+		return s.getInstancePool(key, target)
 	default:
 		if s.getErr != nil {
 			return s.getErr
@@ -139,6 +174,12 @@ func (s stubKontinuumLister) List(_ context.Context, list client.ObjectList, _ .
 		}
 
 		target.Items = s.machines
+	case *v1alpha2.TalosClusterList:
+		if s.talosClustersErr != nil {
+			return s.talosClustersErr
+		}
+
+		target.Items = s.talosClusters
 	}
 
 	return nil
@@ -181,6 +222,53 @@ func (s stubKontinuumLister) getMachine(key client.ObjectKey, target *v1alpha2.I
 	}
 
 	return apierrors.NewNotFound(schema.GroupResource{Group: v1alpha2.GroupName, Resource: "instances"}, key.Name)
+}
+
+// getTalosCluster backs Get's *v1alpha2.TalosCluster case.
+func (s stubKontinuumLister) getTalosCluster(key client.ObjectKey, target *v1alpha2.TalosCluster) error {
+	if s.talosClusterGetErr != nil {
+		return s.talosClusterGetErr
+	}
+
+	for _, item := range s.talosClusters {
+		if item.Name == key.Name {
+			*target = item
+
+			return nil
+		}
+	}
+
+	notFoundResource := schema.GroupResource{Group: v1alpha2.GroupName, Resource: talosClustersResource}
+
+	return apierrors.NewNotFound(notFoundResource, key.Name)
+}
+
+// getZone backs Get's *v1alpha2.Zone case — used by
+// handleTalosClusterDetail's owning-Zone lookup (see fetchOwningZone).
+func (s stubKontinuumLister) getZone(key client.ObjectKey, target *v1alpha2.Zone) error {
+	for _, item := range s.zones {
+		if item.Name == key.Name {
+			*target = item
+
+			return nil
+		}
+	}
+
+	return apierrors.NewNotFound(schema.GroupResource{Group: v1alpha2.GroupName, Resource: "zones"}, key.Name)
+}
+
+// getInstancePool backs Get's *v1alpha2.InstancePool case — used by
+// handleTalosClusterDetail's pool breakdown (see fetchPoolRow).
+func (s stubKontinuumLister) getInstancePool(key client.ObjectKey, target *v1alpha2.InstancePool) error {
+	for _, item := range s.pools {
+		if item.Name == key.Name {
+			*target = item
+
+			return nil
+		}
+	}
+
+	return apierrors.NewNotFound(schema.GroupResource{Group: v1alpha2.GroupName, Resource: "instancepools"}, key.Name)
 }
 
 // zoneFactory is a fixed ui.ZoneClientFactory for tests that don't exercise
@@ -374,9 +462,9 @@ func TestHandleHomeShowsLogoutLinkOnlyWhenAuthEnabled(t *testing.T) {
 	}
 }
 
-// instanceWithConfig builds a Kontinuum fixture carrying the given
-// status.config — shared by the handleInstanceDetail tests below.
-func instanceWithConfig(cfg v1alpha2.KontinuumConfigStatus) v1alpha2.Kontinuum {
+// kontinuumWithConfig builds a Kontinuum fixture carrying the given
+// status.config — shared by the handleKontinuumDetail tests below.
+func kontinuumWithConfig(cfg v1alpha2.KontinuumConfigStatus) v1alpha2.Kontinuum {
 	const name = "worker-1"
 
 	return v1alpha2.Kontinuum{
@@ -389,14 +477,14 @@ func instanceWithConfig(cfg v1alpha2.KontinuumConfigStatus) v1alpha2.Kontinuum {
 	}
 }
 
-func TestHandleInstanceDetailRendersInstanceSettings(t *testing.T) {
+func TestHandleKontinuumDetailRendersInstanceSettings(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
 		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
 	}
 
-	item := instanceWithConfig(v1alpha2.KontinuumConfigStatus{
+	item := kontinuumWithConfig(v1alpha2.KontinuumConfigStatus{
 		Server: v1alpha2.KontinuumServerConfigStatus{Addr: ":8080", Storage: "postgres://db.internal:5432/kontinuum"},
 		Log:    v1alpha2.KontinuumLogConfigStatus{Level: "info", Format: "json"},
 		OIDC: v1alpha2.KontinuumOIDCConfigStatus{
@@ -421,10 +509,9 @@ func TestHandleInstanceDetailRendersInstanceSettings(t *testing.T) {
 
 	defer func() { _ = resp.Body.Close() }()
 
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, string(body), "worker-1")
 	assert.Contains(t, string(body), ":8080")
 	assert.Contains(t, string(body), "postgres://db.internal:5432/kontinuum")
@@ -433,14 +520,14 @@ func TestHandleInstanceDetailRendersInstanceSettings(t *testing.T) {
 	assert.Contains(t, string(body), "platform-team")
 }
 
-func TestHandleInstanceDetailHidesOIDCDetailsWhenInstanceOIDCDisabled(t *testing.T) {
+func TestHandleKontinuumDetailHidesOIDCDetailsWhenInstanceOIDCDisabled(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
 		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
 	}
 
-	item := instanceWithConfig(v1alpha2.KontinuumConfigStatus{
+	item := kontinuumWithConfig(v1alpha2.KontinuumConfigStatus{
 		OIDC: v1alpha2.KontinuumOIDCConfigStatus{Enabled: false, IssuerURL: testOIDCIssuerURL},
 	})
 
@@ -466,7 +553,7 @@ func TestHandleInstanceDetailHidesOIDCDetailsWhenInstanceOIDCDisabled(t *testing
 	assert.NotContains(t, string(body), testOIDCIssuerURL)
 }
 
-func TestHandleInstanceDetailReturnsNotFoundForUnknownInstance(t *testing.T) {
+func TestHandleKontinuumDetailReturnsNotFoundForUnknownInstance(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -493,7 +580,7 @@ func TestHandleInstanceDetailReturnsNotFoundForUnknownInstance(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
 
-func TestHandleInstanceDetailReturnsServerErrorWhenFactoryFails(t *testing.T) {
+func TestHandleKontinuumDetailReturnsServerErrorWhenFactoryFails(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -520,7 +607,7 @@ func TestHandleInstanceDetailReturnsServerErrorWhenFactoryFails(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 }
 
-func TestHandleInstanceDetailInvalidatesSessionOnForbidden(t *testing.T) {
+func TestHandleKontinuumDetailInvalidatesSessionOnForbidden(t *testing.T) {
 	t.Parallel()
 
 	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: "kontinuums"}
@@ -532,14 +619,14 @@ func TestHandleInstanceDetailInvalidatesSessionOnForbidden(t *testing.T) {
 	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/kontinuums/worker-1"), kontinuumFactory)
 }
 
-func TestHandleInstanceDetailShowsConfigSecretDataReveal(t *testing.T) {
+func TestHandleKontinuumDetailShowsConfigSecretDataReveal(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
 		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
 	}
 
-	item := instanceWithConfig(v1alpha2.KontinuumConfigStatus{})
+	item := kontinuumWithConfig(v1alpha2.KontinuumConfigStatus{})
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "worker-1", Namespace: v1alpha2.DefaultSecretNamespace},
 		Data:       map[string][]byte{"password": []byte("s3cr3t")},
@@ -567,11 +654,25 @@ func TestHandleInstanceDetailShowsConfigSecretDataReveal(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	assert.Contains(t, string(body), "Secrets")
-	assert.Contains(t, string(body), "toggleSecretData")
-	assert.Contains(t, string(body), "password: s3cr3t")
+	assert.Contains(t, string(body), `id="secret-data-toggle"`)
+	assert.NotContains(t, string(body), "password: s3cr3t",
+		"the secret's own contents must never be rendered into the page")
+
+	secretRecorder := httptest.NewRecorder()
+	mux.ServeHTTP(secretRecorder, newTestRequest(t, "/app/kontinuums/worker-1/secret"))
+
+	secretResp := secretRecorder.Result()
+
+	defer func() { _ = secretResp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, secretResp.StatusCode)
+
+	secretBody, err := io.ReadAll(secretResp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(secretBody), "password: s3cr3t")
 }
 
-func TestHandleInstanceDetailHidesConfigSecretRevealWhenSecretRefEmpty(t *testing.T) {
+func TestHandleKontinuumDetailHidesConfigSecretRevealWhenSecretRefEmpty(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -601,17 +702,17 @@ func TestHandleInstanceDetailHidesConfigSecretRevealWhenSecretRefEmpty(t *testin
 
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	assert.NotContains(t, string(body), "toggleSecretData")
+	assert.NotContains(t, string(body), `id="secret-data-toggle"`)
 }
 
-func TestHandleInstanceDetailHidesConfigSecretRevealWhenSecretNotFound(t *testing.T) {
+func TestHandleKontinuumDetailHidesConfigSecretRevealWhenSecretNotFound(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
 		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
 	}
 
-	item := instanceWithConfig(v1alpha2.KontinuumConfigStatus{})
+	item := kontinuumWithConfig(v1alpha2.KontinuumConfigStatus{})
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
 		return stubKontinuumLister{
@@ -639,17 +740,17 @@ func TestHandleInstanceDetailHidesConfigSecretRevealWhenSecretNotFound(t *testin
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	assert.Contains(t, string(body), "kontinuum-system/worker-1")
-	assert.NotContains(t, string(body), "toggleSecretData")
+	assert.NotContains(t, string(body), `id="secret-data-toggle"`)
 }
 
-func TestHandleInstanceDetailReturnsBadGatewayWhenSecretGetFails(t *testing.T) {
+func TestHandleKontinuumDetailReturnsBadGatewayWhenSecretGetFails(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
 		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
 	}
 
-	item := instanceWithConfig(v1alpha2.KontinuumConfigStatus{})
+	item := kontinuumWithConfig(v1alpha2.KontinuumConfigStatus{})
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
 		return stubKontinuumLister{items: []v1alpha2.Kontinuum{item}, secretGetErr: errFactory}, nil
@@ -671,10 +772,10 @@ func TestHandleInstanceDetailReturnsBadGatewayWhenSecretGetFails(t *testing.T) {
 	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
 }
 
-func TestHandleInstanceDetailInvalidatesSessionOnForbiddenSecretGet(t *testing.T) {
+func TestHandleKontinuumDetailInvalidatesSessionOnForbiddenSecretGet(t *testing.T) {
 	t.Parallel()
 
-	item := instanceWithConfig(v1alpha2.KontinuumConfigStatus{})
+	item := kontinuumWithConfig(v1alpha2.KontinuumConfigStatus{})
 	forbiddenReason := schema.GroupResource{Resource: secretsResource}
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
@@ -685,6 +786,39 @@ func TestHandleInstanceDetailInvalidatesSessionOnForbiddenSecretGet(t *testing.T
 	}
 
 	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/kontinuums/worker-1"), kontinuumFactory)
+}
+
+// settingsKubeconfigBody issues GET /app/settings/kubeconfig through mux,
+// optionally overriding Host and X-Forwarded-Proto to match whatever the
+// page-level request used (pass "" to leave either at its default). Since
+// settings_content.html no longer embeds the kubeconfig directly (see
+// handleSettingsKubeconfigDownload's own doc), tests that need to assert on
+// its actual contents fetch it separately from the page itself.
+func settingsKubeconfigBody(t *testing.T, mux *http.ServeMux, host, forwardedProto string) string {
+	t.Helper()
+
+	request := newTestRequest(t, "/app/settings/kubeconfig")
+	if host != "" {
+		request.Host = host
+	}
+
+	if forwardedProto != "" {
+		request.Header.Set("X-Forwarded-Proto", forwardedProto)
+	}
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, request)
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	return string(body)
 }
 
 func TestHandleSettingsShowsOIDCKubeconfigWhenAuthEnabled(t *testing.T) {
@@ -718,22 +852,25 @@ func TestHandleSettingsShowsOIDCKubeconfigWhenAuthEnabled(t *testing.T) {
 	require.NoError(t, resp.Body.Close())
 
 	assert.Contains(t, string(body), "kubectl access")
-	assert.Contains(t, string(body), "server: http://example.com")
-	assert.NotContains(t, string(body), "insecure-skip-tls-verify")
-	assert.Contains(t, string(body), "name: kontinuum-example.com\n    cluster:")
-	assert.Contains(t, string(body), "cluster: kontinuum-example.com")
-	assert.Contains(t, string(body), "name: oidc@kontinuum-example.com")
-	assert.Contains(t, string(body), "current-context: oidc@kontinuum-example.com")
-	assert.Contains(t, string(body), "user: kontinuum-example.com")
-	assert.Contains(t, string(body), "name: kontinuum-example.com\n    user:")
-	assert.NotContains(t, string(body), "user: oidc\n")
-	assert.NotContains(t, string(body), "name: oidc\n")
-	assert.Contains(t, string(body), "--oidc-issuer-url="+testOIDCIssuerURL)
-	assert.Contains(t, string(body), "--oidc-client-id="+testOIDCClientID)
-	assert.Contains(t, string(body), "downloadKubeconfig()")
-	assert.Contains(t, string(body), "kontinuum config import")
-	assert.Contains(t, string(body), "copyImportSnippet(this)")
 	assert.Contains(t, string(body), "KUBECONFIG")
+	assert.Contains(t, string(body), "kontinuum config import")
+	assert.Contains(t, string(body), `href="/app/settings/kubeconfig"`)
+	assert.NotContains(t, string(body), "server: http://example.com",
+		"the kubeconfig's own contents must never be rendered into the initial page")
+
+	kubeconfig := settingsKubeconfigBody(t, mux, "", "")
+	assert.Contains(t, kubeconfig, "server: http://example.com")
+	assert.NotContains(t, kubeconfig, "insecure-skip-tls-verify")
+	assert.Contains(t, kubeconfig, "name: kontinuum-example.com\n    cluster:")
+	assert.Contains(t, kubeconfig, "cluster: kontinuum-example.com")
+	assert.Contains(t, kubeconfig, "name: oidc@kontinuum-example.com")
+	assert.Contains(t, kubeconfig, "current-context: oidc@kontinuum-example.com")
+	assert.Contains(t, kubeconfig, "user: kontinuum-example.com")
+	assert.Contains(t, kubeconfig, "name: kontinuum-example.com\n    user:")
+	assert.NotContains(t, kubeconfig, "user: oidc\n")
+	assert.NotContains(t, kubeconfig, "name: oidc\n")
+	assert.Contains(t, kubeconfig, "--oidc-issuer-url="+testOIDCIssuerURL)
+	assert.Contains(t, kubeconfig, "--oidc-client-id="+testOIDCClientID)
 }
 
 func TestHandleSettingsShowsNoAuthKubeconfigWhenOIDCDisabled(t *testing.T) {
@@ -766,16 +903,17 @@ func TestHandleSettingsShowsNoAuthKubeconfigWhenOIDCDisabled(t *testing.T) {
 	// kubectl access section (and a working kubeconfig) must still show.
 	assert.Contains(t, string(body), "kubectl access")
 	assert.Contains(t, string(body), "No authentication is required")
-	assert.Contains(t, string(body), "server: http://example.com")
-	assert.Contains(t, string(body), "name: kontinuum-example.com\n    cluster:")
-	assert.Contains(t, string(body), "cluster: kontinuum-example.com")
-	assert.Contains(t, string(body), "current-context: kontinuum-example.com")
-	assert.NotContains(t, string(body), "oidc-login")
-	assert.NotContains(t, string(body), "users:")
-	assert.Contains(t, string(body), "downloadKubeconfig()")
 	assert.Contains(t, string(body), "kontinuum config import")
-	assert.Contains(t, string(body), "copyImportSnippet(this)")
+	assert.Contains(t, string(body), `href="/app/settings/kubeconfig"`)
 	assert.Contains(t, string(body), "KUBECONFIG")
+
+	kubeconfig := settingsKubeconfigBody(t, mux, "", "")
+	assert.Contains(t, kubeconfig, "server: http://example.com")
+	assert.Contains(t, kubeconfig, "name: kontinuum-example.com\n    cluster:")
+	assert.Contains(t, kubeconfig, "cluster: kontinuum-example.com")
+	assert.Contains(t, kubeconfig, "current-context: kontinuum-example.com")
+	assert.NotContains(t, kubeconfig, "oidc-login")
+	assert.NotContains(t, kubeconfig, "users:")
 }
 
 func TestHandleSettingsStripsPortFromKubeconfigClusterName(t *testing.T) {
@@ -799,25 +937,14 @@ func TestHandleSettingsStripsPortFromKubeconfigClusterName(t *testing.T) {
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
 
-	request := newTestRequest(t, "/app/settings")
-	request.Host = "example.com:8443"
-
-	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, request)
-
-	resp := recorder.Result()
-
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	require.NoError(t, resp.Body.Close())
-
-	assert.Contains(t, string(body), "server: http://example.com:8443")
-	assert.Contains(t, string(body), "name: kontinuum-example.com\n    cluster:")
-	assert.Contains(t, string(body), "cluster: kontinuum-example.com")
-	assert.Contains(t, string(body), "name: oidc@kontinuum-example.com")
-	assert.NotContains(t, string(body), "example.com:8443\n    cluster:")
-	assert.NotContains(t, string(body), "cluster: example.com:8443")
-	assert.NotContains(t, string(body), "oidc@example.com:8443")
+	kubeconfig := settingsKubeconfigBody(t, mux, "example.com:8443", "")
+	assert.Contains(t, kubeconfig, "server: http://example.com:8443")
+	assert.Contains(t, kubeconfig, "name: kontinuum-example.com\n    cluster:")
+	assert.Contains(t, kubeconfig, "cluster: kontinuum-example.com")
+	assert.Contains(t, kubeconfig, "name: oidc@kontinuum-example.com")
+	assert.NotContains(t, kubeconfig, "example.com:8443\n    cluster:")
+	assert.NotContains(t, kubeconfig, "cluster: example.com:8443")
+	assert.NotContains(t, kubeconfig, "oidc@example.com:8443")
 }
 
 func TestHandleSettingsSetsInsecureSkipTLSVerifyForLocalHostsOverHTTPS(t *testing.T) {
@@ -842,22 +969,10 @@ func TestHandleSettingsSetsInsecureSkipTLSVerifyForLocalHostsOverHTTPS(t *testin
 		mux := http.NewServeMux()
 		router.RegisterRoutes(mux, nil, nil)
 
-		request := newTestRequest(t, "/app/settings")
-		request.Host = host
 		// A TLS-terminating reverse proxy is what would actually front a
 		// local deployment reached over https — see requestOrigin.
-		request.Header.Set("X-Forwarded-Proto", "https")
-
-		recorder := httptest.NewRecorder()
-		mux.ServeHTTP(recorder, request)
-
-		resp := recorder.Result()
-
-		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-		require.NoError(t, resp.Body.Close())
-
-		assert.Contains(t, string(body), "insecure-skip-tls-verify: true", "host %q", host)
+		kubeconfig := settingsKubeconfigBody(t, mux, host, "https")
+		assert.Contains(t, kubeconfig, "insecure-skip-tls-verify: true", "host %q", host)
 	}
 }
 
@@ -886,19 +1001,8 @@ func TestHandleSettingsOmitsInsecureSkipTLSVerifyForPlainHTTP(t *testing.T) {
 		mux := http.NewServeMux()
 		router.RegisterRoutes(mux, nil, nil)
 
-		request := newTestRequest(t, "/app/settings")
-		request.Host = host
-
-		recorder := httptest.NewRecorder()
-		mux.ServeHTTP(recorder, request)
-
-		resp := recorder.Result()
-
-		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-		require.NoError(t, resp.Body.Close())
-
-		assert.NotContains(t, string(body), "insecure-skip-tls-verify", "host %q", host)
+		kubeconfig := settingsKubeconfigBody(t, mux, host, "")
+		assert.NotContains(t, kubeconfig, "insecure-skip-tls-verify", "host %q", host)
 	}
 }
 
@@ -923,21 +1027,10 @@ func TestHandleSettingsUsesForwardedProtoForKubeconfigOrigin(t *testing.T) {
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
 
-	request := newTestRequest(t, "/app/settings")
-	request.Header.Set("X-Forwarded-Proto", "https")
-
-	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, request)
-
-	resp := recorder.Result()
-
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	require.NoError(t, resp.Body.Close())
-
-	assert.Contains(t, string(body), "server: https://example.com")
-	assert.Contains(t, string(body), "name: oidc@kontinuum-example.com")
-	assert.NotContains(t, string(body), "insecure-skip-tls-verify")
+	kubeconfig := settingsKubeconfigBody(t, mux, "", "https")
+	assert.Contains(t, kubeconfig, "server: https://example.com")
+	assert.Contains(t, kubeconfig, "name: oidc@kontinuum-example.com")
+	assert.NotContains(t, kubeconfig, "insecure-skip-tls-verify")
 }
 
 // adminGroupBinding builds a fixture rbacv1.ClusterRoleBinding shaped the
@@ -1531,13 +1624,13 @@ func TestHandleZoneAddCreatesZoneAndReturnsSuccessFragment(t *testing.T) {
 
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	assert.Contains(t, string(body), "eu-eu-1a")
+	assert.Contains(t, string(body), testTalosClusterName)
 	// The form itself is gone from a success response — nothing left to
 	// resubmit.
 	assert.NotContains(t, string(body), `name="talos-address"`)
 
 	var got v1alpha2.Zone
-	require.NoError(t, zoneClient.Get(context.Background(), client.ObjectKey{Name: "eu-eu-1a"}, &got))
+	require.NoError(t, zoneClient.Get(context.Background(), client.ObjectKey{Name: testTalosClusterName}, &got))
 	assert.Equal(t, "example.com", got.Spec.Domain)
 }
 
@@ -1848,4 +1941,410 @@ func TestHandleMachineDetailInvalidatesSessionOnForbidden(t *testing.T) {
 	}
 
 	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/instances/node-a"), kontinuumFactory)
+}
+
+// talosClusterFixture builds a TalosCluster fixture named
+// testTalosClusterName, with a control-plane pool, one named worker pool,
+// and a Ready condition — shared by the clusters list/detail tests below.
+func talosClusterFixture(ready metav1.ConditionStatus) v1alpha2.TalosCluster {
+	return v1alpha2.TalosCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: testTalosClusterName},
+		Spec: v1alpha2.TalosClusterSpec{
+			Talos:      v1alpha2.TalosSpec{Version: "v1.13.0"},
+			Kubernetes: v1alpha2.KubernetesSpec{Version: "v1.32.0"},
+			ControlPlane: v1alpha2.TalosClusterMemberSpec{
+				PoolRef: v1alpha2.InstancePoolReference{Name: testTalosClusterName},
+			},
+			Workers: []v1alpha2.TalosClusterWorkerSpec{
+				{Name: "default", PoolRef: v1alpha2.InstancePoolReference{Name: testTalosClusterName + "-default"}},
+			},
+		},
+		Status: v1alpha2.TalosClusterStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type: "Ready", Status: ready, Reason: "ClusterReady", Message: "cluster is ready",
+					LastTransitionTime: metav1.Now(),
+				},
+			},
+			SecretRef: v1alpha2.SecretReference{
+				Name: "taloscluster-" + testTalosClusterName, Namespace: v1alpha2.DefaultSecretNamespace,
+			},
+		},
+	}
+}
+
+func TestHandleTalosClustersRendersList(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{talosClusters: []v1alpha2.TalosCluster{
+			talosClusterFixture(metav1.ConditionTrue),
+		}}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "eu-eu-1a")
+	assert.Contains(t, string(body), "v1.13.0")
+	assert.Contains(t, string(body), "v1.32.0")
+	assert.Contains(t, string(body), "Ready=True")
+	assert.Contains(t, string(body), `href="/app/talosclusters/eu-eu-1a"`)
+	assert.Contains(t, string(body), `href="/app/talosclusters"`, "the nav's own Clusters link")
+}
+
+func TestHandleTalosClustersShowsEmptyState(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "No clusters found")
+}
+
+func TestHandleTalosClustersReturnsServerErrorWhenFactoryFails(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return nil, errFactory }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+}
+
+func TestHandleTalosClustersInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: talosClustersResource}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{talosClustersErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
+	}
+
+	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/talosclusters"), kontinuumFactory)
+}
+
+// newTalosClusterKubeconfigMux builds a router+mux serving a single ready
+// TalosCluster ("eu-eu-1a") with a control-plane pool and a kubeconfig
+// Secret — shared by the reveal-panel tests below so each test's own body
+// stays focused on the behavior it actually asserts, rather than repeating
+// this fixture setup.
+func newTalosClusterKubeconfigMux(t *testing.T) *http.ServeMux {
+	t.Helper()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	cluster := talosClusterFixture(metav1.ConditionTrue)
+	zone := v1alpha2.Zone{
+		ObjectMeta: metav1.ObjectMeta{Name: "eu-eu-1a"},
+		Spec:       v1alpha2.ZoneSpec{Region: "eu", Zone: "eu-1a", Domain: "example.com"},
+	}
+	controlPlanePool := v1alpha2.InstancePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "eu-eu-1a"},
+		Spec:       v1alpha2.InstancePoolSpec{Replicas: 1},
+		Status:     v1alpha2.InstancePoolStatus{ReadyReplicas: 1},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "taloscluster-eu-eu-1a", Namespace: v1alpha2.DefaultSecretNamespace},
+		Data:       map[string][]byte{"kubeconfig": []byte("apiVersion: v1\nkind: Config\n")},
+	}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{
+			talosClusters: []v1alpha2.TalosCluster{cluster},
+			zones:         []v1alpha2.Zone{zone},
+			pools:         []v1alpha2.InstancePool{controlPlanePool},
+			secret:        secret,
+		}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	return mux
+}
+
+func TestHandleTalosClusterDetailRendersOverviewPoolsAndConditions(t *testing.T) {
+	t.Parallel()
+
+	mux := newTalosClusterKubeconfigMux(t)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters/eu-eu-1a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "eu-eu-1a")
+	assert.Contains(t, string(body), "v1.13.0")
+	assert.Contains(t, string(body), "v1.32.0")
+	assert.Contains(t, string(body), "eu/eu-1a")
+	assert.Contains(t, string(body), "1/1", "the control-plane pool's ready/replicas count")
+	assert.Contains(t, string(body), "Pending", "the worker pool's InstancePool doesn't exist yet")
+	assert.Contains(t, string(body), "Cluster is ready", "the Ready condition's own message, capitalized")
+	assert.Contains(t, string(body), `href="/app/talosclusters/eu-eu-1a/kubeconfig"`)
+	assert.NotContains(t, string(body), "apiVersion: v1\nkind: Config",
+		"the kubeconfig's own contents must never be rendered into the page")
+	assert.Contains(t, string(body), `hx-get="/app/talosclusters/eu-eu-1a"`,
+		"hx-get is always the plain URL — hx-vals carries ?reveal on every poll instead, see hx-vals assertion below")
+
+	wantHxVals := `hx-vals="js:{reveal: (new URLSearchParams(location.search).get('reveal') === 'true')}"`
+	assert.Contains(t, string(body), wantHxVals,
+		"the auto-refresh must re-derive ?reveal from the browser's current URL on every poll, "+
+			"not a value baked in at render time")
+	assert.Regexp(t, `id="taloscluster-kubeconfig-masked"\s+class="relative`, string(body),
+		"the masked panel starts visible when the page loads without ?reveal=true")
+	assert.Regexp(t, `id="taloscluster-kubeconfig-content"\s+class="hidden relative`, string(body))
+}
+
+func TestHandleTalosClusterDetailRevealsKubeconfigPanelViaQueryParam(t *testing.T) {
+	t.Parallel()
+
+	mux := newTalosClusterKubeconfigMux(t)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters/eu-eu-1a?reveal=true"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `hx-get="/app/talosclusters/eu-eu-1a"`,
+		"hx-get stays the plain URL even when the page itself loaded with ?reveal=true — "+
+			"see hx-vals in the sibling default-state test")
+	assert.Regexp(t, `id="taloscluster-kubeconfig-masked"\s+class="hidden relative`, string(body),
+		"?reveal=true renders the masked panel already hidden")
+	assert.Regexp(t, `id="taloscluster-kubeconfig-content"\s+class="relative`, string(body),
+		"?reveal=true renders the revealed panel already visible")
+	assert.NotRegexp(t, `id="taloscluster-kubeconfig-content"\s+class="hidden`, string(body))
+	assert.NotContains(t, string(body), "apiVersion: v1\nkind: Config",
+		"the kubeconfig's own contents must never be rendered into the page, even when the panel starts open")
+}
+
+func TestHandleTalosClusterDetailShowsNoKubeconfigMessageWhenNotReady(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	cluster := talosClusterFixture(metav1.ConditionFalse)
+	cluster.Status.SecretRef = v1alpha2.SecretReference{}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{talosClusters: []v1alpha2.TalosCluster{cluster}}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters/eu-eu-1a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "No kubeconfig is available yet")
+	assert.NotContains(t, string(body), "Download kubeconfig")
+	assert.NotContains(t, string(body), "eu/eu-1a", "no Zone shares this cluster's name")
+}
+
+func TestHandleTalosClusterDetailReturnsNotFoundForUnknownCluster(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters/missing"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestHandleTalosClusterDetailInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: talosClustersResource}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{talosClusterGetErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
+	}
+
+	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/talosclusters/eu-eu-1a"), kontinuumFactory)
+}
+
+func TestHandleTalosClusterKubeconfigDownloadServesFileWithHeaders(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	cluster := talosClusterFixture(metav1.ConditionTrue)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "taloscluster-eu-eu-1a", Namespace: v1alpha2.DefaultSecretNamespace},
+		Data:       map[string][]byte{"kubeconfig": []byte("apiVersion: v1\nkind: Config\n")},
+	}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{talosClusters: []v1alpha2.TalosCluster{cluster}, secret: secret}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters/eu-eu-1a/kubeconfig"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, `attachment; filename="eu-eu-1a-kubeconfig.yaml"`, resp.Header.Get("Content-Disposition"))
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, "apiVersion: v1\nkind: Config\n", string(body))
+}
+
+func TestHandleTalosClusterKubeconfigDownloadReturnsNotFoundWhenNotReady(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	cluster := talosClusterFixture(metav1.ConditionFalse)
+	cluster.Status.SecretRef = v1alpha2.SecretReference{}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{talosClusters: []v1alpha2.TalosCluster{cluster}}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters/eu-eu-1a/kubeconfig"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestHandleTalosClusterKubeconfigDownloadReturnsNotFoundForUnknownCluster(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters/missing/kubeconfig"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestHandleTalosClusterKubeconfigDownloadInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: talosClustersResource}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{talosClusterGetErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
+	}
+
+	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/talosclusters/eu-eu-1a/kubeconfig"), kontinuumFactory)
 }

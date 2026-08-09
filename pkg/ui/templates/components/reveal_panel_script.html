@@ -1,0 +1,219 @@
+{{/*
+    reveal-panel-script wires up one "reveal-panel" instance (see that
+    template's own doc). Wrapped in its own IIFE so instantiating this
+    template more than once on the same page (not needed today, but nothing
+    stops it) never lets one panel's variables collide with another's.
+
+    Expects a dict (see templateDict) with:
+      ID           - must match the ID passed to "reveal-panel".
+      URL          - GET endpoint returning the raw content as plain text;
+                     also what DownloadURL (if set) should point at.
+      QueryParam - optional. When set, toggling this panel updates a query
+                   parameter of this name (e.g. "reveal=true") on the
+                   page's own URL via history.replaceState, so a manual
+                   reload lands back in the same open/closed state — see
+                   reveal-panel's own Open field, which the server drives
+                   from the same parameter.
+
+                   A page that also auto-refreshes (e.g.
+                   taloscluster_content.html's "every 15s" polling) needs
+                   one more piece to keep this state across a refresh too:
+                   htmx.js captures a polling element's hx-get URL once,
+                   when it's first processed, and reuses that exact string
+                   on every later poll tick — so simply toggling the page's
+                   own URL here has no effect on an already-scheduled poll.
+                   What does work is an hx-vals="js:..." attribute on that
+                   element, which htmx re-evaluates fresh on every single
+                   request and merges into the query string — see
+                   taloscluster_content.html's own hx-vals, which reads
+                   location.search (kept current by this function) at
+                   request time. That, not anything in this file, is what
+                   actually keeps the auto-refresh in sync; this function
+                   only owns the browser-visible URL.
+*/}}
+{{define "reveal-panel-script"}}
+<script>
+(function () {
+    var wrapper = document.getElementById('{{.ID}}-wrapper');
+    var masked = document.getElementById('{{.ID}}-masked');
+    var content = document.getElementById('{{.ID}}-content');
+    var toggle = document.getElementById('{{.ID}}-toggle');
+    var code = document.getElementById('{{.ID}}-code');
+    var copyButtons = document.querySelectorAll('[data-copy-for="{{.ID}}"]');
+    var queryParam = {{if .QueryParam}}'{{.QueryParam}}'{{else}}null{{end}};
+
+    var resetTimer = null;
+    // Cached once revealed so re-toggling (Reveal -> Hide -> Reveal)
+    // doesn't re-fetch from the server every time. Reset to null on every
+    // script run (initial load and every poll-driven refresh alike) since
+    // it's never itself persisted anywhere — only the boolean open/closed
+    // intent survives a refresh, via the query parameter, and the content
+    // itself is re-fetched fresh each time it's needed.
+    var cache = null;
+
+    function animate(hideEl, showEl, revealing) {
+        window.clearTimeout(resetTimer);
+
+        // Pin the wrapper to its current height so the height transition
+        // below has a defined starting point — height: auto can't be
+        // animated directly. No opacity fade here on purpose: fading a
+        // solid-background element makes it briefly translucent, which
+        // blends its bg-neutral-950 with the card's bg-neutral-900 behind
+        // it — visibly, if subtly, shifting its color mid-fade. A
+        // height-only transition avoids that entirely.
+        wrapper.style.height = wrapper.getBoundingClientRect().height + 'px';
+        void wrapper.offsetHeight;
+
+        hideEl.classList.add('hidden');
+        showEl.classList.remove('hidden');
+
+        wrapper.style.height = showEl.scrollHeight + 'px';
+
+        // Once the height transition settles, unpin back to auto so the
+        // wrapper keeps tracking content size (e.g. on resize) instead of
+        // staying locked to a stale pixel value.
+        resetTimer = window.setTimeout(function () { wrapper.style.height = 'auto'; }, 200);
+
+        toggle.querySelector('[data-icon-show]').classList.toggle('hidden', revealing);
+        toggle.querySelector('[data-icon-hide]').classList.toggle('hidden', !revealing);
+        toggle.querySelector('[data-label]').textContent = revealing ? 'Hide' : 'Reveal';
+    }
+
+    // fetchAndCache is the one place that populates cache, shared by
+    // reveal(), copy(), and the already-open restore below so any of the
+    // three can trigger the on-demand fetch.
+    function fetchAndCache() {
+        return fetch('{{.URL}}')
+            .then(function (response) {
+                if (!response.ok) {
+                    throw new Error('failed to fetch {{.URL}}: ' + response.status);
+                }
+
+                return response.text();
+            })
+            .then(function (text) {
+                cache = text;
+
+                return text;
+            });
+    }
+
+    function populateCode(text) {
+        code.textContent = text;
+        Prism.highlightElement(code);
+    }
+
+    function reveal(button) {
+        if (cache !== null) {
+            animate(masked, content, true);
+
+            return;
+        }
+
+        button.disabled = true;
+
+        fetchAndCache()
+            .then(function (text) {
+                populateCode(text);
+                animate(masked, content, true);
+            })
+            .catch(function (err) {
+                console.error(err);
+            })
+            .finally(function () {
+                button.disabled = false;
+            });
+    }
+
+    function flashCopied(button) {
+        var iconCopy = button.querySelector('[data-icon-copy]');
+        var iconCopied = button.querySelector('[data-icon-copied]');
+
+        iconCopy.classList.add('hidden');
+        iconCopied.classList.remove('hidden');
+
+        setTimeout(function () {
+            iconCopy.classList.remove('hidden');
+            iconCopied.classList.add('hidden');
+        }, 1500);
+    }
+
+    // copy works from either panel: once revealed, cache already has the
+    // text; from the masked panel it fetches (and caches) on demand first,
+    // the same as clicking Reveal would, but without changing the panel's
+    // own visible state.
+    function copy(button) {
+        if (cache !== null) {
+            navigator.clipboard.writeText(cache).then(function () { flashCopied(button); });
+
+            return;
+        }
+
+        button.disabled = true;
+
+        fetchAndCache()
+            .then(function (text) {
+                return navigator.clipboard.writeText(text);
+            })
+            .then(function () {
+                flashCopied(button);
+            })
+            .catch(function (err) {
+                console.error(err);
+            })
+            .finally(function () {
+                button.disabled = false;
+            });
+    }
+
+    // setQueryParam keeps the page's own URL in sync with the panel's
+    // open/closed state, for a manual reload — see QueryParam's own doc
+    // above for how a page that also auto-refreshes stays in sync too,
+    // which happens entirely through that page's own hx-vals reading
+    // location.search back out, not through anything here.
+    function setQueryParam(open) {
+        if (!queryParam) {
+            return;
+        }
+
+        var pageURL = new URL(window.location.href);
+        if (open) {
+            pageURL.searchParams.set(queryParam, 'true');
+        } else {
+            pageURL.searchParams.delete(queryParam);
+        }
+        history.replaceState(null, '', pageURL);
+    }
+
+    toggle.addEventListener('click', function () {
+        if (content.classList.contains('hidden')) {
+            setQueryParam(true);
+            reveal(toggle);
+        } else {
+            setQueryParam(false);
+            animate(content, masked, false);
+        }
+    });
+
+    copyButtons.forEach(function (button) {
+        button.addEventListener('click', function () { copy(button); });
+    });
+
+    // The server already rendered this panel open (see reveal-panel's own
+    // Open field, driven by the same query parameter this script manages)
+    // whenever #{{.ID}}-content isn't hidden on load — its content still
+    // needs fetching either way, since it's never embedded in the page's
+    // own server-rendered HTML (see handleTalosClusterKubeconfigDownload's
+    // doc for why). No slide animation here: this also runs on every
+    // poll-driven refresh, not just the first load, so animating it every
+    // time would be distracting rather than helpful.
+    if (!content.classList.contains('hidden')) {
+        fetchAndCache()
+            .then(populateCode)
+            .catch(function (err) {
+                console.error(err);
+            });
+    }
+})();
+</script>
+{{end}}

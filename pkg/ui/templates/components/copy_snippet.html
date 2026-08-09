@@ -1,0 +1,51 @@
+{{/*
+    copy-snippet renders a one-line `$ <command>` block with a Copy button —
+    used for the "kontinuum config import" CLI hint shown on both
+    settings_content.html and taloscluster_content.html. Pair with
+    "copy-snippet-script" to wire it up.
+
+    Expects a dict (see templateDict) with:
+      ID      - element id prefix; must match the ID passed to
+                "copy-snippet-script".
+      Command - the command text shown and copied, e.g.
+                "kontinuum config import".
+*/}}
+{{define "copy-snippet"}}
+<div class="flex items-center justify-between gap-3 bg-neutral-950 rounded-lg p-4 overflow-x-auto mb-4">
+    <pre class="m-0 text-xs"><span class="text-neutral-600 select-none">$ </span><code id="{{.ID}}-snippet" class="language-bash">{{.Command}}</code></pre>
+    <button type="button" data-copy-for="{{.ID}}-snippet" title="Copy to clipboard"
+            class="shrink-0 inline-flex items-center gap-1.5 px-2 py-1.5 text-xs font-medium rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white hover:bg-neutral-700 transition-colors">
+        <span data-icon-copy>{{template "icon-copy"}}</span>
+        <span data-icon-copied class="hidden text-emerald-400">{{template "icon-check"}}</span>
+    </button>
+</div>
+{{end}}
+
+{{define "copy-snippet-script"}}
+<script>
+(function () {
+    var id = '{{.ID}}-snippet';
+    var el = document.getElementById(id);
+
+    Prism.highlightElement(el);
+
+    document.querySelectorAll('[data-copy-for="' + id + '"]').forEach(function (button) {
+        button.addEventListener('click', function () {
+            var content = el.textContent.trim();
+            var iconCopy = button.querySelector('[data-icon-copy]');
+            var iconCopied = button.querySelector('[data-icon-copied]');
+
+            navigator.clipboard.writeText(content).then(function () {
+                iconCopy.classList.add('hidden');
+                iconCopied.classList.remove('hidden');
+
+                setTimeout(function () {
+                    iconCopy.classList.remove('hidden');
+                    iconCopied.classList.add('hidden');
+                }, 1500);
+            });
+        });
+    });
+})();
+</script>
+{{end}}
