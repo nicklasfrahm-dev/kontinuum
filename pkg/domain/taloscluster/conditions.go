@@ -31,27 +31,35 @@ const (
 	MemberJoinedConditionType = "Joined"
 	// MemberReadyConditionType mirrors, on a control-plane member, the
 	// cluster-wide HealthCheck this package already runs against exactly
-	// that batch of nodes (see bootstrapAndCheckHealth) — a pass proves
-	// each of them individually healthy, not just the aggregate. Workers
-	// don't get this condition yet: this package has no per-worker health
-	// probe to honestly back it with (see reconcileWorkerPool's own doc).
+	// that batch of nodes — a pass proves each of them individually
+	// healthy, not just the aggregate. Unlike MemberConfiguredConditionType
+	// and MemberJoinedConditionType, this one isn't append-only: it's kept
+	// live for as long as the cluster exists, first by
+	// bootstrapAndCheckHealth while the control plane is still converging,
+	// then by recheckControlPlaneHealth's own periodic recheck once it has
+	// — so it can also flip back to false if a previously healthy node
+	// later fails a recheck. Workers don't get this condition yet: this
+	// package has no per-worker health probe to honestly back it with (see
+	// reconcileWorkerPool's own doc).
 	MemberReadyConditionType = "Ready"
 
 	reasonMemberConfigured = "ConfigApplied"
 	reasonMemberJoined     = "Joined"
 	reasonMemberHealthy    = "Healthy"
+	reasonMemberUnhealthy  = "Unhealthy"
 )
 
-// markMemberCondition sets a true conditionType on member and persists it,
-// skipping the write entirely when it wouldn't change anything — mirrors
-// recordTalosVersions' own already-known skip, so a member already past a
-// pipeline stage doesn't cost a Status().Update on every future reconcile.
-func markMemberCondition(
+// setMemberCondition sets conditionType on member to status and persists
+// it, skipping the write entirely when it wouldn't change anything — a
+// member already past a pipeline stage, or whose live health hasn't
+// changed since the last recheck, doesn't cost a Status().Update on every
+// future reconcile.
+func setMemberCondition(
 	ctx context.Context, kubeClient client.Client, logger *slog.Logger, member *v1alpha2.Instance,
-	conditionType, reason, message string,
+	conditionType string, status metav1.ConditionStatus, reason, message string,
 ) {
 	changed := meta.SetStatusCondition(&member.Status.Conditions, metav1.Condition{
-		Type: conditionType, Status: metav1.ConditionTrue, Reason: reason, Message: message,
+		Type: conditionType, Status: status, Reason: reason, Message: message,
 	})
 	if !changed {
 		return
@@ -62,4 +70,16 @@ func markMemberCondition(
 		logger.Warn("failed to persist member condition",
 			"instance", member.Name, "condition", conditionType, "error", err)
 	}
+}
+
+// markMemberCondition sets a true conditionType on member — see
+// setMemberCondition's own doc. Every one of MemberConfiguredConditionType
+// and MemberJoinedConditionType's own callers only ever mark true (both
+// are append-only, see their own docs), so this thin wrapper is what they
+// use instead of spelling out metav1.ConditionTrue at every call site.
+func markMemberCondition(
+	ctx context.Context, kubeClient client.Client, logger *slog.Logger, member *v1alpha2.Instance,
+	conditionType, reason, message string,
+) {
+	setMemberCondition(ctx, kubeClient, logger, member, conditionType, metav1.ConditionTrue, reason, message)
 }

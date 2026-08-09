@@ -27,8 +27,9 @@ import (
 )
 
 const (
-	testHealthCheckTimeout = time.Second
-	testRetryInterval      = 15 * time.Second
+	testHealthCheckTimeout  = time.Second
+	testRetryInterval       = 15 * time.Second
+	testHealthCheckInterval = 5 * time.Minute
 )
 
 // fakeBootstrapper is taloscluster.ClusterBootstrapper's test double — it
@@ -159,11 +160,12 @@ func readyAddon(releaseName string, status metav1.ConditionStatus, reason string
 
 func newReconciler(fakeClient client.Client, bootstrapper *fakeBootstrapper) *taloscluster.Reconciler {
 	return &taloscluster.Reconciler{
-		Client:             fakeClient,
-		Bootstrapper:       bootstrapper,
-		HealthCheckTimeout: testHealthCheckTimeout,
-		RetryInterval:      testRetryInterval,
-		Logger:             slog.Default(),
+		Client:              fakeClient,
+		Bootstrapper:        bootstrapper,
+		HealthCheckTimeout:  testHealthCheckTimeout,
+		RetryInterval:       testRetryInterval,
+		HealthCheckInterval: testHealthCheckInterval,
+		Logger:              slog.Default(),
 	}
 }
 
@@ -693,6 +695,97 @@ func TestReconcileSetsMemberConditionsThroughBootstrapPipeline(t *testing.T) {
 		"worker member answered a Version RPC once its config was applied")
 	assert.False(t, meta.IsStatusConditionTrue(afterSecond.Status.Conditions, taloscluster.MemberReadyConditionType),
 		"a worker never gets Ready — no per-worker health probe backs it yet")
+}
+
+// convergeFullyReadyCluster drives reconciler through three reconciles —
+// bootstrap, addon-Ready aggregation, then recheckControlPlaneHealth — the
+// same three-step path TestReconcileFullSequence's own doc explains: each
+// condition flip returns immediately, so reaching the state after both
+// ControlPlaneReady and Ready are true needs a following reconcile past the
+// one that set the second of them. Returns the third reconcile's own
+// result, the one that actually reaches recheckControlPlaneHealth.
+func convergeFullyReadyCluster(
+	t *testing.T, fakeClient client.Client, reconciler *taloscluster.Reconciler, req ctrl.Request,
+) ctrl.Result {
+	t.Helper()
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	var gatewayCRDs, cilium, certManager v1alpha2.Addon
+
+	require.NoError(t, fakeClient.Get(context.Background(),
+		types.NamespacedName{Name: testClusterName + "-gateway-api-crds"}, &gatewayCRDs))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: ciliumAddonResourceName}, &cilium))
+	require.NoError(t, fakeClient.Get(context.Background(),
+		types.NamespacedName{Name: testClusterName + "-cert-manager"}, &certManager))
+
+	for _, obj := range []*v1alpha2.Addon{&gatewayCRDs, &cilium, &certManager} {
+		obj.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Healthy"}}
+		require.NoError(t, fakeClient.Status().Update(context.Background(), obj))
+	}
+
+	_, err = reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	result, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	return result
+}
+
+// TestReconcileRecheckControlPlaneHealthAfterConvergence covers issue #62's
+// own follow-up: once ControlPlaneReady and Ready are both true, Reconcile
+// must keep re-probing control-plane health on a timer (HealthCheckInterval)
+// instead of going silent forever — and a previously Ready member must
+// flip to Ready=False if a later recheck fails, while
+// ControlPlaneReadyConditionType itself stays untouched (a flaky per-node
+// recheck must never re-trigger reconcileControlPlane's own config-apply
+// path).
+func TestReconcileRecheckControlPlaneHealthAfterConvergence(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	cluster.Spec.Workers = nil
+	cpInstance := claimedDiscoveredInstance(cpNodeName, "cp-pool", controlPlaneInstanceAddress)
+
+	fakeClient := newFakeClient(t, cluster, cpInstance)
+
+	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig")}
+	reconciler := newReconciler(fakeClient, bootstrapper)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName}}
+
+	result := convergeFullyReadyCluster(t, fakeClient, reconciler, req)
+	assert.Equal(t, testHealthCheckInterval, result.RequeueAfter,
+		"a fully converged cluster must keep reconciling on a timer, not go silent forever")
+
+	var cpAfterConverged v1alpha2.Instance
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: cpNodeName}, &cpAfterConverged))
+	assert.True(t, meta.IsStatusConditionTrue(cpAfterConverged.Status.Conditions, taloscluster.MemberReadyConditionType))
+
+	// Simulate the control plane later failing a health check — no config
+	// changes, no bootstrap needed, just an unhealthy node.
+	bootstrapper.healthCheckErr = assert.AnError
+
+	result, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, testRetryInterval, result.RequeueAfter, "an unhealthy recheck retries sooner than a healthy one")
+
+	var cpAfterFailure v1alpha2.Instance
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: cpNodeName}, &cpAfterFailure))
+	assert.False(t, meta.IsStatusConditionTrue(cpAfterFailure.Status.Conditions, taloscluster.MemberReadyConditionType),
+		"a previously healthy member must flip to Ready=False once a recheck fails")
+
+	var clusterAfterFailure v1alpha2.TalosCluster
+
+	require.NoError(t, fakeClient.Get(context.Background(),
+		types.NamespacedName{Name: testClusterName}, &clusterAfterFailure))
+	assert.True(t,
+		meta.IsStatusConditionTrue(clusterAfterFailure.Status.Conditions, taloscluster.ControlPlaneReadyConditionType),
+		"a flaky per-node recheck must never flip the cluster-level ControlPlaneReady back to false")
 }
 
 func TestReconcileIgnoresMissingCluster(t *testing.T) {

@@ -67,6 +67,12 @@ const (
 	// forever, regardless of actual cluster progress.
 	defaultHealthCheckTimeout = 60 * time.Second
 	defaultRetryInterval      = 15 * time.Second
+	// defaultHealthCheckInterval is how often recheckControlPlaneHealth
+	// re-probes an already-converged control plane — see its own doc for
+	// why this exists at all. Five minutes trades off freshness against
+	// not hammering every control-plane node with a full
+	// etcd/kubelet/static-pod/CoreDNS/kube-proxy check on a tight loop.
+	defaultHealthCheckInterval = 5 * time.Minute
 )
 
 // Config configures a Controller.
@@ -82,6 +88,11 @@ type Config struct {
 	// RetryInterval is how long Reconcile waits before retrying a step
 	// that hasn't converged yet. Defaults to fifteen seconds when zero.
 	RetryInterval time.Duration
+	// HealthCheckInterval is how long Reconcile waits between re-probes of
+	// an already-converged control plane's health — see
+	// recheckControlPlaneHealth's own doc. Defaults to five minutes when
+	// zero.
+	HealthCheckInterval time.Duration
 }
 
 // Controller wires the TalosCluster bootstrap reconciler onto a
@@ -91,7 +102,7 @@ type Controller struct {
 }
 
 // NewController builds a Controller from cfg, defaulting Bootstrapper,
-// HealthCheckTimeout, and RetryInterval when left zero.
+// HealthCheckTimeout, RetryInterval, and HealthCheckInterval when left zero.
 func NewController(cfg Config) *Controller {
 	if cfg.Bootstrapper == nil {
 		cfg.Bootstrapper = NewTalosBootstrapper(cfg.Logger)
@@ -103,6 +114,10 @@ func NewController(cfg Config) *Controller {
 
 	if cfg.RetryInterval == 0 {
 		cfg.RetryInterval = defaultRetryInterval
+	}
+
+	if cfg.HealthCheckInterval == 0 {
+		cfg.HealthCheckInterval = defaultHealthCheckInterval
 	}
 
 	return &Controller{Config: cfg}
@@ -117,11 +132,12 @@ func NewController(cfg Config) *Controller {
 // Controller.
 func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 	reconciler := &Reconciler{
-		Client:             mgr.GetClient(),
-		Bootstrapper:       c.Config.Bootstrapper,
-		HealthCheckTimeout: c.Config.HealthCheckTimeout,
-		RetryInterval:      c.Config.RetryInterval,
-		Logger:             c.Config.Logger,
+		Client:              mgr.GetClient(),
+		Bootstrapper:        c.Config.Bootstrapper,
+		HealthCheckTimeout:  c.Config.HealthCheckTimeout,
+		RetryInterval:       c.Config.RetryInterval,
+		HealthCheckInterval: c.Config.HealthCheckInterval,
+		Logger:              c.Config.Logger,
 	}
 
 	err := ctrl.NewControllerManagedBy(mgr).For(&v1alpha2.TalosCluster{}).Complete(reconciler)
@@ -138,14 +154,20 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 // control-plane-first, workers only reconciled once the control plane is
 // healthy.
 type Reconciler struct {
-	Client             client.Client
-	Bootstrapper       ClusterBootstrapper
-	HealthCheckTimeout time.Duration
-	RetryInterval      time.Duration
-	Logger             *slog.Logger
+	Client              client.Client
+	Bootstrapper        ClusterBootstrapper
+	HealthCheckTimeout  time.Duration
+	RetryInterval       time.Duration
+	HealthCheckInterval time.Duration
+	Logger              *slog.Logger
 }
 
-// Reconcile implements reconcile.Reconciler.
+// Reconcile implements reconcile.Reconciler. Once the cluster is fully
+// converged (ControlPlaneReady and Ready both true), it falls through to
+// recheckControlPlaneHealth rather than returning a bare ctrl.Result{} —
+// see that method's own doc for why a one-shot health check would
+// otherwise leave every control-plane member's MemberReadyConditionType
+// stale forever.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var cluster v1alpha2.TalosCluster
 
@@ -176,7 +198,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return r.reconcileAddons(ctx, &cluster)
 	}
 
-	return ctrl.Result{}, nil
+	return r.recheckControlPlaneHealth(ctx, &cluster, bundle)
 }
 
 // reconcileControlPlane resolves the control-plane pool's members,
@@ -347,6 +369,74 @@ func (r *Reconciler) bootstrapAndCheckHealth(
 	}
 
 	return controlPlaneResult, nil
+}
+
+// recheckControlPlaneHealth keeps each control-plane member's
+// MemberReadyConditionType honest after the cluster has already converged
+// once — without this, HealthCheck would only ever run while
+// ControlPlaneReadyConditionType was still false (see reconcileControlPlane
+// and bootstrapAndCheckHealth), then never again: nothing else in this
+// reconciler runs on a timer, only in reaction to a watch event on the
+// TalosCluster object itself, so a node going unhealthy afterward would
+// leave a stale Ready=True forever (see issue #62's own follow-up
+// discussion). Deliberately never re-applies config and never flips
+// ControlPlaneReadyConditionType itself back to false: doing so would
+// re-enter reconcileControlPlane, which reapplies (REBOOT-mode) config to
+// every control-plane member — exactly the wrong reaction to what might be
+// a single flaky probe. This is a read-only recheck of MemberReadyConditionType
+// only, returned via ctrl.Result.RequeueAfter — the same
+// no-event-will-tell-me-this-changed mechanism reconcileControlPlane's own
+// RetryInterval already relies on, just on a longer, steady-state cadence
+// (HealthCheckInterval) once there's nothing left to bootstrap.
+func (r *Reconciler) recheckControlPlaneHealth(
+	ctx context.Context, cluster *v1alpha2.TalosCluster, bundle *talossecrets.Bundle,
+) (ctrl.Result, error) {
+	members, err := resolveMembers(ctx, r.Client, cluster.Namespace, cluster.Spec.ControlPlane.PoolRef)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if len(members) == 0 {
+		return ctrl.Result{RequeueAfter: r.HealthCheckInterval}, nil
+	}
+
+	controlPlaneAddr := dialAddress(members[0])
+
+	_, _, talosCfg, err := generateConfigs(bundle, cluster, controlPlaneAddr)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to generate control plane config for %q: %w", cluster.Name, err)
+	}
+
+	controlPlaneNodes := make([]string, 0, len(members))
+	for _, member := range members {
+		controlPlaneNodes = append(controlPlaneNodes, dialAddress(member))
+	}
+
+	status, reason, message := metav1.ConditionTrue, reasonMemberHealthy,
+		"control plane cluster health check passed with this node included"
+
+	healthErr := r.Bootstrapper.HealthCheck(ctx, controlPlaneAddr, talosCfg, controlPlaneNodes, r.HealthCheckTimeout)
+	if healthErr != nil {
+		r.Logger.Warn("periodic control plane health recheck failed", "cluster", cluster.Name, "error", healthErr)
+
+		status, reason = metav1.ConditionFalse, reasonMemberUnhealthy
+		message = "periodic control plane health recheck failed: " + healthErr.Error()
+	}
+
+	for i := range members {
+		setMemberCondition(ctx, r.Client, r.Logger, &members[i], MemberReadyConditionType, status, reason, message)
+	}
+
+	if healthErr != nil {
+		// Same rationale as every other HealthCheck failure branch in this
+		// file (e.g. bootstrapAndCheckHealth's own): an unhealthy control
+		// plane is an expected, handled outcome — already logged and
+		// reflected in MemberReadyConditionType above — not a
+		// Reconcile-machinery failure worth returning as an error.
+		return ctrl.Result{RequeueAfter: r.RetryInterval}, nil //nolint:nilerr
+	}
+
+	return ctrl.Result{RequeueAfter: r.HealthCheckInterval}, nil
 }
 
 // reconcileAddons seeds cluster's two built-in addons (see
