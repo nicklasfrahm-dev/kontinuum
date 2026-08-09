@@ -11,10 +11,10 @@
     result into the request's own query string, for a GET) fresh on every
     single request, which is what actually keeps the auto-refresh in sync.
 -->
-<div id="taloscluster-content" hx-get="/app/talosclusters/{{.Name}}" hx-trigger="every 15s"
+<div id="taloscluster-content" hx-get="/app/kontinuum.sh/namespaces/{{.Namespace}}/talosclusters/{{.Name}}" hx-trigger="every 15s"
      hx-vals="js:{reveal: (new URLSearchParams(location.search).get('reveal') === 'true')}"
      hx-select="#taloscluster-content" hx-swap="outerHTML">
-    <a href="/app/talosclusters" class="inline-flex items-center gap-1.5 text-sm text-neutral-500 hover:text-white transition-colors mb-4">
+    <a href="/app/kontinuum.sh/namespaces/{{.Namespace}}/talosclusters" class="inline-flex items-center gap-1.5 text-sm text-neutral-500 hover:text-white transition-colors mb-4">
         {{template "icon-chevron-left"}}
         Back to clusters
     </a>
@@ -48,7 +48,7 @@
                 <dt class="text-sm text-neutral-500">Zone</dt>
                 <dd class="text-sm font-medium text-white">
                     {{if .HasZone}}
-                    <a href="/app/kontinuums" hx-boost="false" class="hover:text-accent hover:underline">{{.ZoneRegion}}/{{.ZoneName}}</a>
+                    <a href="/app/kontinuum.sh/namespaces/{{.Namespace}}/kontinuums" hx-boost="false" class="hover:text-accent hover:underline">{{.ZoneRegion}}/{{.ZoneName}}</a>
                     {{else}}
                     -
                     {{end}}
@@ -156,7 +156,7 @@
                 the fact (see reveal-panel-script's own QueryParam doc for
                 the full mechanism).
             -->
-            {{template "reveal-panel" (dict "ID" "taloscluster-kubeconfig" "Label" "KUBECONFIG" "DownloadURL" (print "/app/talosclusters/" .Name "/kubeconfig") "Open" .KubeconfigRevealed)}}
+            {{template "reveal-panel" (dict "ID" "taloscluster-kubeconfig" "Label" "KUBECONFIG" "DownloadURL" (print "/app/kontinuum.sh/namespaces/" .Namespace "/talosclusters/" .Name "/kubeconfig") "Open" .KubeconfigRevealed)}}
             {{else}}
             <p class="text-sm text-neutral-500">
                 No kubeconfig is available yet — this cluster hasn't finished bootstrapping.
@@ -167,7 +167,7 @@
 
     {{if .KubeconfigReady}}
     {{template "copy-snippet-script" (dict "ID" "taloscluster-kubeconfig-import")}}
-    {{template "reveal-panel-script" (dict "ID" "taloscluster-kubeconfig" "URL" (print "/app/talosclusters/" .Name "/kubeconfig") "QueryParam" "reveal")}}
+    {{template "reveal-panel-script" (dict "ID" "taloscluster-kubeconfig" "URL" (print "/app/kontinuum.sh/namespaces/" .Namespace "/talosclusters/" .Name "/kubeconfig") "QueryParam" "reveal")}}
     {{end}}
 </div>
 {{end}}

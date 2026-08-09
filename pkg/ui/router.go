@@ -174,6 +174,7 @@ func mustParsePage(content ...string) *template.Template {
 		"templates/components/icon_shield.html",
 		"templates/components/icon_settings.html",
 		"templates/components/icon_logout.html",
+		"templates/components/icon_book_open_text.html",
 	}
 
 	files := make([]string, 0, len(shared)+len(content))
@@ -289,16 +290,18 @@ func (r *Router) RegisterRoutes(
 	mux.HandleFunc("GET /{$}", handleRoot)
 	mux.HandleFunc("GET /app", appRoot)
 	mux.HandleFunc("GET /app/home", protect(handleAppHome))
-	mux.HandleFunc("GET /app/kontinuums", protect(r.renderRegistry))
-	mux.HandleFunc("GET /app/kontinuums/{name}", protect(r.handleKontinuumDetail))
-	mux.HandleFunc("GET /app/kontinuums/{name}/secret", protect(r.handleKontinuumSecretDownload))
-	mux.HandleFunc("DELETE /app/kontinuums/{name}", protect(r.handleDeleteInstance))
+	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/kontinuums", protect(r.renderRegistry))
+	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/kontinuums/{name}", protect(r.handleKontinuumDetail))
+	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/kontinuums/{name}/secret",
+		protect(r.handleKontinuumSecretDownload))
+	mux.HandleFunc("DELETE /app/kontinuum.sh/namespaces/{ns}/kontinuums/{name}", protect(r.handleDeleteInstance))
 	mux.HandleFunc("POST /app/zones/add", protect(r.handleZoneAdd))
 	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/instances", protect(r.handleMachines))
 	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/instances/{name}", protect(r.handleMachineDetail))
-	mux.HandleFunc("GET /app/talosclusters", protect(r.handleTalosClusters))
-	mux.HandleFunc("GET /app/talosclusters/{name}", protect(r.handleTalosClusterDetail))
-	mux.HandleFunc("GET /app/talosclusters/{name}/kubeconfig", protect(r.handleTalosClusterKubeconfigDownload))
+	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/talosclusters", protect(r.handleTalosClusters))
+	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/talosclusters/{name}", protect(r.handleTalosClusterDetail))
+	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/talosclusters/{name}/kubeconfig",
+		protect(r.handleTalosClusterKubeconfigDownload))
 	mux.HandleFunc("GET /app/iam", protect(r.handleIAM))
 	mux.HandleFunc("GET /app/settings", protect(r.handleSettings))
 	mux.HandleFunc("GET /app/settings/kubeconfig", protect(r.handleSettingsKubeconfigDownload))
@@ -338,6 +341,7 @@ func acceptsHTML(request *http.Request) bool {
 // instance is a Kontinuum object rendered as a registry row in the UI.
 type instance struct {
 	Name          string
+	Namespace     string
 	Role          string
 	Region        string
 	Zone          string
@@ -388,7 +392,7 @@ func (r *Router) handleDeleteInstance(writer http.ResponseWriter, request *http.
 	}
 
 	target := &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: request.PathValue("name"), Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: request.PathValue("name"), Namespace: request.PathValue("ns")},
 	}
 
 	err = kontinuums.Delete(request.Context(), target)
@@ -424,9 +428,11 @@ func (r *Router) renderRegistry(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 
+	namespace := request.PathValue("ns")
+
 	var list v1alpha2.KontinuumList
 
-	err = kontinuums.List(request.Context(), &list)
+	err = kontinuums.List(request.Context(), &list, client.InNamespace(namespace))
 	if err != nil {
 		// Forbidden means the signed-in identity is authenticated but not
 		// authorized — the session itself isn't the problem, but there's
@@ -447,6 +453,7 @@ func (r *Router) renderRegistry(writer http.ResponseWriter, request *http.Reques
 	for _, item := range list.Items {
 		instances = append(instances, instance{
 			Name:          item.Name,
+			Namespace:     item.Namespace,
 			Role:          item.Status.Role,
 			Region:        item.Spec.Region,
 			Zone:          item.Spec.Zone,
@@ -468,6 +475,7 @@ func (r *Router) renderRegistry(writer http.ResponseWriter, request *http.Reques
 		"Title":       "Registry",
 		"ActiveMenu":  "registry",
 		"Version":     r.version,
+		"Namespace":   namespace,
 		"Instances":   instances,
 		"Zones":       zones,
 		"AuthEnabled": r.authEnabled,
@@ -670,10 +678,9 @@ func (r *Router) handleKontinuumDetail(writer http.ResponseWriter, request *http
 
 	var item v1alpha2.Kontinuum
 
-	name := request.PathValue("name")
+	key := client.ObjectKey{Name: request.PathValue("name"), Namespace: request.PathValue("ns")}
 
-	err = kontinuums.Get(request.Context(),
-		client.ObjectKey{Name: name, Namespace: v1alpha2.DefaultSecretNamespace}, &item)
+	err = kontinuums.Get(request.Context(), key, &item)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			http.NotFound(writer, request)
@@ -722,10 +729,9 @@ func (r *Router) handleKontinuumSecretDownload(writer http.ResponseWriter, reque
 
 	var item v1alpha2.Kontinuum
 
-	name := request.PathValue("name")
+	key := client.ObjectKey{Name: request.PathValue("name"), Namespace: request.PathValue("ns")}
 
-	err = kontinuums.Get(request.Context(),
-		client.ObjectKey{Name: name, Namespace: v1alpha2.DefaultSecretNamespace}, &item)
+	err = kontinuums.Get(request.Context(), key, &item)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			http.NotFound(writer, request)
@@ -777,6 +783,7 @@ func kontinuumDetailData(
 		"Version":         version,
 		"AuthEnabled":     authEnabled,
 		"Name":            item.Name,
+		"Namespace":       item.Namespace,
 		"Role":            item.Status.Role,
 		"Region":          item.Spec.Region,
 		"Zone":            item.Spec.Zone,
@@ -1172,6 +1179,7 @@ const talosKubeconfigSecretKey = "kubeconfig"
 // page — see handleTalosClusters.
 type talosClusterRow struct {
 	Name              string
+	Namespace         string
 	ControlPlanePool  string
 	TalosVersion      string
 	KubernetesVersion string
@@ -1192,9 +1200,11 @@ func (r *Router) handleTalosClusters(writer http.ResponseWriter, request *http.R
 		return
 	}
 
+	namespace := request.PathValue("ns")
+
 	var list v1alpha2.TalosClusterList
 
-	err = kontinuums.List(request.Context(), &list)
+	err = kontinuums.List(request.Context(), &list, client.InNamespace(namespace))
 	if err != nil {
 		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
 			r.invalidateSession(writer, request, auth.MapError(err))
@@ -1211,6 +1221,7 @@ func (r *Router) handleTalosClusters(writer http.ResponseWriter, request *http.R
 	for _, item := range list.Items {
 		row := talosClusterRow{
 			Name:              item.Name,
+			Namespace:         item.Namespace,
 			ControlPlanePool:  item.Spec.ControlPlane.PoolRef.Name,
 			TalosVersion:      item.Spec.Talos.Version,
 			KubernetesVersion: item.Spec.Kubernetes.Version,
@@ -1232,6 +1243,7 @@ func (r *Router) handleTalosClusters(writer http.ResponseWriter, request *http.R
 		"ActiveMenu":    "talosclusters",
 		"Version":       r.version,
 		"AuthEnabled":   r.authEnabled,
+		"Namespace":     namespace,
 		"TalosClusters": clusters,
 	})
 }
@@ -1275,10 +1287,10 @@ type poolRow struct {
 // kontinuum's RBAC model is all-or-nothing per admin group (see handleIAM's
 // own doc), so a viewer who can already read the TalosCluster itself is
 // never expected to be selectively denied one of its InstancePools.
-func fetchPoolRow(ctx context.Context, kontinuums KontinuumClient, rowName, poolName string) poolRow {
+func fetchPoolRow(ctx context.Context, kontinuums KontinuumClient, namespace, rowName, poolName string) poolRow {
 	var pool v1alpha2.InstancePool
 
-	key := client.ObjectKey{Name: poolName, Namespace: v1alpha2.DefaultSecretNamespace}
+	key := client.ObjectKey{Name: poolName, Namespace: namespace}
 
 	err := kontinuums.Get(ctx, key, &pool)
 	if err != nil {
@@ -1313,11 +1325,11 @@ type conditionRow struct {
 // fetchOwningZone has already written the error (or forbidden-redirect)
 // response itself.
 func (r *Router) fetchOwningZone(
-	writer http.ResponseWriter, request *http.Request, kontinuums KontinuumClient, clusterName string,
+	writer http.ResponseWriter, request *http.Request, kontinuums KontinuumClient, namespace, clusterName string,
 ) (v1alpha2.Zone, bool) {
 	var zone v1alpha2.Zone
 
-	key := client.ObjectKey{Name: clusterName, Namespace: v1alpha2.DefaultSecretNamespace}
+	key := client.ObjectKey{Name: clusterName, Namespace: namespace}
 
 	err := kontinuums.Get(request.Context(), key, &zone)
 	if err != nil {
@@ -1383,11 +1395,11 @@ func (r *Router) fetchTalosClusterKubeconfig(
 // already written the response itself: NotFound, a forbidden-redirect, or a
 // bad-gateway error.
 func (r *Router) fetchTalosCluster(
-	writer http.ResponseWriter, request *http.Request, kontinuums KontinuumClient, name string,
+	writer http.ResponseWriter, request *http.Request, kontinuums KontinuumClient, namespace, name string,
 ) (v1alpha2.TalosCluster, bool) {
 	var cluster v1alpha2.TalosCluster
 
-	key := client.ObjectKey{Name: name, Namespace: v1alpha2.DefaultSecretNamespace}
+	key := client.ObjectKey{Name: name, Namespace: namespace}
 
 	err := kontinuums.Get(request.Context(), key, &cluster)
 	if err != nil {
@@ -1427,10 +1439,10 @@ func talosClusterDetailData(
 ) map[string]any {
 	pools := make([]poolRow, 0, len(cluster.Spec.Workers)+1)
 	pools = append(pools,
-		fetchPoolRow(ctx, kontinuums, "Control plane", cluster.Spec.ControlPlane.PoolRef.Name))
+		fetchPoolRow(ctx, kontinuums, cluster.Namespace, "Control plane", cluster.Spec.ControlPlane.PoolRef.Name))
 
 	for _, worker := range cluster.Spec.Workers {
-		pools = append(pools, fetchPoolRow(ctx, kontinuums, worker.Name, worker.PoolRef.Name))
+		pools = append(pools, fetchPoolRow(ctx, kontinuums, cluster.Namespace, worker.Name, worker.PoolRef.Name))
 	}
 
 	conditions := make([]conditionRow, 0, len(cluster.Status.Conditions))
@@ -1447,6 +1459,7 @@ func talosClusterDetailData(
 		"Version":            version,
 		"AuthEnabled":        authEnabled,
 		"Name":               cluster.Name,
+		"Namespace":          cluster.Namespace,
 		"TalosVersion":       cluster.Spec.Talos.Version,
 		"KubernetesVersion":  cluster.Spec.Kubernetes.Version,
 		"Age":                formatAge(cluster.CreationTimestamp.Time),
@@ -1486,12 +1499,12 @@ func (r *Router) handleTalosClusterDetail(writer http.ResponseWriter, request *h
 		return
 	}
 
-	cluster, found := r.fetchTalosCluster(writer, request, kontinuums, request.PathValue("name"))
+	cluster, found := r.fetchTalosCluster(writer, request, kontinuums, request.PathValue("ns"), request.PathValue("name"))
 	if !found {
 		return
 	}
 
-	zone, found := r.fetchOwningZone(writer, request, kontinuums, cluster.Name)
+	zone, found := r.fetchOwningZone(writer, request, kontinuums, cluster.Namespace, cluster.Name)
 	if !found {
 		return
 	}
@@ -1537,7 +1550,7 @@ func (r *Router) handleTalosClusterKubeconfigDownload(writer http.ResponseWriter
 		return
 	}
 
-	cluster, found := r.fetchTalosCluster(writer, request, kontinuums, request.PathValue("name"))
+	cluster, found := r.fetchTalosCluster(writer, request, kontinuums, request.PathValue("ns"), request.PathValue("name"))
 	if !found {
 		return
 	}
