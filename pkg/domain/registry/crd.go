@@ -100,9 +100,21 @@ func CustomResourceDefinition(caBundle []byte) *apiextensionsv1.CustomResourceDe
 // (see its doc for why that ordering matters). logger receives a warning
 // for every retry along the way.
 func EnsureCRD(ctx context.Context, loopbackConfig *restclient.Config, caBundle []byte, logger *slog.Logger) error {
-	err := crd.Ensure(ctx, loopbackConfig, crdconfig.Files, definition(caBundle), logger)
+	def := definition(caBundle)
+
+	migrated, err := crd.MigrateScope(ctx, loopbackConfig, crdconfig.Files, def, logger)
+	if err != nil {
+		return fmt.Errorf("failed to migrate %s crd scope: %w", crdName(), err)
+	}
+
+	err = crd.Ensure(ctx, loopbackConfig, crdconfig.Files, def, logger)
 	if err != nil {
 		return fmt.Errorf("failed to ensure %s crd: %w", crdName(), err)
+	}
+
+	err = crd.RestoreMigrated(ctx, loopbackConfig, migrated, v1alpha2.DefaultSecretNamespace, logger)
+	if err != nil {
+		return fmt.Errorf("failed to restore migrated %s objects: %w", crdName(), err)
 	}
 
 	return nil

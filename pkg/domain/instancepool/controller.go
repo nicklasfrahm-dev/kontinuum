@@ -115,7 +115,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, fmt.Errorf("failed to get instance pool %q: %w", req.Name, err)
 	}
 
-	claimed, err := r.listClaimed(ctx, pool.Name)
+	claimed, err := r.listClaimed(ctx, pool.Namespace, pool.Name)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -162,11 +162,15 @@ func (r *Reconciler) enqueueAllPools(ctx context.Context, _ client.Object) []ctr
 	return requests
 }
 
-// listClaimed lists every Instance currently claimed by poolName.
-func (r *Reconciler) listClaimed(ctx context.Context, poolName string) ([]v1alpha2.Instance, error) {
+// listClaimed lists every Instance currently claimed by poolName, scoped to
+// namespace — an InstancePool only ever claims Instances in its own
+// namespace, the same implicit same-namespace reference convention
+// InstancePoolReference itself relies on (see issue #63's architecture).
+func (r *Reconciler) listClaimed(ctx context.Context, namespace, poolName string) ([]v1alpha2.Instance, error) {
 	var list v1alpha2.InstanceList
 
-	err := r.Client.List(ctx, &list, client.MatchingLabels{v1alpha2.LabelClaimedBy: poolName})
+	err := r.Client.List(ctx, &list,
+		client.InNamespace(namespace), client.MatchingLabels{v1alpha2.LabelClaimedBy: poolName})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list instances claimed by %q: %w", poolName, err)
 	}
@@ -229,7 +233,8 @@ func (r *Reconciler) claim(
 
 	var candidates v1alpha2.InstanceList
 
-	err = r.Client.List(ctx, &candidates, client.MatchingLabelsSelector{Selector: selector})
+	err = r.Client.List(ctx, &candidates,
+		client.InNamespace(pool.Namespace), client.MatchingLabelsSelector{Selector: selector})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list candidate instances for pool %q: %w", pool.Name, err)
 	}
@@ -272,7 +277,7 @@ func (r *Reconciler) tryClaim(
 ) (v1alpha2.Instance, bool, error) {
 	var inst v1alpha2.Instance
 
-	err := r.Client.Get(ctx, client.ObjectKey{Name: name}, &inst)
+	err := r.Client.Get(ctx, client.ObjectKey{Name: name, Namespace: pool.Namespace}, &inst)
 	if apierrors.IsNotFound(err) {
 		return v1alpha2.Instance{}, false, nil
 	}

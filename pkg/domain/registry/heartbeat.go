@@ -116,7 +116,7 @@ func (h *Heartbeat) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resul
 // nothing left over to special-case here.
 func (h *Heartbeat) Start(ctx context.Context) error {
 	server := &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: h.Name},
+		ObjectMeta: metav1.ObjectMeta{Name: h.Name, Namespace: v1alpha2.DefaultSecretNamespace},
 		Spec:       h.Spec,
 	}
 
@@ -163,7 +163,9 @@ func (h *Heartbeat) Start(ctx context.Context) error {
 func (h *Heartbeat) Deregister(ctx context.Context) error {
 	h.shuttingDown.Store(true)
 
-	server := &v1alpha2.Kontinuum{ObjectMeta: metav1.ObjectMeta{Name: h.Name}}
+	server := &v1alpha2.Kontinuum{
+		ObjectMeta: metav1.ObjectMeta{Name: h.Name, Namespace: v1alpha2.DefaultSecretNamespace},
+	}
 
 	err := h.Client.Delete(ctx, server)
 	if err != nil && !apierrors.IsNotFound(err) {
@@ -224,10 +226,21 @@ func (h *Heartbeat) beat(ctx context.Context, server *v1alpha2.Kontinuum) {
 	}
 }
 
+// ensureNamespace creates namespace if it doesn't already exist — shared by
+// ensureSecret and reregister, both of which need it to exist before
+// creating a namespaced object inside it.
+func ensureNamespace(ctx context.Context, kubeClient client.Client, namespace string) error {
+	err := kubeClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}})
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("failed to ensure %q namespace: %w", namespace, err)
+	}
+
+	return nil
+}
+
 // secretRef is where ensureSecret upserts h.SecretData: a Secret named
-// after this instance, in v1alpha2.DefaultSecretNamespace — Kontinuum is
-// cluster-scoped, so there's no namespace of its own for the Secret to
-// default into.
+// after this instance, in v1alpha2.DefaultSecretNamespace — the same
+// namespace this instance's own Kontinuum object lives in (see Start).
 func (h *Heartbeat) secretRef() v1alpha2.KontinuumSecretReference {
 	return v1alpha2.KontinuumSecretReference{
 		Name:      secretName(h.Name),
@@ -253,11 +266,9 @@ func (h *Heartbeat) ensureSecret(
 ) (v1alpha2.KontinuumSecretReference, error) {
 	ref := h.secretRef()
 
-	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ref.Namespace}}
-
-	err := h.Client.Create(ctx, namespace)
-	if err != nil && !apierrors.IsAlreadyExists(err) {
-		return ref, fmt.Errorf("failed to ensure %q namespace: %w", ref.Namespace, err)
+	err := ensureNamespace(ctx, h.Client, ref.Namespace)
+	if err != nil {
+		return ref, err
 	}
 
 	secret := &corev1.Secret{
@@ -305,11 +316,18 @@ func (h *Heartbeat) ensureSecret(
 // whatever the other path already recreated instead.
 func (h *Heartbeat) reregister(ctx context.Context, server *v1alpha2.Kontinuum) {
 	*server = v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: h.Name},
+		ObjectMeta: metav1.ObjectMeta{Name: h.Name, Namespace: v1alpha2.DefaultSecretNamespace},
 		Spec:       h.Spec,
 	}
 
-	err := h.Client.Create(ctx, server)
+	err := ensureNamespace(ctx, h.Client, server.Namespace)
+	if err != nil {
+		h.Logger.Error("Failed to ensure server namespace", "name", h.Name, "error", err)
+
+		return
+	}
+
+	err = h.Client.Create(ctx, server)
 	if err != nil && apierrors.IsAlreadyExists(err) {
 		err = h.Client.Get(ctx, client.ObjectKeyFromObject(server), server)
 	}

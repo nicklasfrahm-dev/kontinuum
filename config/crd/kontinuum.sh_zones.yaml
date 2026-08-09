@@ -12,7 +12,7 @@ spec:
     listKind: ZoneList
     plural: zones
     singular: zone
-  scope: Cluster
+  scope: Namespaced
   versions:
   - additionalPrinterColumns:
     - jsonPath: .spec.region

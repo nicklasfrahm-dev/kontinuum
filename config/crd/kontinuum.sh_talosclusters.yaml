@@ -12,7 +12,7 @@ spec:
     listKind: TalosClusterList
     plural: talosclusters
     singular: taloscluster
-  scope: Cluster
+  scope: Namespaced
   versions:
   - additionalPrinterColumns:
     - jsonPath: .spec.controlPlane.poolRef.name

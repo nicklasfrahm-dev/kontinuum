@@ -80,7 +80,8 @@ func TestRunZoneAddCreatesZoneObjects(t *testing.T) {
 	assert.Contains(t, buf.String(), "Created zone")
 
 	var got v1alpha2.Zone
-	require.NoError(t, hubClient.Get(cmd.Context(), client.ObjectKey{Name: testRegion + "-" + testZone}, &got))
+	require.NoError(t, hubClient.Get(cmd.Context(),
+		client.ObjectKey{Name: testRegion + "-" + testZone, Namespace: v1alpha2.DefaultSecretNamespace}, &got))
 	assert.Equal(t, testDomain, got.Spec.Domain)
 }
 
@@ -116,7 +117,7 @@ func TestRunZoneAddWaitReturnsOnceInstalled(t *testing.T) {
 	// no-op AlreadyExists, and --wait's first poll (before it would ever
 	// need to wait on pollInterval's ticker) already observes Installed.
 	existing := &v1alpha2.Zone{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: v1alpha2.DefaultSecretNamespace},
 		Spec:       v1alpha2.ZoneSpec{Region: testRegion, Zone: testZone, Domain: testDomain},
 		Status: v1alpha2.ZoneStatus{
 			Conditions: []metav1.Condition{{

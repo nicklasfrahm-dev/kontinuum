@@ -78,7 +78,7 @@ type InstanceStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Cluster
+// +kubebuilder:resource:scope=Namespaced
 // +kubebuilder:printcolumn:name="TalosVersion",type="string",JSONPath=".status.talos.version"
 // The line exceeds this repo's normal length limit, but splitting a
 // kubebuilder marker across lines isn't supported, so it's exempted rather

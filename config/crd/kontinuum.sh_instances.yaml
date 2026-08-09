@@ -12,7 +12,7 @@ spec:
     listKind: InstanceList
     plural: instances
     singular: instance
-  scope: Cluster
+  scope: Namespaced
   versions:
   - additionalPrinterColumns:
     - jsonPath: .status.talos.version

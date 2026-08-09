@@ -219,7 +219,7 @@ type KontinuumSecretReference struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Cluster
+// +kubebuilder:resource:scope=Namespaced
 // +kubebuilder:storageversion
 // +kubebuilder:printcolumn:name="Role",type="string",JSONPath=".status.role"
 // +kubebuilder:printcolumn:name="Region",type="string",JSONPath=".spec.region"

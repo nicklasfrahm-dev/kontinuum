@@ -79,7 +79,7 @@ func waitForZone(cmd *cobra.Command, hubClient client.Client, name string, timeo
 func pollZoneOnce(ctx context.Context, hubClient client.Client, name string) (bool, string, error) {
 	var zoneObj v1alpha2.Zone
 
-	err := hubClient.Get(ctx, client.ObjectKey{Name: name}, &zoneObj)
+	err := hubClient.Get(ctx, client.ObjectKey{Name: name, Namespace: v1alpha2.DefaultSecretNamespace}, &zoneObj)
 	if apierrors.IsNotFound(err) {
 		return false, "waiting for zone to appear...", nil
 	}

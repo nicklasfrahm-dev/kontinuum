@@ -190,7 +190,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 func (r *Reconciler) reconcileControlPlane(
 	ctx context.Context, cluster *v1alpha2.TalosCluster, bundle *talossecrets.Bundle,
 ) (ctrl.Result, error) {
-	members, err := resolveMembers(ctx, r.Client, cluster.Spec.ControlPlane.PoolRef)
+	members, err := resolveMembers(ctx, r.Client, cluster.Namespace, cluster.Spec.ControlPlane.PoolRef)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -398,7 +398,7 @@ func (r *Reconciler) reconcileWorkers(
 		return nil
 	}
 
-	controlPlaneMembers, err := resolveMembers(ctx, r.Client, cluster.Spec.ControlPlane.PoolRef)
+	controlPlaneMembers, err := resolveMembers(ctx, r.Client, cluster.Namespace, cluster.Spec.ControlPlane.PoolRef)
 	if err != nil {
 		return err
 	}
@@ -439,7 +439,7 @@ func (r *Reconciler) reconcileWorkerPool(
 	ctx context.Context, cluster *v1alpha2.TalosCluster, worker v1alpha2.TalosClusterWorkerSpec, workerBytes []byte,
 	controlPlaneAddr string, talosCfg *clientconfig.Config,
 ) error {
-	members, err := resolveMembers(ctx, r.Client, worker.PoolRef)
+	members, err := resolveMembers(ctx, r.Client, cluster.Namespace, worker.PoolRef)
 	if err != nil {
 		return err
 	}

@@ -73,17 +73,20 @@ func TestAddCreatesAllFourObjects(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, testZoneName, got.Name)
 
+	sharedKey := client.ObjectKey{Name: testZoneName, Namespace: v1alpha2.DefaultSecretNamespace}
+	seedKey := client.ObjectKey{Name: testZoneName + "-seed", Namespace: v1alpha2.DefaultSecretNamespace}
+
 	var z v1alpha2.Zone
-	assert.NoError(t, hubClient.Get(t.Context(), client.ObjectKey{Name: testZoneName}, &z))
+	assert.NoError(t, hubClient.Get(t.Context(), sharedKey, &z))
 
 	var instance v1alpha2.Instance
-	assert.NoError(t, hubClient.Get(t.Context(), client.ObjectKey{Name: testZoneName + "-seed"}, &instance))
+	assert.NoError(t, hubClient.Get(t.Context(), seedKey, &instance))
 
 	var pool v1alpha2.InstancePool
-	assert.NoError(t, hubClient.Get(t.Context(), client.ObjectKey{Name: testZoneName}, &pool))
+	assert.NoError(t, hubClient.Get(t.Context(), sharedKey, &pool))
 
 	var cluster v1alpha2.TalosCluster
-	assert.NoError(t, hubClient.Get(t.Context(), client.ObjectKey{Name: testZoneName}, &cluster))
+	assert.NoError(t, hubClient.Get(t.Context(), sharedKey, &cluster))
 }
 
 // TestAddSetsOwnerReferencesFromZoneToDependents covers the fan-out's own
@@ -101,16 +104,19 @@ func TestAddSetsOwnerReferencesFromZoneToDependents(t *testing.T) {
 	got, err := zone.Add(t.Context(), hubClient, testAddOptions())
 	require.NoError(t, err)
 
+	sharedKey := client.ObjectKey{Name: testZoneName, Namespace: v1alpha2.DefaultSecretNamespace}
+	seedKey := client.ObjectKey{Name: testZoneName + "-seed", Namespace: v1alpha2.DefaultSecretNamespace}
+
 	var instance v1alpha2.Instance
-	require.NoError(t, hubClient.Get(t.Context(), client.ObjectKey{Name: testZoneName + "-seed"}, &instance))
+	require.NoError(t, hubClient.Get(t.Context(), seedKey, &instance))
 	assertOwnedByZone(t, got, instance.OwnerReferences)
 
 	var pool v1alpha2.InstancePool
-	require.NoError(t, hubClient.Get(t.Context(), client.ObjectKey{Name: testZoneName}, &pool))
+	require.NoError(t, hubClient.Get(t.Context(), sharedKey, &pool))
 	assertOwnedByZone(t, got, pool.OwnerReferences)
 
 	var cluster v1alpha2.TalosCluster
-	require.NoError(t, hubClient.Get(t.Context(), client.ObjectKey{Name: testZoneName}, &cluster))
+	require.NoError(t, hubClient.Get(t.Context(), sharedKey, &cluster))
 	assertOwnedByZone(t, got, cluster.OwnerReferences)
 }
 

@@ -66,7 +66,8 @@ func controlPlaneMemberCount(
 
 	poolName := cluster.Spec.ControlPlane.PoolRef.Name
 
-	err := kubeClient.List(ctx, &list, client.MatchingLabels{v1alpha2.LabelClaimedBy: poolName})
+	err := kubeClient.List(ctx, &list,
+		client.InNamespace(cluster.Namespace), client.MatchingLabels{v1alpha2.LabelClaimedBy: poolName})
 	if err != nil {
 		return 0, fmt.Errorf("failed to list control-plane instances for %q: %w", cluster.Name, err)
 	}

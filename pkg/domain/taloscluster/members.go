@@ -15,13 +15,17 @@ import (
 // InstancePool that are also Discovered — TalosCluster only ever touches
 // Instances instancepool.Reconciler has already claimed and
 // instance.Reconciler has already probed successfully, since only those
-// have a known-reachable dialAddress.
+// have a known-reachable dialAddress. namespace is the owning TalosCluster's
+// own namespace — InstancePoolReference is a same-namespace-only reference
+// (see issue #63's architecture), the same convention a Deployment already
+// uses for its ConfigMap/Secret refs.
 func resolveMembers(
-	ctx context.Context, kubeClient client.Client, poolRef v1alpha2.InstancePoolReference,
+	ctx context.Context, kubeClient client.Client, namespace string, poolRef v1alpha2.InstancePoolReference,
 ) ([]v1alpha2.Instance, error) {
 	var list v1alpha2.InstanceList
 
-	err := kubeClient.List(ctx, &list, client.MatchingLabels{v1alpha2.LabelClaimedBy: poolRef.Name})
+	err := kubeClient.List(ctx, &list,
+		client.InNamespace(namespace), client.MatchingLabels{v1alpha2.LabelClaimedBy: poolRef.Name})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list instances claimed by pool %q: %w", poolRef.Name, err)
 	}

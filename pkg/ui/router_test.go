@@ -295,24 +295,19 @@ func newTestDeleteRequest(t *testing.T, target string) *http.Request {
 	return httptest.NewRequestWithContext(context.Background(), http.MethodDelete, target, nil)
 }
 
-func TestHandleHomeRendersTenants(t *testing.T) {
+// TestHandleHomeRedirectsToDefaultTenantInstances covers GET /app/home
+// specifically — /app/home has no page of its own anymore (see issue #63's
+// UI comment: the tenants list it used to render is gone, replaced by
+// nav.html's own tenant switcher). It's kept as a real route purely as
+// pkg/auth's own post-login redirect target, and just forwards straight to
+// the default tenant's instances page — the same target GET /app's own
+// unconditional redirect uses (see
+// TestRegisterRoutesDefaultsToUnconditionalAppRedirect), but reached via a
+// different route.
+func TestHandleHomeRedirectsToDefaultTenantInstances(t *testing.T) {
 	t.Parallel()
 
-	factory := func(context.Context) (ui.NamespaceLister, error) {
-		return stubNamespaceLister{list: &corev1.NamespaceList{
-			Items: []corev1.Namespace{{ObjectMeta: metav1.ObjectMeta{Name: "demo"}}},
-		}}, nil
-	}
-
-	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
-		return stubKontinuumLister{}, nil
-	}
-
-	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
-		config.Config{}, false, nil)
-
-	mux := http.NewServeMux()
-	router.RegisterRoutes(mux, nil, nil)
+	mux := newRedirectTestMux(t)
 
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder, newTestRequest(t, "/app/home"))
@@ -321,18 +316,20 @@ func TestHandleHomeRendersTenants(t *testing.T) {
 
 	defer func() { _ = resp.Body.Close() }()
 
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	assert.Contains(t, string(body), "demo")
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+	assert.Equal(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances", resp.Header.Get("Location"))
 }
 
-func TestHandleHomeReturnsServerErrorWhenFactoryFails(t *testing.T) {
-	t.Parallel()
+// newRedirectTestMux builds a fully-wired *http.ServeMux for the two
+// GET-/app.../redirect tests above and below — see
+// TestHandleHomeRedirectsToDefaultTenantInstances and
+// TestRegisterRoutesDefaultsToUnconditionalAppRedirect, which differ only in
+// which path they request.
+func newRedirectTestMux(t *testing.T) *http.ServeMux {
+	t.Helper()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
-		return nil, errFactory
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
 	}
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
@@ -345,14 +342,7 @@ func TestHandleHomeReturnsServerErrorWhenFactoryFails(t *testing.T) {
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
 
-	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/home"))
-
-	resp := recorder.Result()
-
-	defer func() { _ = resp.Body.Close() }()
-
-	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	return mux
 }
 
 func TestRegisterRoutesUsesCustomAppRootAndProtect(t *testing.T) {
@@ -427,7 +417,7 @@ func TestRegisterRoutesServesVendoredStaticAssets(t *testing.T) {
 	}
 }
 
-func TestHandleHomeShowsLogoutLinkOnlyWhenAuthEnabled(t *testing.T) {
+func TestHandleMachinesShowsLogoutLinkOnlyWhenAuthEnabled(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -446,7 +436,7 @@ func TestHandleHomeShowsLogoutLinkOnlyWhenAuthEnabled(t *testing.T) {
 		router.RegisterRoutes(mux, nil, nil)
 
 		recorder := httptest.NewRecorder()
-		mux.ServeHTTP(recorder, newTestRequest(t, "/app/home"))
+		mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances"))
 
 		resp := recorder.Result()
 
@@ -1197,19 +1187,7 @@ func TestHandleIAMShowsNoBindingsMessageWhenNoneExist(t *testing.T) {
 func TestRegisterRoutesDefaultsToUnconditionalAppRedirect(t *testing.T) {
 	t.Parallel()
 
-	factory := func(context.Context) (ui.NamespaceLister, error) {
-		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
-	}
-
-	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
-		return stubKontinuumLister{}, nil
-	}
-
-	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
-		config.Config{}, false, nil)
-
-	mux := http.NewServeMux()
-	router.RegisterRoutes(mux, nil, nil)
+	mux := newRedirectTestMux(t)
 
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder, newTestRequest(t, "/app"))
@@ -1219,7 +1197,7 @@ func TestRegisterRoutesDefaultsToUnconditionalAppRedirect(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusFound, resp.StatusCode)
-	assert.Equal(t, "/app/home", resp.Header.Get("Location"))
+	assert.Equal(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances", resp.Header.Get("Location"))
 }
 
 func TestHandleRegistryRendersInstances(t *testing.T) {
@@ -1510,6 +1488,7 @@ func newTestZoneClient(t *testing.T, objects ...client.Object) client.Client {
 
 	scheme := apiruntime.NewScheme()
 	require.NoError(t, v1alpha2.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
 
 	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 }
@@ -1630,7 +1609,9 @@ func TestHandleZoneAddCreatesZoneAndReturnsSuccessFragment(t *testing.T) {
 	assert.NotContains(t, string(body), `name="talos-address"`)
 
 	var got v1alpha2.Zone
-	require.NoError(t, zoneClient.Get(context.Background(), client.ObjectKey{Name: testTalosClusterName}, &got))
+
+	zoneKey := client.ObjectKey{Name: testTalosClusterName, Namespace: v1alpha2.DefaultSecretNamespace}
+	require.NoError(t, zoneClient.Get(context.Background(), zoneKey, &got))
 	assert.Equal(t, "example.com", got.Spec.Domain)
 }
 
@@ -1769,7 +1750,7 @@ func TestHandleMachinesRendersInstances(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/instances"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances"))
 
 	resp := recorder.Result()
 
@@ -1800,7 +1781,7 @@ func TestHandleMachinesShowsEmptyState(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/instances"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances"))
 
 	resp := recorder.Result()
 
@@ -1825,7 +1806,7 @@ func TestHandleMachinesReturnsServerErrorWhenFactoryFails(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/instances"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances"))
 
 	resp := recorder.Result()
 
@@ -1843,7 +1824,8 @@ func TestHandleMachinesInvalidatesSessionOnForbidden(t *testing.T) {
 		return stubKontinuumLister{machineErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
 	}
 
-	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/instances"), kontinuumFactory)
+	request := newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances")
+	assertForbiddenInvalidatesSession(t, request, kontinuumFactory)
 }
 
 func TestHandleMachineDetailRendersInstance(t *testing.T) {
@@ -1865,7 +1847,7 @@ func TestHandleMachineDetailRendersInstance(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/instances/node-a"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances/node-a"))
 
 	resp := recorder.Result()
 
@@ -1898,7 +1880,7 @@ func TestHandleMachineDetailReturnsNotFoundForUnknownInstance(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/instances/does-not-exist"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances/does-not-exist"))
 
 	resp := recorder.Result()
 
@@ -1920,7 +1902,7 @@ func TestHandleMachineDetailReturnsServerErrorWhenFactoryFails(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/instances/node-a"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances/node-a"))
 
 	resp := recorder.Result()
 
@@ -1940,7 +1922,8 @@ func TestHandleMachineDetailInvalidatesSessionOnForbidden(t *testing.T) {
 		}, nil
 	}
 
-	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/instances/node-a"), kontinuumFactory)
+	request := newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances/node-a")
+	assertForbiddenInvalidatesSession(t, request, kontinuumFactory)
 }
 
 // talosClusterFixture builds a TalosCluster fixture named

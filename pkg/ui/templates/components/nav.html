@@ -1,4 +1,9 @@
 {{define "nav"}}
+{{/* CurrentTenant/Tenants are merged into every page's data by
+     pkg/ui.Router.addTenantSwitcherData — CurrentTenant defaults to
+     defaultTenantNamespace when the current page isn't itself
+     namespace-scoped, so the switcher and the Instances link below always
+     have a real value to point at. */}}
 <!-- Mobile top bar -->
 <div class="lg:hidden fixed top-0 left-0 right-0 h-14 bg-neutral-900 border-b border-neutral-800 flex items-center justify-between px-4 z-40">
     <span class="flex items-baseline gap-2">
@@ -6,7 +11,7 @@
         {{if .Version}}<span class="text-[10px] text-neutral-500 tracking-wider">{{.Version}}</span>{{end}}
     </span>
     <div class="flex items-center gap-1">
-        <a href="/app/instances"
+        <a href="/app/kontinuum.sh/namespaces/{{.CurrentTenant}}/instances"
            class="p-2 rounded-lg {{if eq .ActiveMenu "instances"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-server"}}
         </a>
@@ -14,10 +19,7 @@
            class="p-2 rounded-lg {{if eq .ActiveMenu "talosclusters"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-kubernetes"}}
         </a>
-        <a href="/app/home"
-           class="p-2 rounded-lg {{if eq .ActiveMenu "home"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
-            {{template "icon-tenants"}}
-        </a>
+        {{template "tenant-switcher" dict "ID" "tenant-switcher-mobile" "CurrentTenant" .CurrentTenant "Tenants" .Tenants "Compact" true}}
         <a href="/app/kontinuums"
            class="p-2 rounded-lg {{if eq .ActiveMenu "registry"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-registry"}}
@@ -40,15 +42,18 @@
 </div>
 
 <!-- Desktop sidebar -->
-<aside class="hidden lg:flex fixed top-0 left-0 h-screen w-56 bg-neutral-900 border-r border-neutral-800 flex-col z-30">
+<aside class="hidden lg:flex fixed top-0 left-0 h-screen w-64 bg-neutral-900 border-r border-neutral-800 flex-col z-30">
     <div class="h-14 flex items-center px-5 border-b border-neutral-800">
         <span class="flex items-baseline gap-2">
             <span class="text-accent font-bold text-lg tracking-tight">KONTINUUM</span>
             {{if .Version}}<span class="text-[10px] text-neutral-500 tracking-wider">{{.Version}}</span>{{end}}
         </span>
     </div>
+    <div class="px-3 py-3 border-b border-neutral-800">
+        {{template "tenant-switcher" dict "ID" "tenant-switcher-desktop" "CurrentTenant" .CurrentTenant "Tenants" .Tenants "Compact" false}}
+    </div>
     <nav class="flex flex-col gap-1 px-3 py-4 flex-1">
-        <a href="/app/instances"
+        <a href="/app/kontinuum.sh/namespaces/{{.CurrentTenant}}/instances"
            class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "instances"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-server"}}
             Instances
@@ -57,11 +62,6 @@
            class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "talosclusters"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-kubernetes"}}
             Clusters
-        </a>
-        <a href="/app/home"
-           class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "home"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
-            {{template "icon-tenants"}}
-            Tenants
         </a>
         <div class="flex-1"></div>
         <a href="/app/kontinuums"

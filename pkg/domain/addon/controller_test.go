@@ -118,7 +118,7 @@ const (
 // install anything at all.
 func readyCluster() (*v1alpha2.TalosCluster, *corev1.Secret) {
 	cluster := &v1alpha2.TalosCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: testClusterName},
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: v1alpha2.DefaultSecretNamespace},
 		Spec: v1alpha2.TalosClusterSpec{
 			ControlPlane: v1alpha2.TalosClusterMemberSpec{
 				PoolRef: v1alpha2.InstancePoolReference{Name: controlPlanePoolName},
@@ -141,8 +141,11 @@ func readyCluster() (*v1alpha2.TalosCluster, *corev1.Secret) {
 
 func claimedDiscoveredInstance(name string) *v1alpha2.Instance {
 	return &v1alpha2.Instance{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{v1alpha2.LabelClaimedBy: controlPlanePoolName}},
-		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{"10.0.0.1"}},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: v1alpha2.DefaultSecretNamespace,
+			Labels: map[string]string{v1alpha2.LabelClaimedBy: controlPlanePoolName},
+		},
+		Spec: v1alpha2.InstanceSpec{Interfaces: []string{"10.0.0.1"}},
 		Status: v1alpha2.InstanceStatus{
 			Conditions: []metav1.Condition{
 				{Type: instance.DiscoveredConditionType, Status: metav1.ConditionTrue, Reason: "Discovered"},
@@ -402,7 +405,7 @@ func TestReconcileKubeconfigNotStoredRequeuesWithoutError(t *testing.T) {
 	t.Parallel()
 
 	cluster := &v1alpha2.TalosCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: testClusterName},
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: v1alpha2.DefaultSecretNamespace},
 		Spec: v1alpha2.TalosClusterSpec{
 			ControlPlane: v1alpha2.TalosClusterMemberSpec{PoolRef: v1alpha2.InstancePoolReference{Name: controlPlanePoolName}},
 		},
