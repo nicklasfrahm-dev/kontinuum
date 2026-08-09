@@ -175,6 +175,7 @@ func mustParsePage(content ...string) *template.Template {
 		"templates/components/icon_settings.html",
 		"templates/components/icon_logout.html",
 		"templates/components/icon_book_open_text.html",
+		"templates/components/icon_external_link.html",
 	}
 
 	files := make([]string, 0, len(shared)+len(content))
