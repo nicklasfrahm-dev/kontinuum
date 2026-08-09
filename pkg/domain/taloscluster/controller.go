@@ -215,21 +215,30 @@ func (r *Reconciler) reconcileControlPlane(
 // applyControlPlaneConfig best-effort applies cpBytes to every member —
 // see reconcileControlPlane's own doc for why a failure here is logged,
 // not fatal. Returns every member's dial address, for HealthCheck's
-// controlPlaneNodes argument.
+// controlPlaneNodes argument. Mutates members in place (by index, not a
+// range copy) so a Configured member's bumped ResourceVersion is visible
+// to bootstrapAndCheckHealth's later recordTalosVersions call on the same
+// slice — updating from a stale copy there would otherwise conflict.
 func (r *Reconciler) applyControlPlaneConfig(
 	ctx context.Context, cluster *v1alpha2.TalosCluster, members []v1alpha2.Instance, cpBytes []byte,
 ) []string {
 	controlPlaneNodes := make([]string, 0, len(members))
 
-	for _, member := range members {
-		addr := dialAddress(member)
+	for i := range members {
+		member := &members[i]
+		addr := dialAddress(*member)
 		controlPlaneNodes = append(controlPlaneNodes, addr)
 
 		err := r.Bootstrapper.ApplyConfiguration(ctx, addr, cpBytes)
 		if err != nil {
 			r.Logger.Warn("failed to apply control plane configuration, node may already be past maintenance mode",
 				"cluster", cluster.Name, "address", addr, "error", err)
+
+			continue
 		}
+
+		markMemberCondition(ctx, r.Client, r.Logger, member, MemberConfiguredConditionType, reasonMemberConfigured,
+			"talos machine configuration applied")
 	}
 
 	return controlPlaneNodes
@@ -316,8 +325,10 @@ func (r *Reconciler) bootstrapAndCheckHealth(
 	// HealthCheck passing already proves every member in controlPlaneNodes
 	// is up and reachable with its real, post-config mTLS identity — the
 	// one precondition instance.Discoverer's own maintenance-mode Version
-	// call can no longer rely on (see its doc).
-	r.recordTalosVersions(ctx, cluster, members, controlPlaneAddr, talosCfg)
+	// call can no longer rely on (see its doc). markReady is true here
+	// because that same HealthCheck call already verified this exact batch
+	// of members healthy — see MemberReadyConditionType's own doc.
+	r.recordTalosVersions(ctx, cluster, members, controlPlaneAddr, talosCfg, true)
 
 	controlPlaneResult, err := r.setControlPlaneCondition(ctx, cluster, metav1.ConditionTrue, reasonHealthy,
 		"control plane is healthy")
@@ -444,41 +455,59 @@ func (r *Reconciler) reconcileWorkerPool(
 		return err
 	}
 
-	for _, member := range members {
-		addr := dialAddress(member)
+	for i := range members {
+		member := &members[i]
+		addr := dialAddress(*member)
 
 		applyErr := r.Bootstrapper.ApplyConfiguration(ctx, addr, workerBytes)
 		if applyErr != nil {
 			r.Logger.Warn("failed to apply worker configuration, node may already be past maintenance mode",
 				"cluster", cluster.Name, "pool", worker.PoolRef.Name, "address", addr, "error", applyErr)
+
+			continue
 		}
+
+		markMemberCondition(ctx, r.Client, r.Logger, member, MemberConfiguredConditionType, reasonMemberConfigured,
+			"talos machine configuration applied")
 	}
 
-	r.recordTalosVersions(ctx, cluster, members, controlPlaneAddr, talosCfg)
+	// markReady is false here: unlike the control-plane batch (see
+	// bootstrapAndCheckHealth), no HealthCheck has run against these
+	// workers — recordTalosVersions' Version RPC succeeding only proves a
+	// worker rebooted into its new identity, not that it's healthy (see
+	// MemberReadyConditionType's own doc).
+	r.recordTalosVersions(ctx, cluster, members, controlPlaneAddr, talosCfg, false)
 
 	return nil
 }
 
 // recordTalosVersions best-effort fetches and persists each of members' real
-// Talos version, skipping any that already have one recorded. Once a
-// maintenance-mode member has had its config applied, its own
-// maintenance-mode Version RPC becomes permanently unreachable — its apid
-// has moved on to the real, non-maintenance-mode server — so dialAddr (any
-// already-configured, reachable cluster member) and talosCfg's admin
+// Talos version and MemberJoinedConditionType, skipping any already marked
+// Joined — checked via that condition rather than Status.Talos.Version
+// directly so a member upgraded from before this condition existed
+// self-heals (re-fetches once, cheaply) instead of staying Joined-less
+// forever. Once a maintenance-mode member has had its config applied, its
+// own maintenance-mode Version RPC becomes permanently unreachable — its
+// apid has moved on to the real, non-maintenance-mode server — so dialAddr
+// (any already-configured, reachable cluster member) and talosCfg's admin
 // identity are used instead, targeting each member individually via
 // client.WithNode (see ClusterBootstrapper.Version's own doc). Failures are
 // logged, not fatal or returned: a member that hasn't finished rebooting
-// into its new config yet just tries again on the next reconcile.
+// into its new config yet just tries again on the next reconcile. markReady
+// additionally sets MemberReadyConditionType — see its own doc for why only
+// callers that just health-checked this exact batch of members pass true.
 func (r *Reconciler) recordTalosVersions(
 	ctx context.Context, cluster *v1alpha2.TalosCluster, members []v1alpha2.Instance, dialAddr string,
-	talosCfg *clientconfig.Config,
+	talosCfg *clientconfig.Config, markReady bool,
 ) {
-	for _, member := range members {
-		if member.Status.Talos.Version != "" {
+	for i := range members {
+		member := &members[i]
+
+		if meta.IsStatusConditionTrue(member.Status.Conditions, MemberJoinedConditionType) {
 			continue
 		}
 
-		version, err := r.Bootstrapper.Version(ctx, dialAddr, dialAddress(member), talosCfg)
+		version, err := r.Bootstrapper.Version(ctx, dialAddr, dialAddress(*member), talosCfg)
 		if err != nil {
 			r.Logger.Warn("failed to fetch talos version for member, may still be rebooting into its new configuration",
 				"cluster", cluster.Name, "instance", member.Name, "error", err)
@@ -488,9 +517,21 @@ func (r *Reconciler) recordTalosVersions(
 
 		member.Status.Talos.Version = version
 
-		err = r.Client.Status().Update(ctx, &member)
+		meta.SetStatusCondition(&member.Status.Conditions, metav1.Condition{
+			Type: MemberJoinedConditionType, Status: metav1.ConditionTrue, Reason: reasonMemberJoined,
+			Message: "node answered a Version RPC with its real, post-config Talos identity",
+		})
+
+		if markReady {
+			meta.SetStatusCondition(&member.Status.Conditions, metav1.Condition{
+				Type: MemberReadyConditionType, Status: metav1.ConditionTrue, Reason: reasonMemberHealthy,
+				Message: "control plane cluster health check passed with this node included",
+			})
+		}
+
+		err = r.Client.Status().Update(ctx, member)
 		if err != nil {
-			r.Logger.Warn("failed to persist discovered talos version",
+			r.Logger.Warn("failed to persist member talos version/conditions",
 				"cluster", cluster.Name, "instance", member.Name, "error", err)
 		}
 	}

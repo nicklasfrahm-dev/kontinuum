@@ -24,6 +24,15 @@ spec:
     - jsonPath: .status.conditions[?(@.type=="Discovered")].reason
       name: Reason
       type: string
+    - jsonPath: .status.conditions[?(@.type=="Configured")].status
+      name: Configured
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Joined")].status
+      name: Joined
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
     name: v1alpha2
     schema:
       openAPIV3Schema:
@@ -97,7 +106,15 @@ spec:
               conditions:
                 description: |-
                   Conditions reports this Instance's state. Discovered is set true once
-                  one of spec.interfaces has been successfully probed.
+                  one of spec.interfaces has been successfully probed — see
+                  pkg/domain/instance's Reconciler. Once claimed by an InstancePool and
+                  picked up by a TalosCluster's member reconciler, three more get set
+                  there, tracking bootstrap progress: Configured (machine config
+                  applied), Joined (node rejoined with its real post-config identity),
+                  and Ready (control-plane members only — mirrors the TalosCluster's
+                  own cluster-wide health check for this specific node; see
+                  pkg/domain/taloscluster's own condition docs for why workers don't
+                  get one yet).
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
