@@ -67,7 +67,15 @@ type InstanceStatus struct {
 	// +optional
 	Talos InstanceTalosStatus `json:"talos"`
 	// Conditions reports this Instance's state. Discovered is set true once
-	// one of spec.interfaces has been successfully probed.
+	// one of spec.interfaces has been successfully probed — see
+	// pkg/domain/instance's Reconciler. Once claimed by an InstancePool and
+	// picked up by a TalosCluster's member reconciler, three more get set
+	// there, tracking bootstrap progress: Configured (machine config
+	// applied), Joined (node rejoined with its real post-config identity),
+	// and Ready (control-plane members only — mirrors the TalosCluster's
+	// own cluster-wide health check for this specific node; see
+	// pkg/domain/taloscluster's own condition docs for why workers don't
+	// get one yet).
 	// +optional
 	// +patchMergeKey=type
 	// +patchStrategy=merge
@@ -88,6 +96,9 @@ type InstanceStatus struct {
 //nolint:lll
 // +kubebuilder:printcolumn:name="Discovered",type="string",JSONPath=".status.conditions[?(@.type==\"Discovered\")].status"
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.conditions[?(@.type==\"Discovered\")].reason"
+// +kubebuilder:printcolumn:name="Configured",type="string",JSONPath=".status.conditions[?(@.type==\"Configured\")].status"
+// +kubebuilder:printcolumn:name="Joined",type="string",JSONPath=".status.conditions[?(@.type==\"Joined\")].status"
+// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].status"
 
 // Instance represents a single machine (bare metal or, via ProviderRef, a
 // provisioned cloud resource) that can be claimed by an InstancePool — see

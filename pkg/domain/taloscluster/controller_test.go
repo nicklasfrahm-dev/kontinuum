@@ -124,6 +124,7 @@ const (
 	controlPlaneInstanceAddress = "10.0.0.1"
 	readyConditionReasonHealthy = "Healthy"
 	ciliumAddonResourceName     = testClusterName + "-cilium"
+	cpNodeName                  = "cp-node-1"
 )
 
 func testCluster() *v1alpha2.TalosCluster {
@@ -560,7 +561,7 @@ func TestReconcileRecordsTalosVersionOnceMembersAreConfigured(t *testing.T) {
 
 	var afterFirst v1alpha2.Instance
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "cp-node-1"}, &afterFirst))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: cpNodeName}, &afterFirst))
 	assert.Equal(t, "v1.9.0", afterFirst.Status.Talos.Version)
 
 	_, err = reconciler.Reconcile(context.Background(), req)
@@ -598,7 +599,7 @@ func TestReconcileToleratesTalosVersionFetchFailure(t *testing.T) {
 
 	var got v1alpha2.Instance
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "cp-node-1"}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: cpNodeName}, &got))
 	assert.Empty(t, got.Status.Talos.Version)
 }
 
@@ -644,6 +645,54 @@ func TestReconcileGeneratesInstallableConfigs(t *testing.T) {
 		assert.Empty(t, install.InstallDisk, "applied config %d", index)
 		assert.NotNil(t, install.InstallDiskSelector, "applied config %d", index)
 	}
+}
+
+// TestReconcileSetsMemberConditionsThroughBootstrapPipeline covers issue
+// #62: a claimed, Discovered Instance gets Configured set once its config
+// is applied, Joined once it answers a post-config Version RPC, and — for
+// a control-plane member only — Ready once the cluster-wide HealthCheck
+// that covers it passes. A worker member gets Configured and Joined but
+// never Ready, since this package has no per-worker health probe (see
+// MemberReadyConditionType's own doc).
+func TestReconcileSetsMemberConditionsThroughBootstrapPipeline(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", controlPlaneInstanceAddress)
+	workerInstance := claimedDiscoveredInstance("worker-node-1", "worker-pool", "10.0.0.2")
+
+	fakeClient := newFakeClient(t, cluster, cpInstance, workerInstance)
+
+	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig"), version: "v1.9.0"}
+	reconciler := newReconciler(fakeClient, bootstrapper)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName}}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	var afterFirst v1alpha2.Instance
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: cpNodeName}, &afterFirst))
+	assert.True(t, meta.IsStatusConditionTrue(afterFirst.Status.Conditions, taloscluster.MemberConfiguredConditionType),
+		"control-plane member's config was applied on the first reconcile")
+	assert.True(t, meta.IsStatusConditionTrue(afterFirst.Status.Conditions, taloscluster.MemberJoinedConditionType),
+		"control-plane member answered a Version RPC once HealthCheck passed")
+	assert.True(t, meta.IsStatusConditionTrue(afterFirst.Status.Conditions, taloscluster.MemberReadyConditionType),
+		"control-plane member was part of the batch HealthCheck just verified healthy")
+
+	_, err = reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	var afterSecond v1alpha2.Instance
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "worker-node-1"}, &afterSecond))
+	assert.True(t, meta.IsStatusConditionTrue(afterSecond.Status.Conditions, taloscluster.MemberConfiguredConditionType),
+		"worker member's config was applied once ControlPlaneReady")
+	assert.True(t, meta.IsStatusConditionTrue(afterSecond.Status.Conditions, taloscluster.MemberJoinedConditionType),
+		"worker member answered a Version RPC once its config was applied")
+	assert.False(t, meta.IsStatusConditionTrue(afterSecond.Status.Conditions, taloscluster.MemberReadyConditionType),
+		"a worker never gets Ready — no per-worker health probe backs it yet")
 }
 
 func TestReconcileIgnoresMissingCluster(t *testing.T) {
