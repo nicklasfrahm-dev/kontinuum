@@ -15,12 +15,12 @@
            class="p-2 rounded-lg {{if eq .ActiveMenu "instances"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-server"}}
         </a>
-        <a href="/app/talosclusters"
+        <a href="/app/kontinuum.sh/namespaces/{{.CurrentTenant}}/talosclusters"
            class="p-2 rounded-lg {{if eq .ActiveMenu "talosclusters"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-kubernetes"}}
         </a>
         {{template "tenant-switcher" dict "ID" "tenant-switcher-mobile" "CurrentTenant" .CurrentTenant "Tenants" .Tenants "Compact" true}}
-        <a href="/app/kontinuums"
+        <a href="/app/kontinuum.sh/namespaces/{{.CurrentTenant}}/kontinuums"
            class="p-2 rounded-lg {{if eq .ActiveMenu "registry"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-registry"}}
         </a>
@@ -38,6 +38,10 @@
             {{template "icon-logout"}}
         </a>
         {{end}}
+        <a href="https://docs.kontinuum.sh" target="_blank" rel="noopener noreferrer" hx-boost="false"
+           class="p-2 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800/50 transition-colors">
+            {{template "icon-book-open-text"}}
+        </a>
     </div>
 </div>
 
@@ -58,13 +62,13 @@
             {{template "icon-server"}}
             Instances
         </a>
-        <a href="/app/talosclusters"
+        <a href="/app/kontinuum.sh/namespaces/{{.CurrentTenant}}/talosclusters"
            class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "talosclusters"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-kubernetes"}}
             Clusters
         </a>
         <div class="flex-1"></div>
-        <a href="/app/kontinuums"
+        <a href="/app/kontinuum.sh/namespaces/{{.CurrentTenant}}/kontinuums"
            class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "registry"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-registry"}}
             Registry
@@ -86,6 +90,11 @@
             Logout
         </a>
         {{end}}
+        <a href="https://docs.kontinuum.sh" target="_blank" rel="noopener noreferrer" hx-boost="false"
+           class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800/50 transition-colors">
+            {{template "icon-book-open-text"}}
+            Documentation
+        </a>
     </nav>
 </aside>
 {{end}}

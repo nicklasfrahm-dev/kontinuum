@@ -493,7 +493,7 @@ func TestHandleKontinuumDetailRendersInstanceSettings(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -532,7 +532,7 @@ func TestHandleKontinuumDetailHidesOIDCDetailsWhenInstanceOIDCDisabled(t *testin
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -561,7 +561,7 @@ func TestHandleKontinuumDetailReturnsNotFoundForUnknownInstance(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums/missing"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/missing"))
 
 	resp := recorder.Result()
 
@@ -588,7 +588,7 @@ func TestHandleKontinuumDetailReturnsServerErrorWhenFactoryFails(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -606,7 +606,8 @@ func TestHandleKontinuumDetailInvalidatesSessionOnForbidden(t *testing.T) {
 		return stubKontinuumLister{getErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
 	}
 
-	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/kontinuums/worker-1"), kontinuumFactory)
+	assertForbiddenInvalidatesSession(t,
+		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-1"), kontinuumFactory)
 }
 
 func TestHandleKontinuumDetailShowsConfigSecretDataReveal(t *testing.T) {
@@ -633,7 +634,7 @@ func TestHandleKontinuumDetailShowsConfigSecretDataReveal(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -649,7 +650,8 @@ func TestHandleKontinuumDetailShowsConfigSecretDataReveal(t *testing.T) {
 		"the secret's own contents must never be rendered into the page")
 
 	secretRecorder := httptest.NewRecorder()
-	mux.ServeHTTP(secretRecorder, newTestRequest(t, "/app/kontinuums/worker-1/secret"))
+	mux.ServeHTTP(secretRecorder,
+		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-1/secret"))
 
 	secretResp := secretRecorder.Result()
 
@@ -682,7 +684,7 @@ func TestHandleKontinuumDetailHidesConfigSecretRevealWhenSecretRefEmpty(t *testi
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -719,7 +721,7 @@ func TestHandleKontinuumDetailHidesConfigSecretRevealWhenSecretNotFound(t *testi
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -753,7 +755,7 @@ func TestHandleKontinuumDetailReturnsBadGatewayWhenSecretGetFails(t *testing.T) 
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -775,7 +777,8 @@ func TestHandleKontinuumDetailInvalidatesSessionOnForbiddenSecretGet(t *testing.
 		}, nil
 	}
 
-	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/kontinuums/worker-1"), kontinuumFactory)
+	assertForbiddenInvalidatesSession(t,
+		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-1"), kontinuumFactory)
 }
 
 // settingsKubeconfigBody issues GET /app/settings/kubeconfig through mux,
@@ -1220,7 +1223,7 @@ func TestHandleRegistryRendersInstances(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"))
 
 	resp := recorder.Result()
 
@@ -1278,7 +1281,7 @@ func TestHandleRegistryRendersZones(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"))
 
 	resp := recorder.Result()
 
@@ -1313,7 +1316,7 @@ func TestHandleRegistryReturnsBadGatewayWhenZoneListFails(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"))
 
 	resp := recorder.Result()
 
@@ -1350,7 +1353,7 @@ func TestHandleRegistryReturnsServerErrorWhenFactoryFails(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"))
 
 	resp := recorder.Result()
 
@@ -1407,7 +1410,8 @@ func TestHandleRegistryInvalidatesSessionOnForbidden(t *testing.T) {
 		return stubKontinuumLister{err: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
 	}
 
-	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/kontinuums"), kontinuumFactory)
+	assertForbiddenInvalidatesSession(t,
+		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"), kontinuumFactory)
 }
 
 func TestHandleDeleteInstanceRemovesInstanceAndRerendersRegistry(t *testing.T) {
@@ -1428,7 +1432,7 @@ func TestHandleDeleteInstanceRemovesInstanceAndRerendersRegistry(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestDeleteRequest(t, "/app/kontinuums/demo"))
+	mux.ServeHTTP(recorder, newTestDeleteRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/demo"))
 
 	resp := recorder.Result()
 
@@ -1459,7 +1463,7 @@ func TestHandleDeleteInstanceReturnsBadGatewayOnFailure(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestDeleteRequest(t, "/app/kontinuums/demo"))
+	mux.ServeHTTP(recorder, newTestDeleteRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/demo"))
 
 	resp := recorder.Result()
 
@@ -1477,7 +1481,8 @@ func TestHandleDeleteInstanceInvalidatesSessionOnForbidden(t *testing.T) {
 		return stubKontinuumLister{deleteErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
 	}
 
-	assertForbiddenInvalidatesSession(t, newTestDeleteRequest(t, "/app/kontinuums/demo"), kontinuumFactory)
+	assertForbiddenInvalidatesSession(t,
+		newTestDeleteRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/demo"), kontinuumFactory)
 }
 
 // newTestZoneClient builds a real fake controller-runtime client with
@@ -1556,7 +1561,7 @@ func TestRegistryPageEmbedsAddZoneButtonAndEmptyModal(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuums"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"))
 
 	resp := recorder.Result()
 
@@ -1931,7 +1936,7 @@ func TestHandleMachineDetailInvalidatesSessionOnForbidden(t *testing.T) {
 // and a Ready condition — shared by the clusters list/detail tests below.
 func talosClusterFixture(ready metav1.ConditionStatus) v1alpha2.TalosCluster {
 	return v1alpha2.TalosCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: testTalosClusterName},
+		ObjectMeta: metav1.ObjectMeta{Name: testTalosClusterName, Namespace: v1alpha2.DefaultSecretNamespace},
 		Spec: v1alpha2.TalosClusterSpec{
 			Talos:      v1alpha2.TalosSpec{Version: "v1.13.0"},
 			Kubernetes: v1alpha2.KubernetesSpec{Version: "v1.32.0"},
@@ -1975,7 +1980,7 @@ func TestHandleTalosClustersRendersList(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters"))
 
 	resp := recorder.Result()
 
@@ -1989,8 +1994,9 @@ func TestHandleTalosClustersRendersList(t *testing.T) {
 	assert.Contains(t, string(body), "v1.13.0")
 	assert.Contains(t, string(body), "v1.32.0")
 	assert.Contains(t, string(body), "Ready=True")
-	assert.Contains(t, string(body), `href="/app/talosclusters/eu-eu-1a"`)
-	assert.Contains(t, string(body), `href="/app/talosclusters"`, "the nav's own Clusters link")
+	assert.Contains(t, string(body), `href="/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"`)
+	assert.Contains(t, string(body), `href="/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters"`,
+		"the nav's own Clusters link")
 }
 
 func TestHandleTalosClustersShowsEmptyState(t *testing.T) {
@@ -2007,7 +2013,7 @@ func TestHandleTalosClustersShowsEmptyState(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters"))
 
 	resp := recorder.Result()
 
@@ -2032,7 +2038,7 @@ func TestHandleTalosClustersReturnsServerErrorWhenFactoryFails(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters"))
 
 	resp := recorder.Result()
 
@@ -2050,7 +2056,8 @@ func TestHandleTalosClustersInvalidatesSessionOnForbidden(t *testing.T) {
 		return stubKontinuumLister{talosClustersErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
 	}
 
-	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/talosclusters"), kontinuumFactory)
+	assertForbiddenInvalidatesSession(t,
+		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters"), kontinuumFactory)
 }
 
 // newTalosClusterKubeconfigMux builds a router+mux serving a single ready
@@ -2103,7 +2110,7 @@ func TestHandleTalosClusterDetailRendersOverviewPoolsAndConditions(t *testing.T)
 	mux := newTalosClusterKubeconfigMux(t)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters/eu-eu-1a"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
 
 	resp := recorder.Result()
 
@@ -2120,10 +2127,11 @@ func TestHandleTalosClusterDetailRendersOverviewPoolsAndConditions(t *testing.T)
 	assert.Contains(t, string(body), "1/1", "the control-plane pool's ready/replicas count")
 	assert.Contains(t, string(body), "Pending", "the worker pool's InstancePool doesn't exist yet")
 	assert.Contains(t, string(body), "Cluster is ready", "the Ready condition's own message, capitalized")
-	assert.Contains(t, string(body), `href="/app/talosclusters/eu-eu-1a/kubeconfig"`)
+	assert.Contains(t, string(body),
+		`href="/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a/kubeconfig"`)
 	assert.NotContains(t, string(body), "apiVersion: v1\nkind: Config",
 		"the kubeconfig's own contents must never be rendered into the page")
-	assert.Contains(t, string(body), `hx-get="/app/talosclusters/eu-eu-1a"`,
+	assert.Contains(t, string(body), `hx-get="/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"`,
 		"hx-get is always the plain URL — hx-vals carries ?reveal on every poll instead, see hx-vals assertion below")
 
 	wantHxVals := `hx-vals="js:{reveal: (new URLSearchParams(location.search).get('reveal') === 'true')}"`
@@ -2141,7 +2149,8 @@ func TestHandleTalosClusterDetailRevealsKubeconfigPanelViaQueryParam(t *testing.
 	mux := newTalosClusterKubeconfigMux(t)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters/eu-eu-1a?reveal=true"))
+	mux.ServeHTTP(recorder,
+		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a?reveal=true"))
 
 	resp := recorder.Result()
 
@@ -2151,7 +2160,7 @@ func TestHandleTalosClusterDetailRevealsKubeconfigPanelViaQueryParam(t *testing.
 
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	assert.Contains(t, string(body), `hx-get="/app/talosclusters/eu-eu-1a"`,
+	assert.Contains(t, string(body), `hx-get="/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"`,
 		"hx-get stays the plain URL even when the page itself loaded with ?reveal=true — "+
 			"see hx-vals in the sibling default-state test")
 	assert.Regexp(t, `id="taloscluster-kubeconfig-masked"\s+class="hidden relative`, string(body),
@@ -2183,7 +2192,7 @@ func TestHandleTalosClusterDetailShowsNoKubeconfigMessageWhenNotReady(t *testing
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters/eu-eu-1a"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
 
 	resp := recorder.Result()
 
@@ -2210,7 +2219,7 @@ func TestHandleTalosClusterDetailReturnsNotFoundForUnknownCluster(t *testing.T) 
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters/missing"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/missing"))
 
 	resp := recorder.Result()
 
@@ -2228,7 +2237,8 @@ func TestHandleTalosClusterDetailInvalidatesSessionOnForbidden(t *testing.T) {
 		return stubKontinuumLister{talosClusterGetErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
 	}
 
-	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/talosclusters/eu-eu-1a"), kontinuumFactory)
+	assertForbiddenInvalidatesSession(t,
+		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"), kontinuumFactory)
 }
 
 func TestHandleTalosClusterKubeconfigDownloadServesFileWithHeaders(t *testing.T) {
@@ -2254,7 +2264,8 @@ func TestHandleTalosClusterKubeconfigDownloadServesFileWithHeaders(t *testing.T)
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters/eu-eu-1a/kubeconfig"))
+	mux.ServeHTTP(recorder,
+		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a/kubeconfig"))
 
 	resp := recorder.Result()
 
@@ -2288,7 +2299,8 @@ func TestHandleTalosClusterKubeconfigDownloadReturnsNotFoundWhenNotReady(t *test
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters/eu-eu-1a/kubeconfig"))
+	mux.ServeHTTP(recorder,
+		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a/kubeconfig"))
 
 	resp := recorder.Result()
 
@@ -2311,7 +2323,8 @@ func TestHandleTalosClusterKubeconfigDownloadReturnsNotFoundForUnknownCluster(t 
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/talosclusters/missing/kubeconfig"))
+	mux.ServeHTTP(recorder,
+		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/missing/kubeconfig"))
 
 	resp := recorder.Result()
 
@@ -2329,5 +2342,7 @@ func TestHandleTalosClusterKubeconfigDownloadInvalidatesSessionOnForbidden(t *te
 		return stubKontinuumLister{talosClusterGetErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
 	}
 
-	assertForbiddenInvalidatesSession(t, newTestRequest(t, "/app/talosclusters/eu-eu-1a/kubeconfig"), kontinuumFactory)
+	assertForbiddenInvalidatesSession(t,
+		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a/kubeconfig"),
+		kontinuumFactory)
 }
