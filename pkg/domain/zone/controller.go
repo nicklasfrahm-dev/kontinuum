@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
@@ -28,6 +29,13 @@ const (
 	// reports Ready — a real signal that TLS issuance succeeded, not just
 	// that the object was created.
 	InstalledConditionType = "Installed"
+	// TeardownConditionType is set false while a Zone being deleted is
+	// still waiting on downstream cleanup and/or its seed node's Talos
+	// Reset — see teardown.go's own doc. Never observed true: the
+	// finalizer is removed (deleting the Zone for real) in the same
+	// reconcile pass that would otherwise have set it, per issue #49's own
+	// "only removes the finalizer once both steps complete" scope.
+	TeardownConditionType = "Teardown"
 
 	reasonTalosClusterNotFound   = "TalosClusterNotFound"
 	reasonWaitingForTalosCluster = "WaitingForTalosCluster"
@@ -38,7 +46,28 @@ const (
 	reasonWaitingForCertificate  = "WaitingForCertificate"
 	reasonInstalled              = "Installed"
 
+	// reasonDownstreamTeardownFailed and reasonTalosResetFailed are
+	// teardown.go's own retryable-failure reasons — see reconcileTeardown.
+	reasonDownstreamTeardownFailed = "DownstreamTeardownFailed"
+	reasonTalosResetFailed         = "TalosResetFailed"
+
 	defaultRetryInterval = 15 * time.Second
+	// defaultTeardownTimeout bounds how long a Zone's finalizer keeps
+	// retrying downstream teardown/Talos Reset before giving up and
+	// removing itself anyway — see teardown.go's own doc for why this
+	// exists (issue #49's explicit "not a finalizer that blocks deletion
+	// forever" requirement) and docs/workflows/zone-remove.md for the
+	// operator escape hatch that forces this sooner.
+	defaultTeardownTimeout = 15 * time.Minute
+
+	// ZoneFinalizer is the finalizer teardown.go adds to every Zone this
+	// package reconciles, and only ever removes once its downstream
+	// footprint is torn down and its seed node reset (or teardown has been
+	// abandoned after defaultTeardownTimeout — see reconcileTeardown).
+	// Exported so an operator's `kubectl patch` escape hatch (see
+	// docs/workflows/zone-remove.md) and this package's own tests can name
+	// it without duplicating the literal.
+	ZoneFinalizer = "kontinuum.sh/zone-teardown"
 )
 
 // Config configures a Controller.
@@ -63,6 +92,17 @@ type Config struct {
 	// RetryInterval is how long Reconcile waits before retrying a step that
 	// hasn't converged yet. Defaults to fifteen seconds when zero.
 	RetryInterval time.Duration
+	// Bootstrapper resets a deleted zone's seed node back to Talos
+	// maintenance mode via taloscluster.ResetControlPlane — see
+	// teardown.go. Defaults to taloscluster.NewTalosBootstrapper(cfg.Logger)
+	// when nil, the same production implementation
+	// pkg/domain/taloscluster's own Controller defaults to.
+	Bootstrapper taloscluster.ClusterBootstrapper
+	// TeardownTimeout bounds how long a Zone being deleted keeps retrying
+	// downstream teardown/Talos Reset before giving up and removing its
+	// finalizer anyway — see teardown.go's own doc. Defaults to fifteen
+	// minutes when zero.
+	TeardownTimeout time.Duration
 }
 
 // Controller wires the Zone downstream-install reconciler onto a
@@ -82,6 +122,14 @@ func NewController(cfg Config) *Controller {
 		cfg.RetryInterval = defaultRetryInterval
 	}
 
+	if cfg.Bootstrapper == nil {
+		cfg.Bootstrapper = taloscluster.NewTalosBootstrapper(cfg.Logger)
+	}
+
+	if cfg.TeardownTimeout == 0 {
+		cfg.TeardownTimeout = defaultTeardownTimeout
+	}
+
 	return &Controller{Config: cfg}
 }
 
@@ -97,6 +145,8 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		ACMEServer:              c.Config.ACMEServer,
 		Image:                   c.Config.Image,
 		RetryInterval:           c.Config.RetryInterval,
+		Bootstrapper:            c.Config.Bootstrapper,
+		TeardownTimeout:         c.Config.TeardownTimeout,
 		Logger:                  c.Config.Logger,
 	}
 
@@ -132,6 +182,8 @@ type Reconciler struct {
 	ACMEServer              string
 	Image                   string
 	RetryInterval           time.Duration
+	Bootstrapper            taloscluster.ClusterBootstrapper
+	TeardownTimeout         time.Duration
 	Logger                  *slog.Logger
 }
 
@@ -146,6 +198,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to get zone %q: %w", req.Name, err)
+	}
+
+	if !zoneObj.DeletionTimestamp.IsZero() {
+		return r.reconcileTeardown(ctx, &zoneObj)
+	}
+
+	if controllerutil.AddFinalizer(&zoneObj, ZoneFinalizer) {
+		err = r.Client.Update(ctx, &zoneObj)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to add finalizer to zone %q: %w", zoneObj.Name, err)
+		}
 	}
 
 	var cluster v1alpha2.TalosCluster

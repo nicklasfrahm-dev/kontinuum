@@ -283,6 +283,59 @@ func ensureHTTPRoute(
 	return nil
 }
 
+// deleteHTTPRoute deletes the HTTPRoute ensureHTTPRoute upserts, tolerating
+// NotFound — see teardown.go's own doc for why every deleteX helper is
+// idempotent the same way its ensureX counterpart already is.
+func deleteHTTPRoute(ctx context.Context, downstream client.Client, namespace, name string) error {
+	route := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
+
+	err := client.IgnoreNotFound(downstream.Delete(ctx, route))
+	if err != nil {
+		return fmt.Errorf("failed to delete %q httproute: %w", name, err)
+	}
+
+	return nil
+}
+
+// deleteCertificate deletes the Certificate ensureCertificate upserts,
+// tolerating NotFound.
+func deleteCertificate(ctx context.Context, downstream client.Client, namespace, name string) error {
+	cert := &certmanagerv1.Certificate{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
+
+	err := client.IgnoreNotFound(downstream.Delete(ctx, cert))
+	if err != nil {
+		return fmt.Errorf("failed to delete %q certificate: %w", name, err)
+	}
+
+	return nil
+}
+
+// deleteGateway deletes the Gateway ensureGateway upserts, tolerating
+// NotFound.
+func deleteGateway(ctx context.Context, downstream client.Client, namespace, name string) error {
+	gateway := &gatewayv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
+
+	err := client.IgnoreNotFound(downstream.Delete(ctx, gateway))
+	if err != nil {
+		return fmt.Errorf("failed to delete %q gateway: %w", name, err)
+	}
+
+	return nil
+}
+
+// deleteClusterIssuer deletes the cluster-scoped ClusterIssuer
+// ensureClusterIssuer upserts, tolerating NotFound.
+func deleteClusterIssuer(ctx context.Context, downstream client.Client, name string) error {
+	issuer := &certmanagerv1.ClusterIssuer{ObjectMeta: metav1.ObjectMeta{Name: name}}
+
+	err := client.IgnoreNotFound(downstream.Delete(ctx, issuer))
+	if err != nil {
+		return fmt.Errorf("failed to delete %q clusterissuer: %w", name, err)
+	}
+
+	return nil
+}
+
 // certificateReady reports whether name's Certificate has itself reported
 // Ready — cert-manager's own real signal that issuance (including waiting
 // on the ACME HTTP-01 challenge to be validated) has actually succeeded,

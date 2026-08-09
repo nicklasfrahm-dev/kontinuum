@@ -63,6 +63,15 @@ type ClusterBootstrapper interface {
 	// this on current Talos releases, making endpoint/node's post-config
 	// identity the only place left to fetch it.
 	Version(ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config) (string, error)
+	// Reset wipes node back to maintenance mode — talosctl reset's
+	// programmatic equivalent — dialing endpoint with the real
+	// (non-maintenance-mode) admin identity in talosCfg and routing the
+	// request to node via client.WithNode, the same targeting Version
+	// already uses (a reset seed node can no longer serve its own dial, so
+	// this always goes through some other still-reachable member's
+	// endpoint, or node's own address when it's the only member — see
+	// pkg/domain/zone's teardown, this interface's only caller).
+	Reset(ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config) error
 }
 
 // talosBootstrapper is ClusterBootstrapper's production implementation.
@@ -228,6 +237,33 @@ func (t talosBootstrapper) Version(
 	}
 
 	return "", nil
+}
+
+// Reset implements ClusterBootstrapper. Graceful is always true: a reset
+// control-plane member should leave etcd cleanly first when it's part of a
+// multi-member quorum, and is a no-op precondition (nothing to leave) on
+// the single-node control planes issue #24's architecture decision 3/5
+// treats as the common case — either way there's no reason to prefer the
+// ungraceful path. Reboot is always true too, so the node comes back up
+// into maintenance mode (wiped, discoverable again) rather than halting.
+func (t talosBootstrapper) Reset(
+	ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config,
+) error {
+	talosClient, err := t.dial(ctx, endpoint, talosCfg)
+	if err != nil {
+		return err
+	}
+	defer talosClient.Close() //nolint:errcheck // best-effort close of a short-lived reset connection
+
+	rpcCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+
+	err = talosClient.Reset(talosclient.WithNode(rpcCtx, node), true, true)
+	if err != nil {
+		return fmt.Errorf("failed to reset %s via %s: %w", node, endpoint, err)
+	}
+
+	return nil
 }
 
 // dial connects to addr with talosCfg's real (non-maintenance-mode) admin

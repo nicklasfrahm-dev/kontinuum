@@ -66,7 +66,7 @@ All kinds below belong to the `kontinuum.sh/v1alpha2` API group/version (`kontin
 | `TalosCluster` | `pkg/domain/taloscluster` | Bootstraps a Talos Kubernetes cluster from a control-plane `InstancePool` and optional worker pools. |
 | `Addon` | `pkg/domain/addon` | A Helm-based addon (Cilium, cert-manager) installed and health-probed as part of `TalosCluster` bootstrap. |
 
-See [Architecture](architecture.md) for how these controllers cooperate, and [Cluster provisioning](workflows/cluster-provisioning.md) for the full `Instance` → `InstancePool` → `TalosCluster` → `Addon` flow.
+See [Architecture](architecture.md) for how these controllers cooperate, and [Add zone](workflows/zone-add.md) for the full `Instance` → `InstancePool` → `TalosCluster` → `Addon` flow.
 
 ## CRD manifests in this repo
 

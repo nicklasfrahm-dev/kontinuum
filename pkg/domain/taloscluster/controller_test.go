@@ -50,6 +50,8 @@ type fakeBootstrapper struct {
 	versionCalls   []string
 	version        string
 	versionErr     error
+	resetCalls     []string
+	resetErr       error
 }
 
 func (f *fakeBootstrapper) ApplyConfiguration(_ context.Context, addr string, data []byte) error {
@@ -87,6 +89,12 @@ func (f *fakeBootstrapper) Version(_ context.Context, _, node string, _ *clientc
 	}
 
 	return f.version, nil
+}
+
+func (f *fakeBootstrapper) Reset(_ context.Context, _, node string, _ *clientconfig.Config) error {
+	f.resetCalls = append(f.resetCalls, node)
+
+	return f.resetErr
 }
 
 func newFakeClient(t *testing.T, objects ...client.Object) client.Client {

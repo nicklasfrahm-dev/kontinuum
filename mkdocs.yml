@@ -51,8 +51,8 @@ nav:
   - Admin Guide:
       - Production deployment: production-deployment.md
       - Authentication: authentication.md
-      - Cluster provisioning: workflows/cluster-provisioning.md
       - Add zone: workflows/zone-add.md
+      - Remove zone: workflows/zone-remove.md
   - Developer guide:
       - Contribution guidelines: contributing.md
       - Local setup: local-setup.md
