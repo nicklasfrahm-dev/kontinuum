@@ -51,7 +51,7 @@ func TestCustomResourceDefinition(t *testing.T) {
 
 	assert.Equal(t, "kontinuums.kontinuum.sh", crd.Name)
 	assert.Equal(t, v1alpha2.GroupName, crd.Spec.Group)
-	assert.Equal(t, apiextensionsv1.ClusterScoped, crd.Spec.Scope)
+	assert.Equal(t, apiextensionsv1.NamespaceScoped, crd.Spec.Scope)
 	assert.Equal(t, "Kontinuum", crd.Spec.Names.Kind)
 	assert.Equal(t, "KontinuumList", crd.Spec.Names.ListKind)
 	assert.Equal(t, "kontinuums", crd.Spec.Names.Plural)

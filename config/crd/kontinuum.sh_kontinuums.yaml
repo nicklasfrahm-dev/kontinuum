@@ -12,7 +12,7 @@ spec:
     listKind: KontinuumList
     plural: kontinuums
     singular: kontinuum
-  scope: Cluster
+  scope: Namespaced
   versions:
   - additionalPrinterColumns:
     - jsonPath: .spec.role

@@ -90,6 +90,10 @@ func addObjectName(opts AddOptions) string {
 // seed Instance gets its own name (suffixed -seed) since Instance is a
 // distinct Kind — no collision risk — but is labeled
 // v1alpha2.LabelRegion/LabelZone so the InstancePool's selector matches it.
+// All four are namespaced into v1alpha2.DefaultSecretNamespace
+// ("kontinuum-system") — the admin-driven, system-managed namespace issue
+// #63's architecture reserves for zone-join's own objects, as opposed to a
+// tenant's own namespace.
 func BuildAddObjects(
 	opts AddOptions,
 ) (*v1alpha2.Zone, *v1alpha2.Instance, *v1alpha2.InstancePool, *v1alpha2.TalosCluster) {
@@ -97,17 +101,19 @@ func BuildAddObjects(
 	labels := map[string]string{v1alpha2.LabelRegion: opts.Region, v1alpha2.LabelZone: opts.Zone}
 
 	zoneObj := &v1alpha2.Zone{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: v1alpha2.DefaultSecretNamespace},
 		Spec:       v1alpha2.ZoneSpec{Region: opts.Region, Zone: opts.Zone, Domain: opts.Domain},
 	}
 
 	instance := &v1alpha2.Instance{
-		ObjectMeta: metav1.ObjectMeta{Name: name + "-seed", Labels: labels},
-		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{opts.TalosAddress}},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name + "-seed", Namespace: v1alpha2.DefaultSecretNamespace, Labels: labels,
+		},
+		Spec: v1alpha2.InstanceSpec{Interfaces: []string{opts.TalosAddress}},
 	}
 
 	pool := &v1alpha2.InstancePool{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: v1alpha2.DefaultSecretNamespace},
 		Spec: v1alpha2.InstancePoolSpec{
 			Selector: metav1.LabelSelector{MatchLabels: labels},
 			Replicas: 1,
@@ -115,7 +121,7 @@ func BuildAddObjects(
 	}
 
 	cluster := &v1alpha2.TalosCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: v1alpha2.DefaultSecretNamespace},
 		Spec: v1alpha2.TalosClusterSpec{
 			Talos:        v1alpha2.TalosSpec{Version: opts.TalosVersion},
 			Kubernetes:   v1alpha2.KubernetesSpec{Version: opts.KubernetesVersion},
@@ -158,6 +164,11 @@ func Add(ctx context.Context, hubClient client.Client, opts AddOptions) (*v1alph
 	}
 
 	zoneObj, instance, pool, cluster := BuildAddObjects(opts)
+
+	err = ensureNamespace(ctx, hubClient, v1alpha2.DefaultSecretNamespace)
+	if err != nil {
+		return nil, err
+	}
 
 	err = ensureZoneObject(ctx, hubClient, zoneObj)
 	if err != nil {

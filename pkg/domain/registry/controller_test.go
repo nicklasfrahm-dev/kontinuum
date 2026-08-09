@@ -21,6 +21,18 @@ import (
 
 var errTestHostnameUnavailable = errors.New("hostname unavailable")
 
+// otherInstanceKey() and selfInstanceKey() are "other-instance"/"self-instance"'s
+// own NamespacedName — every Kontinuum fixture in this file registers as
+// v1alpha2.DefaultSecretNamespace (see Heartbeat.Start's own doc), so every
+// Get/Request below needs both, not just Name.
+func otherInstanceKey() types.NamespacedName {
+	return types.NamespacedName{Name: "other-instance", Namespace: v1alpha2.DefaultSecretNamespace}
+}
+
+func selfInstanceKey() types.NamespacedName {
+	return types.NamespacedName{Name: "self-instance", Namespace: v1alpha2.DefaultSecretNamespace}
+}
+
 func TestNewControllerDefaultsIntervals(t *testing.T) {
 	t.Parallel()
 
@@ -101,7 +113,7 @@ func TestCombinedReconcilerDeletesStaleOtherInstanceWithoutTouchingHeartbeat(t *
 	t.Parallel()
 
 	fakeClient := newFakeClient(t, &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: "other-instance"},
+		ObjectMeta: metav1.ObjectMeta{Name: "other-instance", Namespace: v1alpha2.DefaultSecretNamespace},
 		Status: v1alpha2.KontinuumStatus{
 			Role:              v1alpha2.RoleWorker,
 			LastHeartbeatTime: metav1.NewTime(time.Now().Add(-time.Hour)),
@@ -121,17 +133,17 @@ func TestCombinedReconcilerDeletesStaleOtherInstanceWithoutTouchingHeartbeat(t *
 		},
 	}
 
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "other-instance"}}
+	req := ctrl.Request{NamespacedName: otherInstanceKey()}
 
 	_, err := combined.Reconcile(context.Background(), req)
 	require.NoError(t, err)
 
 	var server v1alpha2.Kontinuum
 
-	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "other-instance"}, &server)
+	err = fakeClient.Get(context.Background(), otherInstanceKey(), &server)
 	assert.True(t, apierrors.IsNotFound(err), "stale instance belonging to someone else should still be deleted")
 
-	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "self-instance"}, &server)
+	err = fakeClient.Get(context.Background(), selfInstanceKey(), &server)
 	assert.True(t, apierrors.IsNotFound(err), "reconciling another instance must not create this instance's own object")
 }
 
@@ -154,14 +166,14 @@ func TestCombinedReconcilerReregistersOwnDeletedInstance(t *testing.T) {
 		},
 	}
 
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "self-instance"}}
+	req := ctrl.Request{NamespacedName: selfInstanceKey()}
 
 	_, err := combined.Reconcile(context.Background(), req)
 	require.NoError(t, err)
 
 	var server v1alpha2.Kontinuum
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "self-instance"}, &server))
+	require.NoError(t, fakeClient.Get(context.Background(), selfInstanceKey(), &server))
 	assert.Equal(t, v1alpha2.RoleControlPlane, server.Status.Role)
 	assert.False(t, server.Status.LastHeartbeatTime.IsZero())
 }
@@ -170,7 +182,7 @@ func TestCombinedReconcilerPreservesTTLRequeueForOwnFreshInstance(t *testing.T) 
 	t.Parallel()
 
 	fakeClient := newFakeClient(t, &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: "self-instance"},
+		ObjectMeta: metav1.ObjectMeta{Name: "self-instance", Namespace: v1alpha2.DefaultSecretNamespace},
 		Status:     v1alpha2.KontinuumStatus{Role: v1alpha2.RoleControlPlane, LastHeartbeatTime: metav1.Now()},
 	})
 
@@ -188,7 +200,7 @@ func TestCombinedReconcilerPreservesTTLRequeueForOwnFreshInstance(t *testing.T) 
 		},
 	}
 
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "self-instance"}}
+	req := ctrl.Request{NamespacedName: selfInstanceKey()}
 
 	result, err := combined.Reconcile(context.Background(), req)
 	require.NoError(t, err)

@@ -81,17 +81,21 @@ type SessionInvalidator func(writer http.ResponseWriter, request *http.Request, 
 var templatesFS embed.FS
 
 const (
-	pageHome      = "home"
 	pageRegistry  = "registry"
 	pageKontinuum = "kontinuum"
-	// pageMachines and pageMachineDetail back /app/instances and
-	// /app/instances/{name} — the Instance CRD (api/v1alpha2.Instance, a
+	// pageMachines and pageMachineDetail back
+	// /app/kontinuum.sh/namespaces/{ns}/instances and
+	// .../instances/{name} — the Instance CRD (api/v1alpha2.Instance, a
 	// bare-metal or provider-backed machine InstancePool/TalosCluster claim
 	// from). Named "machine" rather than "instance", which would collide
 	// with pageKontinuum above: a registered Kontinuum server process,
 	// unrelated to the Instance CRD despite the name. See issue #52 for why
 	// these stay separate pages/routes despite the CRD itself being called
-	// Instance.
+	// Instance. The URL's own kontinuum.sh/namespaces/{ns} shape (rather
+	// than a flat /app/instances) is what issue #63's architecture needs:
+	// Instance became a namespaced CRD there, one tenant's own namespace at
+	// a time — see the nav's tenant switcher (renderTenantSwitcher) for how
+	// {ns} is chosen.
 	pageMachines      = "machines"
 	pageMachineDetail = "machine-detail"
 	pageTalosClusters = "talosclusters"
@@ -99,6 +103,17 @@ const (
 	pageIAM           = "iam"
 	pageSettings      = "settings"
 )
+
+// defaultTenantNamespace is where GET /app and /app/home land a caller who
+// hasn't picked a tenant yet — v1alpha2.DefaultSecretNamespace
+// ("kontinuum-system"), the one namespace guaranteed to exist and be worth
+// looking at on every install (see pkg/domain/zone.Add's own doc).
+const defaultTenantNamespace = v1alpha2.DefaultSecretNamespace
+
+// defaultInstancesPath is defaultTenantNamespace's own instances list URL —
+// shared by handleAppRoot/handleHome's redirects and nav.html's own
+// "Instances" link default (see renderTenantSwitcher).
+const defaultInstancesPath = "/app/kontinuum.sh/namespaces/" + defaultTenantNamespace + "/instances"
 
 // dictPairSize is the number of arguments (one key, one value) templateDict
 // consumes per resulting map entry.
@@ -149,7 +164,9 @@ func mustParsePage(content ...string) *template.Template {
 	shared := []string{
 		"templates/layout.html",
 		"templates/components/nav.html",
+		"templates/components/tenant_switcher.html",
 		"templates/components/icon_tenants.html",
+		"templates/components/icon_chevrons_updown.html",
 		"templates/components/icon_registry.html",
 		"templates/components/icon_server.html",
 		"templates/components/icon_cluster.html",
@@ -197,7 +214,6 @@ func NewRouter(
 	version string, cfg config.Config, authEnabled bool, invalidateSession SessionInvalidator,
 ) *Router {
 	pages := map[string]*template.Template{
-		pageHome: mustParsePage("templates/home_content.html"),
 		pageRegistry: mustParsePage("templates/registry_content.html",
 			"templates/components/icon_trash.html", "templates/components/icon_globe.html",
 			"templates/components/zone_add_modal.html"),
@@ -253,9 +269,11 @@ func NewRouter(
 // appRoot and protect let a caller layer authentication onto the UI without
 // this package needing to know anything about it. appRoot overrides the
 // GET /app handler; nil keeps the default unconditional redirect to
-// /app/home. protect wraps the /app/home and /app/settings handlers; nil
-// leaves them unprotected. See pkg/auth for kontinuum's OIDC login flow,
-// which supplies both when OIDC is configured.
+// defaultInstancesPath. protect wraps the /app/home and /app/settings
+// handlers; nil leaves them unprotected. See pkg/auth for kontinuum's OIDC
+// login flow, which supplies both when OIDC is configured, and redirects to
+// /app/home itself on a successful login — kept as a real route (rather than
+// folded into GET /app) purely so that redirect target keeps working.
 func (r *Router) RegisterRoutes(
 	mux *http.ServeMux, appRoot http.HandlerFunc, protect func(http.HandlerFunc) http.HandlerFunc,
 ) {
@@ -270,14 +288,14 @@ func (r *Router) RegisterRoutes(
 	mux.Handle("GET "+vendorURLPrefix, vendorHandler())
 	mux.HandleFunc("GET /{$}", handleRoot)
 	mux.HandleFunc("GET /app", appRoot)
-	mux.HandleFunc("GET /app/home", protect(r.handleHome))
+	mux.HandleFunc("GET /app/home", protect(handleAppHome))
 	mux.HandleFunc("GET /app/kontinuums", protect(r.renderRegistry))
 	mux.HandleFunc("GET /app/kontinuums/{name}", protect(r.handleKontinuumDetail))
 	mux.HandleFunc("GET /app/kontinuums/{name}/secret", protect(r.handleKontinuumSecretDownload))
 	mux.HandleFunc("DELETE /app/kontinuums/{name}", protect(r.handleDeleteInstance))
 	mux.HandleFunc("POST /app/zones/add", protect(r.handleZoneAdd))
-	mux.HandleFunc("GET /app/instances", protect(r.handleMachines))
-	mux.HandleFunc("GET /app/instances/{name}", protect(r.handleMachineDetail))
+	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/instances", protect(r.handleMachines))
+	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/instances/{name}", protect(r.handleMachineDetail))
 	mux.HandleFunc("GET /app/talosclusters", protect(r.handleTalosClusters))
 	mux.HandleFunc("GET /app/talosclusters/{name}", protect(r.handleTalosClusterDetail))
 	mux.HandleFunc("GET /app/talosclusters/{name}/kubeconfig", protect(r.handleTalosClusterKubeconfigDownload))
@@ -297,7 +315,17 @@ func handleRoot(writer http.ResponseWriter, request *http.Request) {
 }
 
 func handleAppRoot(writer http.ResponseWriter, request *http.Request) {
-	http.Redirect(writer, request, "/app/home", http.StatusFound)
+	http.Redirect(writer, request, defaultInstancesPath, http.StatusFound)
+}
+
+// handleAppHome is GET /app/home's handler — kept as a real route purely as
+// pkg/auth's own post-login redirect target (see RegisterRoutes' own doc);
+// there is no "home" page of its own anymore (see issue #63's UI comment:
+// the old tenants list this used to render is gone, replaced by nav.html's
+// own tenant switcher), so it just forwards straight to
+// defaultInstancesPath.
+func handleAppHome(writer http.ResponseWriter, request *http.Request) {
+	http.Redirect(writer, request, defaultInstancesPath, http.StatusFound)
 }
 
 // acceptsHTML reports whether request's Accept header prefers HTML, the
@@ -305,58 +333,6 @@ func handleAppRoot(writer http.ResponseWriter, request *http.Request) {
 // clients ask for application/json or the apidiscovery media types instead.
 func acceptsHTML(request *http.Request) bool {
 	return strings.Contains(request.Header.Get("Accept"), "text/html")
-}
-
-// tenant is a namespace rendered as a tenant row in the UI.
-type tenant struct {
-	Name   string
-	Status string
-	Age    string
-}
-
-func (r *Router) handleHome(writer http.ResponseWriter, request *http.Request) {
-	namespaces, err := r.namespacesFor(request.Context())
-	if err != nil {
-		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
-
-		return
-	}
-
-	list, err := namespaces.List(request.Context(), metav1.ListOptions{})
-	if err != nil {
-		// Forbidden means the signed-in identity is authenticated but not
-		// authorized — the session itself isn't the problem, but there's
-		// no reason to keep it either, so send the caller back to sign in
-		// rather than leave them stuck on a page they can't use.
-		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
-			r.invalidateSession(writer, request, auth.MapError(err))
-
-			return
-		}
-
-		http.Error(writer, "failed to list namespaces: "+err.Error(), http.StatusBadGateway)
-
-		return
-	}
-
-	tenants := make([]tenant, 0, len(list.Items))
-	for _, ns := range list.Items {
-		tenants = append(tenants, tenant{
-			Name:   ns.Name,
-			Status: string(ns.Status.Phase),
-			Age:    formatAge(ns.CreationTimestamp.Time),
-		})
-	}
-
-	sort.Slice(tenants, func(i, j int) bool { return tenants[i].Name < tenants[j].Name })
-
-	r.render(writer, pageHome, map[string]any{
-		"Title":       "Tenants",
-		"ActiveMenu":  "home",
-		"Version":     r.version,
-		"Tenants":     tenants,
-		"AuthEnabled": r.authEnabled,
-	})
 }
 
 // instance is a Kontinuum object rendered as a registry row in the UI.
@@ -411,7 +387,9 @@ func (r *Router) handleDeleteInstance(writer http.ResponseWriter, request *http.
 		return
 	}
 
-	target := &v1alpha2.Kontinuum{ObjectMeta: metav1.ObjectMeta{Name: request.PathValue("name")}}
+	target := &v1alpha2.Kontinuum{
+		ObjectMeta: metav1.ObjectMeta{Name: request.PathValue("name"), Namespace: v1alpha2.DefaultSecretNamespace},
+	}
 
 	err = kontinuums.Delete(request.Context(), target)
 	if err != nil && !apierrors.IsNotFound(err) {
@@ -502,7 +480,7 @@ func (r *Router) renderRegistry(writer http.ResponseWriter, request *http.Reques
 	// initial page load or swapped in on submit.
 	maps.Copy(data, r.zoneAddFormData(zoneAddFields{}, "", ""))
 
-	r.render(writer, pageRegistry, data)
+	r.render(writer, request, pageRegistry, data)
 }
 
 // listZoneRows lists Zone objects and maps them to zoneRow, sorted by name
@@ -694,7 +672,8 @@ func (r *Router) handleKontinuumDetail(writer http.ResponseWriter, request *http
 
 	name := request.PathValue("name")
 
-	err = kontinuums.Get(request.Context(), client.ObjectKey{Name: name}, &item)
+	err = kontinuums.Get(request.Context(),
+		client.ObjectKey{Name: name, Namespace: v1alpha2.DefaultSecretNamespace}, &item)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			http.NotFound(writer, request)
@@ -722,7 +701,7 @@ func (r *Router) handleKontinuumDetail(writer http.ResponseWriter, request *http
 		return
 	}
 
-	r.render(writer, pageKontinuum, kontinuumDetailData(item, secretDataYAML != "", r.version, r.authEnabled))
+	r.render(writer, request, pageKontinuum, kontinuumDetailData(item, secretDataYAML != "", r.version, r.authEnabled))
 }
 
 // handleKontinuumSecretDownload is GET /app/kontinuums/{name}/secret's
@@ -745,7 +724,8 @@ func (r *Router) handleKontinuumSecretDownload(writer http.ResponseWriter, reque
 
 	name := request.PathValue("name")
 
-	err = kontinuums.Get(request.Context(), client.ObjectKey{Name: name}, &item)
+	err = kontinuums.Get(request.Context(),
+		client.ObjectKey{Name: name, Namespace: v1alpha2.DefaultSecretNamespace}, &item)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			http.NotFound(writer, request)
@@ -924,7 +904,7 @@ func (r *Router) handleIAM(writer http.ResponseWriter, request *http.Request) {
 		}
 	}
 
-	r.render(writer, pageIAM, map[string]any{
+	r.render(writer, request, pageIAM, map[string]any{
 		"Title":       "IAM",
 		"ActiveMenu":  "iam",
 		"Version":     r.version,
@@ -982,10 +962,12 @@ func (r *Router) listAdminGroupBindings(writer http.ResponseWriter, request *htt
 }
 
 // machineRow is one api/v1alpha2.Instance object rendered as a row on the
-// /app/instances list — see pageMachines' own doc for why this isn't named
-// "instance", which already means something else in this file.
+// /app/kontinuum.sh/namespaces/{ns}/instances list — see pageMachines' own
+// doc for why this isn't named "instance", which already means something
+// else in this file.
 type machineRow struct {
 	Name         string
+	Namespace    string
 	TalosVersion string
 	Discovered   bool
 	Reason       string
@@ -993,10 +975,11 @@ type machineRow struct {
 	Age          string
 }
 
-// machineRowFrom builds one /app/instances row from item.
+// machineRowFrom builds one instances-list row from item.
 func machineRowFrom(item v1alpha2.Instance) machineRow {
 	row := machineRow{
 		Name:         item.Name,
+		Namespace:    item.Namespace,
 		TalosVersion: item.Status.Talos.Version,
 		ClaimedBy:    item.Labels[v1alpha2.LabelClaimedBy],
 		Age:          formatAge(item.CreationTimestamp.Time),
@@ -1010,11 +993,15 @@ func machineRowFrom(item v1alpha2.Instance) machineRow {
 	return row
 }
 
-// handleMachines is GET /app/instances's handler — it lists Instance CRD
-// objects (api/v1alpha2.Instance: bare-metal or provider-backed machines
-// InstancePool/TalosCluster claim from — see issue #24's architecture) as a
-// read-only browse page. Claiming/unclaiming isn't exposed here, per issue
-// #52's explicit scope.
+// handleMachines is GET /app/kontinuum.sh/namespaces/{ns}/instances's
+// handler — it lists Instance CRD objects (api/v1alpha2.Instance:
+// bare-metal or provider-backed machines InstancePool/TalosCluster claim
+// from — see issue #24's architecture) in the {ns} tenant's own namespace,
+// as a read-only browse page. Claiming/unclaiming isn't exposed here, per
+// issue #52's explicit scope. Instance became namespaced in issue #63's
+// architecture specifically so a tenant can bring their own hardware into
+// their own namespace — {ns} is which tenant's own instances this page
+// shows, chosen via nav.html's tenant switcher (see addTenantSwitcherData).
 func (r *Router) handleMachines(writer http.ResponseWriter, request *http.Request) {
 	kontinuums, err := r.kontinuumsFor(request.Context())
 	if err != nil {
@@ -1023,9 +1010,11 @@ func (r *Router) handleMachines(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 
+	namespace := request.PathValue("ns")
+
 	var list v1alpha2.InstanceList
 
-	err = kontinuums.List(request.Context(), &list)
+	err = kontinuums.List(request.Context(), &list, client.InNamespace(namespace))
 	if err != nil {
 		// Forbidden means the signed-in identity is authenticated but not
 		// authorized — the session itself isn't the problem, but there's
@@ -1049,11 +1038,12 @@ func (r *Router) handleMachines(writer http.ResponseWriter, request *http.Reques
 
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 
-	r.render(writer, pageMachines, map[string]any{
+	r.render(writer, request, pageMachines, map[string]any{
 		"Title":       "Instances",
 		"ActiveMenu":  "instances",
 		"Version":     r.version,
 		"AuthEnabled": r.authEnabled,
+		"Namespace":   namespace,
 		"Machines":    rows,
 	})
 }
@@ -1077,13 +1067,14 @@ type machineConditionRow struct {
 	Age     string
 }
 
-// handleMachineDetail is GET /app/instances/{name}'s handler — it shows one
-// Instance CRD object's discovery result: Talos version, discovered network
-// interfaces, and status.conditions, plus which InstancePool (if any) has
-// claimed it (see api/v1alpha2.LabelClaimedBy — claiming isn't recorded
-// anywhere else on Instance itself). No link is rendered to the claiming
-// InstancePool: that CRD has no UI page of its own yet (tracked separately,
-// see issue #52's "explicitly out of scope").
+// handleMachineDetail is GET
+// /app/kontinuum.sh/namespaces/{ns}/instances/{name}'s handler — it shows
+// one Instance CRD object's discovery result: Talos version, discovered
+// network interfaces, and status.conditions, plus which InstancePool (if
+// any) has claimed it (see api/v1alpha2.LabelClaimedBy — claiming isn't
+// recorded anywhere else on Instance itself). No link is rendered to the
+// claiming InstancePool: that CRD has no UI page of its own yet (tracked
+// separately, see issue #52's "explicitly out of scope").
 func (r *Router) handleMachineDetail(writer http.ResponseWriter, request *http.Request) {
 	kontinuums, err := r.kontinuumsFor(request.Context())
 	if err != nil {
@@ -1094,9 +1085,9 @@ func (r *Router) handleMachineDetail(writer http.ResponseWriter, request *http.R
 
 	var item v1alpha2.Instance
 
-	name := request.PathValue("name")
+	key := client.ObjectKey{Name: request.PathValue("name"), Namespace: request.PathValue("ns")}
 
-	err = kontinuums.Get(request.Context(), client.ObjectKey{Name: name}, &item)
+	err = kontinuums.Get(request.Context(), key, &item)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			http.NotFound(writer, request)
@@ -1119,7 +1110,7 @@ func (r *Router) handleMachineDetail(writer http.ResponseWriter, request *http.R
 		return
 	}
 
-	r.render(writer, pageMachineDetail, machineDetailData(item, r.version, r.authEnabled))
+	r.render(writer, request, pageMachineDetail, machineDetailData(item, r.version, r.authEnabled))
 }
 
 // machineDetailData builds handleMachineDetail's template data from item —
@@ -1158,6 +1149,7 @@ func machineDetailData(item v1alpha2.Instance, version string, authEnabled bool)
 		"Version":         version,
 		"AuthEnabled":     authEnabled,
 		"Name":            item.Name,
+		"Namespace":       item.Namespace,
 		"Age":             formatAge(item.CreationTimestamp.Time),
 		"TalosVersion":    item.Status.Talos.Version,
 		"Discovered":      meta.IsStatusConditionTrue(item.Status.Conditions, instancedomain.DiscoveredConditionType),
@@ -1235,7 +1227,7 @@ func (r *Router) handleTalosClusters(writer http.ResponseWriter, request *http.R
 
 	sort.Slice(clusters, func(i, j int) bool { return clusters[i].Name < clusters[j].Name })
 
-	r.render(writer, pageTalosClusters, map[string]any{
+	r.render(writer, request, pageTalosClusters, map[string]any{
 		"Title":         "Clusters",
 		"ActiveMenu":    "talosclusters",
 		"Version":       r.version,
@@ -1286,7 +1278,9 @@ type poolRow struct {
 func fetchPoolRow(ctx context.Context, kontinuums KontinuumClient, rowName, poolName string) poolRow {
 	var pool v1alpha2.InstancePool
 
-	err := kontinuums.Get(ctx, client.ObjectKey{Name: poolName}, &pool)
+	key := client.ObjectKey{Name: poolName, Namespace: v1alpha2.DefaultSecretNamespace}
+
+	err := kontinuums.Get(ctx, key, &pool)
 	if err != nil {
 		return poolRow{Name: rowName, PoolRef: poolName}
 	}
@@ -1323,7 +1317,9 @@ func (r *Router) fetchOwningZone(
 ) (v1alpha2.Zone, bool) {
 	var zone v1alpha2.Zone
 
-	err := kontinuums.Get(request.Context(), client.ObjectKey{Name: clusterName}, &zone)
+	key := client.ObjectKey{Name: clusterName, Namespace: v1alpha2.DefaultSecretNamespace}
+
+	err := kontinuums.Get(request.Context(), key, &zone)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return v1alpha2.Zone{}, true
@@ -1391,7 +1387,9 @@ func (r *Router) fetchTalosCluster(
 ) (v1alpha2.TalosCluster, bool) {
 	var cluster v1alpha2.TalosCluster
 
-	err := kontinuums.Get(request.Context(), client.ObjectKey{Name: name}, &cluster)
+	key := client.ObjectKey{Name: name, Namespace: v1alpha2.DefaultSecretNamespace}
+
+	err := kontinuums.Get(request.Context(), key, &cluster)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			http.NotFound(writer, request)
@@ -1509,7 +1507,7 @@ func (r *Router) handleTalosClusterDetail(writer http.ResponseWriter, request *h
 		request.Context(), kontinuums, cluster, zone, kubeconfig, revealed, r.version, r.authEnabled,
 	)
 
-	r.render(writer, pageTalosCluster, data)
+	r.render(writer, request, pageTalosCluster, data)
 }
 
 // handleTalosClusterKubeconfigDownload is GET
@@ -1561,7 +1559,7 @@ func (r *Router) handleTalosClusterKubeconfigDownload(writer http.ResponseWriter
 	_, _ = writer.Write(kubeconfig)
 }
 
-func (r *Router) handleSettings(writer http.ResponseWriter, _ *http.Request) {
+func (r *Router) handleSettings(writer http.ResponseWriter, request *http.Request) {
 	data := map[string]any{
 		"Title":       "Settings",
 		"ActiveMenu":  "settings",
@@ -1569,7 +1567,7 @@ func (r *Router) handleSettings(writer http.ResponseWriter, _ *http.Request) {
 		"AuthEnabled": r.authEnabled,
 	}
 
-	r.render(writer, pageSettings, data)
+	r.render(writer, request, pageSettings, data)
 }
 
 // handleSettingsKubeconfigDownload is GET /app/settings/kubeconfig's
@@ -1593,7 +1591,13 @@ func (r *Router) handleSettingsKubeconfigDownload(writer http.ResponseWriter, re
 	_, _ = writer.Write([]byte(content))
 }
 
-func (r *Router) render(writer http.ResponseWriter, page string, data any) {
+// render executes page's template tree against data, first merging in
+// nav.html's own tenant-switcher fields (see addTenantSwitcherData) — every
+// page shares the same nav, so this is the one place that needs to run for
+// all of them, rather than every handler building it itself.
+func (r *Router) render(writer http.ResponseWriter, request *http.Request, page string, data map[string]any) {
+	r.addTenantSwitcherData(request, data)
+
 	var buf bytes.Buffer
 
 	err := r.pages[page].ExecuteTemplate(&buf, "layout.html", data)
@@ -1605,4 +1609,41 @@ func (r *Router) render(writer http.ResponseWriter, page string, data any) {
 
 	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = buf.WriteTo(writer)
+}
+
+// addTenantSwitcherData merges nav.html's own "CurrentTenant"/"Tenants"
+// fields into data. CurrentTenant is request's own {ns} path value — set on
+// the instances routes (see RegisterRoutes), empty everywhere else, which
+// nav.html falls back to defaultTenantNamespace for. Tenants lists every
+// namespace the caller's own identity can see, best-effort: a listing
+// failure (e.g. Forbidden — this viewer's RBAC just doesn't cover
+// namespace-listing, deny-by-default per pkg/domain/adminrbac's own model)
+// leaves Tenants empty rather than failing the whole page over what's only
+// ever a supplementary nav control, never the page's own requested data.
+func (r *Router) addTenantSwitcherData(request *http.Request, data map[string]any) {
+	currentTenant := request.PathValue("ns")
+	if currentTenant == "" {
+		currentTenant = defaultTenantNamespace
+	}
+
+	data["CurrentTenant"] = currentTenant
+
+	namespaces, err := r.namespacesFor(request.Context())
+	if err != nil {
+		return
+	}
+
+	list, err := namespaces.List(request.Context(), metav1.ListOptions{})
+	if err != nil || list == nil {
+		return
+	}
+
+	names := make([]string, 0, len(list.Items))
+	for _, ns := range list.Items {
+		names = append(names, ns.Name)
+	}
+
+	sort.Strings(names)
+
+	data["Tenants"] = names
 }

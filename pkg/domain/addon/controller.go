@@ -267,10 +267,15 @@ func (r *Reconciler) readyKubeconfig(ctx context.Context, clusterName string) ([
 // worth retrying. found true with a nil kubeconfig means the cluster
 // exists but hasn't bootstrapped far enough to have stored one yet —
 // callers should retry that case, not treat it the same as "give up".
+// Looks the TalosCluster up in v1alpha2.DefaultSecretNamespace — Addon
+// itself stays cluster-scoped, and this codebase's only path that creates a
+// TalosCluster (pkg/domain/zone.Add) always puts it there (see issue #63's
+// architecture); a tenant's own namespaced TalosCluster isn't reachable via
+// TalosClusterRef yet.
 func (r *Reconciler) clusterKubeconfig(ctx context.Context, clusterName string) ([]byte, bool, error) {
 	var cluster v1alpha2.TalosCluster
 
-	err := r.Client.Get(ctx, client.ObjectKey{Name: clusterName}, &cluster)
+	err := r.Client.Get(ctx, client.ObjectKey{Name: clusterName, Namespace: v1alpha2.DefaultSecretNamespace}, &cluster)
 	if apierrors.IsNotFound(err) {
 		return nil, false, nil
 	}
@@ -294,7 +299,8 @@ func (r *Reconciler) clusterKubeconfig(ctx context.Context, clusterName string) 
 func (r *Reconciler) resolveInstallRequest(ctx context.Context, spec v1alpha2.AddonSpec) (InstallRequest, error) {
 	var cluster v1alpha2.TalosCluster
 
-	err := r.Client.Get(ctx, client.ObjectKey{Name: spec.TalosClusterRef.Name}, &cluster)
+	err := r.Client.Get(ctx,
+		client.ObjectKey{Name: spec.TalosClusterRef.Name, Namespace: v1alpha2.DefaultSecretNamespace}, &cluster)
 	if err != nil {
 		return InstallRequest{}, fmt.Errorf("failed to get talos cluster %q: %w", spec.TalosClusterRef.Name, err)
 	}

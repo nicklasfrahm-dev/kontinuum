@@ -68,7 +68,7 @@ func TestRegionZoneValidationRejectsInconsistentValues(t *testing.T) {
 			t.Parallel()
 
 			obj := &v1alpha2.Kontinuum{
-				ObjectMeta: metav1.ObjectMeta{Name: testCase.objName},
+				ObjectMeta: metav1.ObjectMeta{Name: testCase.objName, Namespace: v1alpha2.DefaultSecretNamespace},
 				Spec:       v1alpha2.KontinuumSpec{Region: testCase.region, Zone: testCase.zone},
 			}
 

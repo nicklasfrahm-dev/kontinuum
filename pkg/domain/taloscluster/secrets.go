@@ -149,9 +149,7 @@ func storeKubeconfig(
 }
 
 // ensureNamespace creates namespace if it doesn't already exist — mirrors
-// registry.Heartbeat.ensureSecret's identical namespace-first pattern,
-// since TalosCluster is cluster-scoped and has no namespace of its own to
-// fall back to.
+// registry.Heartbeat.ensureSecret's identical namespace-first pattern.
 func ensureNamespace(ctx context.Context, kubeClient client.Client, namespace string) error {
 	err := kubeClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}})
 	if err != nil && !apierrors.IsAlreadyExists(err) {

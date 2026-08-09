@@ -1,6 +1,6 @@
 {{define "content"}}
-<div id="instance-detail-content" hx-get="/app/instances/{{.Name}}" hx-trigger="every 15s" hx-select="#instance-detail-content" hx-swap="outerHTML">
-    <a href="/app/instances" class="inline-flex items-center gap-1.5 text-sm text-neutral-500 hover:text-white transition-colors mb-4">
+<div id="instance-detail-content" hx-get="/app/kontinuum.sh/namespaces/{{.Namespace}}/instances/{{.Name}}" hx-trigger="every 15s" hx-select="#instance-detail-content" hx-swap="outerHTML">
+    <a href="/app/kontinuum.sh/namespaces/{{.Namespace}}/instances" class="inline-flex items-center gap-1.5 text-sm text-neutral-500 hover:text-white transition-colors mb-4">
         {{template "icon-chevron-left"}}
         Back to instances
     </a>
@@ -20,6 +20,10 @@
             <h2 class="text-sm font-bold text-white uppercase tracking-wider">Overview</h2>
         </div>
         <dl class="divide-y divide-neutral-800">
+            <div class="px-6 py-3 flex items-center justify-between gap-4">
+                <dt class="text-sm text-neutral-500">Tenant</dt>
+                <dd class="text-sm font-medium text-white">{{.Namespace}}</dd>
+            </div>
             <div class="px-6 py-3 flex items-center justify-between gap-4">
                 <dt class="text-sm text-neutral-500">Talos version</dt>
                 <dd class="text-sm font-medium text-white">{{if .TalosVersion}}{{.TalosVersion}}{{else}}-{{end}}</dd>

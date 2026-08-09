@@ -1,0 +1,110 @@
+{{/*
+    tenant-switcher is nav.html's own tenant-switcher control — a
+    <details>-based combobox: a trigger showing the current tenant, which
+    expands a searchable list of every tenant the caller's identity can see
+    (see pkg/ui.Router.addTenantSwitcherData). Picking one navigates to that
+    tenant's own instances page (see pageMachines' own doc for why
+    kontinuum.sh/namespaces/{ns} is the URL shape) — <details> needs no
+    script of its own to close on that navigation, since the whole page
+    unloads.
+
+    Instantiated twice by nav.html (desktop sidebar, mobile top bar), each
+    with its own ID so their DOM ids never collide — see ID's own doc below.
+    Expects a dict (see templateDict) with:
+      ID            - unique prefix for this instance's element ids.
+      CurrentTenant - the selected tenant, already defaulted (see
+                      addTenantSwitcherData) so this is never empty.
+      Tenants       - every tenant name the caller can see, sorted.
+      Compact       - true renders an icon-only trigger (the mobile top
+                      bar's cramped icon row); false renders the full
+                      current-tenant card (the desktop sidebar).
+*/}}
+{{define "tenant-switcher"}}
+<details class="relative" id="{{.ID}}">
+    {{if .Compact}}
+    <summary class="list-none cursor-pointer p-2 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800/50 transition-colors">
+        {{template "icon-tenants"}}
+    </summary>
+    {{else}}
+    <summary class="list-none cursor-pointer flex items-center gap-2 px-2.5 py-2 rounded-lg border border-neutral-800 bg-neutral-800/50 hover:bg-neutral-800 transition-colors">
+        <span class="text-neutral-500 shrink-0">{{template "icon-tenants"}}</span>
+        <span class="flex-1 min-w-0 text-left">
+            <span class="block text-[10px] text-neutral-500 uppercase tracking-wider">Tenant</span>
+            <span class="block text-sm font-medium text-white truncate">{{.CurrentTenant}}</span>
+        </span>
+        <span class="text-neutral-500 shrink-0">{{template "icon-chevrons-updown"}}</span>
+    </summary>
+    {{end}}
+    <div class="absolute {{if .Compact}}right-0{{else}}left-0{{end}} mt-2 w-64 bg-neutral-900 border border-neutral-800 rounded-xl shadow-lg z-50 overflow-hidden">
+        <div class="px-3 pt-3 pb-2">
+            <span class="block px-1 pb-2 text-xs font-bold text-white uppercase tracking-wider">Tenants</span>
+            <input type="text" id="{{.ID}}-search" autocomplete="off" placeholder="Search tenants..."
+                   class="w-full bg-neutral-800 border border-neutral-700 rounded-full px-3.5 py-1.5 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+        </div>
+        <div id="{{.ID}}-list" class="max-h-64 overflow-y-auto pb-2">
+            {{$current := .CurrentTenant}}
+            {{range .Tenants}}
+            <a href="/app/kontinuum.sh/namespaces/{{.}}/instances" data-tenant-option data-tenant-name="{{.}}"
+               class="block px-4 py-2 text-sm truncate {{if eq . $current}}bg-neutral-800 text-white font-medium{{else}}text-neutral-300 hover:bg-neutral-800/70{{end}}">
+                {{.}}
+            </a>
+            {{else}}
+            <p class="px-4 py-2 text-sm text-neutral-500">No tenants found.</p>
+            {{end}}
+            <p data-tenant-empty class="hidden px-4 py-2 text-sm text-neutral-500">No matching tenants.</p>
+        </div>
+    </div>
+</details>
+{{template "tenant-switcher-script" .}}
+{{end}}
+
+{{/*
+    tenant-switcher-script wires up one "tenant-switcher" instance (see that
+    template's own doc) — search-as-you-type filtering of the tenant list,
+    auto-focus and reset on open, and close-on-outside-click (the one thing
+    a bare <details> doesn't do natively).
+*/}}
+{{define "tenant-switcher-script"}}
+<script>
+(function () {
+    var root = document.getElementById('{{.ID}}');
+    var search = document.getElementById('{{.ID}}-search');
+    var list = document.getElementById('{{.ID}}-list');
+    var options = list.querySelectorAll('[data-tenant-option]');
+    var empty = list.querySelector('[data-tenant-empty]');
+
+    function applyFilter() {
+        var query = search.value.trim().toLowerCase();
+        var visible = 0;
+
+        options.forEach(function (option) {
+            var match = option.getAttribute('data-tenant-name').toLowerCase().indexOf(query) !== -1;
+            option.classList.toggle('hidden', !match);
+            if (match) {
+                visible++;
+            }
+        });
+
+        empty.classList.toggle('hidden', visible !== 0 || options.length === 0);
+    }
+
+    search.addEventListener('input', applyFilter);
+
+    root.addEventListener('toggle', function () {
+        if (!root.open) {
+            return;
+        }
+
+        search.value = '';
+        applyFilter();
+        window.setTimeout(function () { search.focus(); }, 0);
+    });
+
+    document.addEventListener('click', function (event) {
+        if (root.open && !root.contains(event.target)) {
+            root.open = false;
+        }
+    });
+})();
+</script>
+{{end}}

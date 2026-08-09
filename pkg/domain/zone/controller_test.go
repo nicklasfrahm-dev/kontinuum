@@ -34,6 +34,13 @@ const (
 	testImage         = "ghcr.io/nicklasfrahm/kontinuum:test"
 )
 
+// testZoneKey() is testZoneName's own ObjectKey — every zone-add fixture in
+// this file lives in v1alpha2.DefaultSecretNamespace (see BuildAddObjects'
+// own doc), so every Get below needs both, not just Name.
+func testZoneKey() client.ObjectKey {
+	return client.ObjectKey{Name: testZoneName, Namespace: v1alpha2.DefaultSecretNamespace}
+}
+
 // testStorage is a fake connection string, not a real credential.
 //
 //nolint:gosec // false positive: fixture data, not a real credential
@@ -88,14 +95,14 @@ func newDownstreamFakeClient(t *testing.T) client.Client {
 
 func testZoneObject() *v1alpha2.Zone {
 	return &v1alpha2.Zone{
-		ObjectMeta: metav1.ObjectMeta{Name: testZoneName},
+		ObjectMeta: metav1.ObjectMeta{Name: testZoneName, Namespace: v1alpha2.DefaultSecretNamespace},
 		Spec:       v1alpha2.ZoneSpec{Region: testRegion, Zone: testZone, Domain: testDomain},
 	}
 }
 
 func readyTalosCluster() *v1alpha2.TalosCluster {
 	return &v1alpha2.TalosCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: testZoneName},
+		ObjectMeta: metav1.ObjectMeta{Name: testZoneName, Namespace: v1alpha2.DefaultSecretNamespace},
 		Status: v1alpha2.TalosClusterStatus{
 			Conditions: []metav1.Condition{
 				{Type: taloscluster.ReadyConditionType, Status: metav1.ConditionTrue, Reason: "AddonsInstalled"},
@@ -116,7 +123,7 @@ func registeredKontinuum(name, storage string) (*v1alpha2.Kontinuum, *corev1.Sec
 	secretName := "kontinuum-" + name
 
 	kontinuum := &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: v1alpha2.DefaultSecretNamespace},
 		Status: v1alpha2.KontinuumStatus{
 			SecretRef: v1alpha2.KontinuumSecretReference{Name: secretName, Namespace: "kontinuum-system"},
 		},
@@ -143,7 +150,9 @@ func newReconciler(hubClient client.Client, downstreamBuilder zone.DownstreamCli
 }
 
 func reconcileRequest() ctrl.Request {
-	return ctrl.Request{NamespacedName: types.NamespacedName{Name: testZoneName}}
+	return ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: testZoneName, Namespace: v1alpha2.DefaultSecretNamespace},
+	}
 }
 
 func TestReconcileReportsTalosClusterNotFound(t *testing.T) {
@@ -157,7 +166,7 @@ func TestReconcileReportsTalosClusterNotFound(t *testing.T) {
 	assert.Equal(t, testRetryInterval, result.RequeueAfter)
 
 	var got v1alpha2.Zone
-	require.NoError(t, hubClient.Get(t.Context(), client.ObjectKey{Name: testZoneName}, &got))
+	require.NoError(t, hubClient.Get(t.Context(), testZoneKey(), &got))
 
 	cond := meta.FindStatusCondition(got.Status.Conditions, zone.ClusterReadyConditionType)
 	require.NotNil(t, cond)
@@ -168,7 +177,9 @@ func TestReconcileReportsTalosClusterNotFound(t *testing.T) {
 func TestReconcileWaitsForTalosClusterReady(t *testing.T) {
 	t.Parallel()
 
-	notReadyCluster := &v1alpha2.TalosCluster{ObjectMeta: metav1.ObjectMeta{Name: testZoneName}}
+	notReadyCluster := &v1alpha2.TalosCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: testZoneName, Namespace: v1alpha2.DefaultSecretNamespace},
+	}
 	hubClient := newHubFakeClient(t, testZoneObject(), notReadyCluster)
 	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{})
 
@@ -177,7 +188,7 @@ func TestReconcileWaitsForTalosClusterReady(t *testing.T) {
 	assert.Equal(t, testRetryInterval, result.RequeueAfter)
 
 	var got v1alpha2.Zone
-	require.NoError(t, hubClient.Get(t.Context(), client.ObjectKey{Name: testZoneName}, &got))
+	require.NoError(t, hubClient.Get(t.Context(), testZoneKey(), &got))
 
 	cond := meta.FindStatusCondition(got.Status.Conditions, zone.ClusterReadyConditionType)
 	require.NotNil(t, cond)
@@ -196,7 +207,7 @@ func TestReconcileReportsNoStorageSecretFound(t *testing.T) {
 	assert.Equal(t, testRetryInterval, result.RequeueAfter)
 
 	var got v1alpha2.Zone
-	require.NoError(t, hubClient.Get(t.Context(), client.ObjectKey{Name: testZoneName}, &got))
+	require.NoError(t, hubClient.Get(t.Context(), testZoneKey(), &got))
 
 	cond := meta.FindStatusCondition(got.Status.Conditions, zone.InstalledConditionType)
 	require.NotNil(t, cond)
@@ -218,7 +229,7 @@ func TestReconcileInstallsDownstreamObjectsAndWaitsForCertificate(t *testing.T) 
 	assert.Equal(t, testRetryInterval, result.RequeueAfter)
 
 	var got v1alpha2.Zone
-	require.NoError(t, hubClient.Get(t.Context(), client.ObjectKey{Name: testZoneName}, &got))
+	require.NoError(t, hubClient.Get(t.Context(), testZoneKey(), &got))
 
 	cond := meta.FindStatusCondition(got.Status.Conditions, zone.InstalledConditionType)
 	require.NotNil(t, cond)
@@ -304,7 +315,7 @@ func TestReconcileFlipsInstalledOnceCertificateReady(t *testing.T) {
 	assert.Equal(t, time.Duration(0), result.RequeueAfter)
 
 	var got v1alpha2.Zone
-	require.NoError(t, hubClient.Get(t.Context(), client.ObjectKey{Name: testZoneName}, &got))
+	require.NoError(t, hubClient.Get(t.Context(), testZoneKey(), &got))
 
 	cond := meta.FindStatusCondition(got.Status.Conditions, zone.InstalledConditionType)
 	require.NotNil(t, cond)

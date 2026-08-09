@@ -21,6 +21,14 @@ import (
 
 const testHeartbeatInterval = 10 * time.Millisecond
 
+// testServerKey() is "test-server"'s own NamespacedName — every Heartbeat
+// fixture in this file registers as v1alpha2.DefaultSecretNamespace (see
+// Heartbeat.Start's own doc), so every Get/Request below needs both, not
+// just Name.
+func testServerKey() types.NamespacedName {
+	return types.NamespacedName{Name: "test-server", Namespace: v1alpha2.DefaultSecretNamespace}
+}
+
 // testSecretData is a placeholder value for Heartbeat.SecretData in tests —
 // its content is irrelevant, only that it round-trips into the Secret
 // ensureSecret creates.
@@ -82,7 +90,7 @@ func TestHeartbeatRegistersAndUpdatesStatus(t *testing.T) {
 	var server v1alpha2.Kontinuum
 
 	require.Eventually(t, func() bool {
-		err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-server"}, &server)
+		err := fakeClient.Get(context.Background(), testServerKey(), &server)
 
 		return err == nil && !server.Status.LastHeartbeatTime.IsZero()
 	}, time.Second, time.Millisecond, "server was never created with a heartbeat")
@@ -114,8 +122,10 @@ func assertHeartbeatAdvancesThenDeregisters(
 
 	var server v1alpha2.Kontinuum
 
+	key := types.NamespacedName{Name: name, Namespace: v1alpha2.DefaultSecretNamespace}
+
 	require.Eventually(t, func() bool {
-		err := fakeClient.Get(context.Background(), types.NamespacedName{Name: name}, &server)
+		err := fakeClient.Get(context.Background(), key, &server)
 
 		return err == nil && server.Status.LastHeartbeatTime.After(since)
 	}, time.Second, time.Millisecond, "heartbeat never advanced")
@@ -129,7 +139,7 @@ func assertHeartbeatAdvancesThenDeregisters(
 		t.Fatal("Start did not return after ctx was canceled")
 	}
 
-	err := fakeClient.Get(context.Background(), types.NamespacedName{Name: name}, &server)
+	err := fakeClient.Get(context.Background(), key, &server)
 	assert.True(t, apierrors.IsNotFound(err), "server should be deregistered after Start returns")
 }
 
@@ -141,7 +151,7 @@ func TestHeartbeatStartAdoptsPreexistingRegistration(t *testing.T) {
 	// graceful deregistration lost the race with the new process starting,
 	// or the TTL reconciler hasn't expired it yet.
 	fakeClient := newFakeClient(t, &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-server"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-server", Namespace: v1alpha2.DefaultSecretNamespace},
 		Spec:       v1alpha2.KontinuumSpec{Region: "eu", Zone: "eu-1a"},
 		Status:     v1alpha2.KontinuumStatus{Role: v1alpha2.RoleWorker},
 	})
@@ -166,7 +176,7 @@ func TestHeartbeatStartAdoptsPreexistingRegistration(t *testing.T) {
 	var server v1alpha2.Kontinuum
 
 	require.Eventually(t, func() bool {
-		err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-server"}, &server)
+		err := fakeClient.Get(context.Background(), testServerKey(), &server)
 
 		return err == nil && !server.Status.LastHeartbeatTime.IsZero()
 	}, time.Second, time.Millisecond, "Start should adopt the pre-existing registration and heartbeat it, not fail")
@@ -206,7 +216,7 @@ func TestHeartbeatReregistersIfDeletedExternally(t *testing.T) {
 	var server v1alpha2.Kontinuum
 
 	require.Eventually(t, func() bool {
-		err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-server"}, &server)
+		err := fakeClient.Get(context.Background(), testServerKey(), &server)
 
 		return err == nil && !server.Status.LastHeartbeatTime.IsZero()
 	}, time.Second, time.Millisecond, "server was never created with a heartbeat")
@@ -218,14 +228,14 @@ func TestHeartbeatReregistersIfDeletedExternally(t *testing.T) {
 	require.Eventually(t, func() bool {
 		var recreated v1alpha2.Kontinuum
 
-		err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-server"}, &recreated)
+		err := fakeClient.Get(context.Background(), testServerKey(), &recreated)
 
 		return err == nil && !recreated.Status.LastHeartbeatTime.IsZero()
 	}, time.Second, time.Millisecond, "server was never re-registered after external deletion")
 
 	var recreated v1alpha2.Kontinuum
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-server"}, &recreated))
+	require.NoError(t, fakeClient.Get(context.Background(), testServerKey(), &recreated))
 	assert.Equal(t, v1alpha2.RoleWorker, recreated.Status.Role)
 	assert.Equal(t, "eu", recreated.Spec.Region)
 	assert.Equal(t, "eu-1a", recreated.Spec.Zone)
@@ -243,14 +253,14 @@ func TestHeartbeatReconcileReregistersOnDelete(t *testing.T) {
 		Logger: slog.Default(),
 	}
 
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-server"}}
+	req := ctrl.Request{NamespacedName: testServerKey()}
 
 	_, err := heartbeat.Reconcile(context.Background(), req)
 	require.NoError(t, err)
 
 	var server v1alpha2.Kontinuum
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-server"}, &server))
+	require.NoError(t, fakeClient.Get(context.Background(), testServerKey(), &server))
 	assert.Equal(t, v1alpha2.RoleControlPlane, server.Status.Role)
 	assert.False(t, server.Status.LastHeartbeatTime.IsZero())
 }
@@ -259,7 +269,7 @@ func TestHeartbeatReconcileNoOpsWhenServerExists(t *testing.T) {
 	t.Parallel()
 
 	fakeClient := newFakeClient(t, &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-server"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-server", Namespace: v1alpha2.DefaultSecretNamespace},
 		Status:     v1alpha2.KontinuumStatus{Role: v1alpha2.RoleWorker},
 	})
 
@@ -269,7 +279,7 @@ func TestHeartbeatReconcileNoOpsWhenServerExists(t *testing.T) {
 		Logger: slog.Default(),
 	}
 
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-server"}}
+	req := ctrl.Request{NamespacedName: testServerKey()}
 
 	result, err := heartbeat.Reconcile(context.Background(), req)
 	require.NoError(t, err)
@@ -280,7 +290,7 @@ func TestHeartbeatDeregisterIsIdempotent(t *testing.T) {
 	t.Parallel()
 
 	fakeClient := newFakeClient(t, &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-server"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-server", Namespace: v1alpha2.DefaultSecretNamespace},
 	})
 
 	heartbeat := &registry.Heartbeat{
@@ -293,7 +303,7 @@ func TestHeartbeatDeregisterIsIdempotent(t *testing.T) {
 
 	var server v1alpha2.Kontinuum
 
-	err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-server"}, &server)
+	err := fakeClient.Get(context.Background(), testServerKey(), &server)
 	assert.True(t, apierrors.IsNotFound(err), "Deregister should have deleted the object")
 
 	// A second call finds the object already gone — a NotFound from an
@@ -309,7 +319,7 @@ func TestHeartbeatDeregisterPreventsReconcileFromReregistering(t *testing.T) {
 	t.Parallel()
 
 	fakeClient := newFakeClient(t, &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-server"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-server", Namespace: v1alpha2.DefaultSecretNamespace},
 	})
 
 	heartbeat := &registry.Heartbeat{
@@ -321,14 +331,14 @@ func TestHeartbeatDeregisterPreventsReconcileFromReregistering(t *testing.T) {
 
 	require.NoError(t, heartbeat.Deregister(context.Background()))
 
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "test-server"}}
+	req := ctrl.Request{NamespacedName: testServerKey()}
 
 	_, err := heartbeat.Reconcile(context.Background(), req)
 	require.NoError(t, err)
 
 	var server v1alpha2.Kontinuum
 
-	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-server"}, &server)
+	err = fakeClient.Get(context.Background(), testServerKey(), &server)
 	assert.True(t, apierrors.IsNotFound(err), "Reconcile must not recreate an object Deregister just deleted")
 }
 
@@ -361,7 +371,7 @@ func TestHeartbeatDeregisterStopsBeatFromReregistering(t *testing.T) {
 	var server v1alpha2.Kontinuum
 
 	require.Eventually(t, func() bool {
-		err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-server"}, &server)
+		err := fakeClient.Get(context.Background(), testServerKey(), &server)
 
 		return err == nil && !server.Status.LastHeartbeatTime.IsZero()
 	}, time.Second, time.Millisecond, "server was never created with a heartbeat")
@@ -371,7 +381,7 @@ func TestHeartbeatDeregisterStopsBeatFromReregistering(t *testing.T) {
 	// Give the still-running ticker several chances to fire and
 	// (incorrectly) recreate the object.
 	assert.Never(t, func() bool {
-		err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-server"}, &server)
+		err := fakeClient.Get(context.Background(), testServerKey(), &server)
 
 		return err == nil
 	}, 5*testHeartbeatInterval, testHeartbeatInterval, "beat must not recreate an object Deregister already deleted")

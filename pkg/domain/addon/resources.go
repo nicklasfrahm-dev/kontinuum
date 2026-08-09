@@ -95,9 +95,21 @@ func ensureBuiltinAddonSeed(
 		},
 	}
 
-	err = controllerutil.SetControllerReference(cluster, seed, kubeClient.Scheme())
-	if err != nil {
-		return fmt.Errorf("failed to set owner reference on addon %q: %w", seed.Name, err)
+	// Kubernetes itself refuses an owner reference from a namespaced owner
+	// onto a cluster-scoped object ("cluster-scoped resource must not have
+	// a namespace-scoped owner") — and cluster is namespaced (see issue
+	// #63's architecture) while Addon stays cluster-scoped (see
+	// addonResourceName's own doc), so native GC-based cleanup can only be
+	// wired up once Addon itself moves to namespaced scope too. Until
+	// then, skip it rather than fail seeding entirely: TalosClusterRef.Name
+	// (see ListForCluster) is already how every reconciler finds an addon's
+	// owning cluster, so nothing here actually depends on the owner
+	// reference besides GC.
+	if cluster.Namespace == "" {
+		err = controllerutil.SetControllerReference(cluster, seed, kubeClient.Scheme())
+		if err != nil {
+			return fmt.Errorf("failed to set owner reference on addon %q: %w", seed.Name, err)
+		}
 	}
 
 	err = kubeClient.Create(ctx, seed)

@@ -12,7 +12,7 @@ spec:
     listKind: InstancePoolList
     plural: instancepools
     singular: instancepool
-  scope: Cluster
+  scope: Namespaced
   versions:
   - additionalPrinterColumns:
     - jsonPath: .spec.replicas

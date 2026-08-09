@@ -118,7 +118,9 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 // scan. Safe even if no such Zone exists: Reconcile's own Get handles
 // NotFound.
 func mapTalosClusterToZone(_ context.Context, obj client.Object) []ctrl.Request {
-	return []ctrl.Request{{NamespacedName: types.NamespacedName{Name: obj.GetName()}}}
+	return []ctrl.Request{{
+		NamespacedName: types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()},
+	}}
 }
 
 // Reconciler installs kontinuum's downstream footprint onto a zone's own
@@ -148,7 +150,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	var cluster v1alpha2.TalosCluster
 
-	err = r.Client.Get(ctx, client.ObjectKey{Name: zoneObj.Name}, &cluster)
+	err = r.Client.Get(ctx, client.ObjectKey{Name: zoneObj.Name, Namespace: zoneObj.Namespace}, &cluster)
 	if apierrors.IsNotFound(err) {
 		return r.setClusterReadyCondition(ctx, &zoneObj, metav1.ConditionFalse, reasonTalosClusterNotFound,
 			fmt.Sprintf("no talos cluster named %q found yet", zoneObj.Name))
