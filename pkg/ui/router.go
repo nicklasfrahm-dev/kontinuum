@@ -83,25 +83,25 @@ var templatesFS embed.FS
 const (
 	pageRegistry  = "registry"
 	pageKontinuum = "kontinuum"
-	// pageMachines and pageMachineDetail back
+	// pageInstances and pageInstanceDetail back
 	// /app/kontinuum.sh/namespaces/{ns}/instances and
 	// .../instances/{name} — the Instance CRD (api/v1alpha2.Instance, a
-	// bare-metal or provider-backed machine InstancePool/TalosCluster claim
-	// from). Named "machine" rather than "instance", which would collide
-	// with pageKontinuum above: a registered Kontinuum server process,
-	// unrelated to the Instance CRD despite the name. See issue #52 for why
-	// these stay separate pages/routes despite the CRD itself being called
-	// Instance. The URL's own kontinuum.sh/namespaces/{ns} shape (rather
-	// than a flat /app/instances) is what issue #63's architecture needs:
-	// Instance became a namespaced CRD there, one tenant's own namespace at
-	// a time — see the nav's tenant switcher (renderTenantSwitcher) for how
-	// {ns} is chosen.
-	pageMachines      = "machines"
-	pageMachineDetail = "machine-detail"
-	pageTalosClusters = "talosclusters"
-	pageTalosCluster  = "taloscluster"
-	pageIAM           = "iam"
-	pageSettings      = "settings"
+	// bare-metal or provider-backed machine InstancePool/TalosCluster claims
+	// from). Not to be confused with pageKontinuum above: a registered
+	// Kontinuum server process, a completely different type despite the
+	// similar-sounding name — see issue #52, which is why the two stay
+	// separate pages under separate routes (/instances vs /kontinuums)
+	// rather than sharing one. The URL's own kontinuum.sh/namespaces/{ns}
+	// shape (rather than a flat /app/instances) is what issue #63's
+	// architecture needs: Instance became a namespaced CRD there, one
+	// tenant's own namespace at a time — see the nav's tenant switcher
+	// (renderTenantSwitcher) for how {ns} is chosen.
+	pageInstances      = "instances"
+	pageInstanceDetail = "instance-detail"
+	pageTalosClusters  = "talosclusters"
+	pageTalosCluster   = "taloscluster"
+	pageIAM            = "iam"
+	pageSettings       = "settings"
 )
 
 // defaultTenantNamespace is where GET /app and /app/home land a caller who
@@ -225,8 +225,8 @@ func NewRouter(
 			"templates/components/icon_check.html", "templates/components/icon_key.html",
 			"templates/components/icon_info.html", "templates/components/icon_download.html",
 			"templates/components/reveal_panel.html", "templates/components/reveal_panel_script.html"),
-		pageMachines: mustParsePage("templates/machines_content.html"),
-		pageMachineDetail: mustParsePage("templates/machine_detail_content.html",
+		pageInstances: mustParsePage("templates/instances_content.html"),
+		pageInstanceDetail: mustParsePage("templates/instance_detail_content.html",
 			"templates/components/icon_chevron_left.html", "templates/components/icon_info.html"),
 		pageTalosClusters: mustParsePage("templates/talosclusters_content.html"),
 		pageTalosCluster: mustParsePage("templates/taloscluster_content.html",
@@ -297,8 +297,8 @@ func (r *Router) RegisterRoutes(
 		protect(r.handleKontinuumSecretDownload))
 	mux.HandleFunc("DELETE /app/kontinuum.sh/namespaces/{ns}/kontinuums/{name}", protect(r.handleDeleteInstance))
 	mux.HandleFunc("POST /app/zones/add", protect(r.handleZoneAdd))
-	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/instances", protect(r.handleMachines))
-	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/instances/{name}", protect(r.handleMachineDetail))
+	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/instances", protect(r.handleInstances))
+	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/instances/{name}", protect(r.handleInstanceDetail))
 	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/talosclusters", protect(r.handleTalosClusters))
 	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/talosclusters/{name}", protect(r.handleTalosClusterDetail))
 	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/talosclusters/{name}/kubeconfig",
@@ -969,11 +969,11 @@ func (r *Router) listAdminGroupBindings(writer http.ResponseWriter, request *htt
 	return bindings, nil
 }
 
-// machineRow is one api/v1alpha2.Instance object rendered as a row on the
-// /app/kontinuum.sh/namespaces/{ns}/instances list — see pageMachines' own
+// instanceRow is one api/v1alpha2.Instance object rendered as a row on the
+// /app/kontinuum.sh/namespaces/{ns}/instances list — see pageInstances' own
 // doc for why this isn't named "instance", which already means something
 // else in this file.
-type machineRow struct {
+type instanceRow struct {
 	Name         string
 	Namespace    string
 	TalosVersion string
@@ -983,9 +983,9 @@ type machineRow struct {
 	Age          string
 }
 
-// machineRowFrom builds one instances-list row from item.
-func machineRowFrom(item v1alpha2.Instance) machineRow {
-	row := machineRow{
+// instanceRowFrom builds one instances-list row from item.
+func instanceRowFrom(item v1alpha2.Instance) instanceRow {
+	row := instanceRow{
 		Name:         item.Name,
 		Namespace:    item.Namespace,
 		TalosVersion: item.Status.Talos.Version,
@@ -1001,7 +1001,7 @@ func machineRowFrom(item v1alpha2.Instance) machineRow {
 	return row
 }
 
-// handleMachines is GET /app/kontinuum.sh/namespaces/{ns}/instances's
+// handleInstances is GET /app/kontinuum.sh/namespaces/{ns}/instances's
 // handler — it lists Instance CRD objects (api/v1alpha2.Instance:
 // bare-metal or provider-backed machines InstancePool/TalosCluster claim
 // from — see issue #24's architecture) in the {ns} tenant's own namespace,
@@ -1010,7 +1010,7 @@ func machineRowFrom(item v1alpha2.Instance) machineRow {
 // architecture specifically so a tenant can bring their own hardware into
 // their own namespace — {ns} is which tenant's own instances this page
 // shows, chosen via nav.html's tenant switcher (see addTenantSwitcherData).
-func (r *Router) handleMachines(writer http.ResponseWriter, request *http.Request) {
+func (r *Router) handleInstances(writer http.ResponseWriter, request *http.Request) {
 	kontinuums, err := r.kontinuumsFor(request.Context())
 	if err != nil {
 		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
@@ -1039,34 +1039,34 @@ func (r *Router) handleMachines(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 
-	rows := make([]machineRow, 0, len(list.Items))
+	rows := make([]instanceRow, 0, len(list.Items))
 	for _, item := range list.Items {
-		rows = append(rows, machineRowFrom(item))
+		rows = append(rows, instanceRowFrom(item))
 	}
 
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 
-	r.render(writer, request, pageMachines, map[string]any{
+	r.render(writer, request, pageInstances, map[string]any{
 		"Title":       "Instances",
 		"ActiveMenu":  "instances",
 		"Version":     r.version,
 		"AuthEnabled": r.authEnabled,
 		"Namespace":   namespace,
-		"Machines":    rows,
+		"Instances":   rows,
 	})
 }
 
-// machineInterfaceRow is one discovered network interface, shown on the
+// instanceInterfaceRow is one discovered network interface, shown on the
 // instance detail page's own interfaces table.
-type machineInterfaceRow struct {
+type instanceInterfaceRow struct {
 	Name       string
 	MACAddress string
 	Addresses  string
 }
 
-// machineConditionRow is one status.conditions entry, shown on the instance
+// instanceConditionRow is one status.conditions entry, shown on the instance
 // detail page's own conditions table.
-type machineConditionRow struct {
+type instanceConditionRow struct {
 	Type    string
 	Status  string
 	OK      bool
@@ -1075,7 +1075,7 @@ type machineConditionRow struct {
 	Age     string
 }
 
-// handleMachineDetail is GET
+// handleInstanceDetail is GET
 // /app/kontinuum.sh/namespaces/{ns}/instances/{name}'s handler — it shows
 // one Instance CRD object's discovery result: Talos version, discovered
 // network interfaces, and status.conditions, plus which InstancePool (if
@@ -1083,7 +1083,7 @@ type machineConditionRow struct {
 // recorded anywhere else on Instance itself). No link is rendered to the
 // claiming InstancePool: that CRD has no UI page of its own yet (tracked
 // separately, see issue #52's "explicitly out of scope").
-func (r *Router) handleMachineDetail(writer http.ResponseWriter, request *http.Request) {
+func (r *Router) handleInstanceDetail(writer http.ResponseWriter, request *http.Request) {
 	kontinuums, err := r.kontinuumsFor(request.Context())
 	if err != nil {
 		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
@@ -1118,25 +1118,25 @@ func (r *Router) handleMachineDetail(writer http.ResponseWriter, request *http.R
 		return
 	}
 
-	r.render(writer, request, pageMachineDetail, machineDetailData(item, r.version, r.authEnabled))
+	r.render(writer, request, pageInstanceDetail, instanceDetailData(item, r.version, r.authEnabled))
 }
 
-// machineDetailData builds handleMachineDetail's template data from item —
+// instanceDetailData builds handleInstanceDetail's template data from item —
 // factored out purely to keep that function short, same as
 // kontinuumDetailData does for the Kontinuum detail page above.
-func machineDetailData(item v1alpha2.Instance, version string, authEnabled bool) map[string]any {
-	interfaces := make([]machineInterfaceRow, 0, len(item.Status.Interfaces))
+func instanceDetailData(item v1alpha2.Instance, version string, authEnabled bool) map[string]any {
+	interfaces := make([]instanceInterfaceRow, 0, len(item.Status.Interfaces))
 	for _, iface := range item.Status.Interfaces {
-		interfaces = append(interfaces, machineInterfaceRow{
+		interfaces = append(interfaces, instanceInterfaceRow{
 			Name:       iface.Name,
 			MACAddress: iface.MACAddress,
 			Addresses:  strings.Join(iface.Addresses, ", "),
 		})
 	}
 
-	conditions := make([]machineConditionRow, 0, len(item.Status.Conditions))
+	conditions := make([]instanceConditionRow, 0, len(item.Status.Conditions))
 	for _, cond := range item.Status.Conditions {
-		conditions = append(conditions, machineConditionRow{
+		conditions = append(conditions, instanceConditionRow{
 			Type:    cond.Type,
 			Status:  string(cond.Status),
 			OK:      cond.Status == metav1.ConditionTrue,

@@ -1,5 +1,5 @@
 {{define "content"}}
-<div id="instances-content" hx-get="/app/kontinuum.sh/namespaces/{{.Namespace}}/instances" hx-trigger="every 15s" hx-select="#instances-content" hx-swap="outerHTML">
+<div id="instances-content" hx-get="/app/kontinuum.sh/namespaces/{{.Namespace}}/instances" hx-trigger="every 15s" hx-select="#instances-content" hx-swap="outerHTML" hx-disinherit="hx-select hx-swap">
     <div class="mb-6 flex items-center gap-4">
         <div class="text-accent [&>svg]:h-10 [&>svg]:w-10">
             {{template "icon-server"}}
@@ -12,10 +12,10 @@
 
     <div class="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
         <div class="px-6 py-3 border-b border-neutral-800">
-            <h2 class="text-sm font-bold text-white uppercase tracking-wider">Machines <span class="text-neutral-500">{{len .Machines}}</span></h2>
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider">Instances <span class="text-neutral-500">{{len .Instances}}</span></h2>
         </div>
 
-        {{if .Machines}}
+        {{if .Instances}}
         <table class="w-full">
             <thead>
                 <tr class="border-b border-neutral-800">
@@ -27,10 +27,10 @@
                 </tr>
             </thead>
             <tbody>
-                {{range .Machines}}
+                {{range .Instances}}
                 <tr class="border-b border-neutral-800 last:border-b-0 hover:bg-neutral-800/50 transition-colors">
                     <td class="px-6 py-2 text-sm font-medium text-white">
-                        <a href="/app/kontinuum.sh/namespaces/{{.Namespace}}/instances/{{.Name}}" hx-boost="false" class="hover:text-accent hover:underline">{{.Name}}</a>
+                        <a href="/app/kontinuum.sh/namespaces/{{.Namespace}}/instances/{{.Name}}" class="hover:text-accent hover:underline">{{.Name}}</a>
                     </td>
                     <td class="px-6 py-2 text-sm text-neutral-400">{{if .TalosVersion}}{{.TalosVersion}}{{else}}-{{end}}</td>
                     <td class="px-6 py-2">

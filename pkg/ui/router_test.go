@@ -87,16 +87,16 @@ type stubKontinuumLister struct {
 	// list kind independently.
 	bindings []rbacv1.ClusterRoleBinding
 	listErr  error
-	// machines and machineErr back List calls for a *v1alpha2.InstanceList —
-	// used by the /app/instances page (see handleMachines). Separate from
+	// instances and instanceErr back List calls for a *v1alpha2.InstanceList —
+	// used by the /app/instances page (see handleInstances). Separate from
 	// items/err, which List uses for *v1alpha2.KontinuumList, so a single
 	// test can control each list kind independently.
-	machines   []v1alpha2.Instance
-	machineErr error
-	// machineGetErr backs Get calls for a *v1alpha2.Instance — used by the
-	// instance detail page (see handleMachineDetail). Separate from getErr,
+	instances   []v1alpha2.Instance
+	instanceErr error
+	// instanceGetErr backs Get calls for a *v1alpha2.Instance — used by the
+	// instance detail page (see handleInstanceDetail). Separate from getErr,
 	// which Get uses for *v1alpha2.Kontinuum.
-	machineGetErr error
+	instanceGetErr error
 	// talosClusters backs List calls for a *v1alpha2.TalosClusterList and
 	// Get calls for a *v1alpha2.TalosCluster — used by the clusters pages
 	// (see handleTalosClusters/handleTalosClusterDetail). talosClustersErr,
@@ -128,7 +128,7 @@ func (s stubKontinuumLister) Get(
 	case *corev1.Secret:
 		return s.getSecret(key, target)
 	case *v1alpha2.Instance:
-		return s.getMachine(key, target)
+		return s.getInstance(key, target)
 	case *v1alpha2.TalosCluster:
 		return s.getTalosCluster(key, target)
 	case *v1alpha2.Zone:
@@ -169,11 +169,11 @@ func (s stubKontinuumLister) List(_ context.Context, list client.ObjectList, _ .
 
 		target.Items = s.bindings
 	case *v1alpha2.InstanceList:
-		if s.machineErr != nil {
-			return s.machineErr
+		if s.instanceErr != nil {
+			return s.instanceErr
 		}
 
-		target.Items = s.machines
+		target.Items = s.instances
 	case *v1alpha2.TalosClusterList:
 		if s.talosClustersErr != nil {
 			return s.talosClustersErr
@@ -191,7 +191,7 @@ func (s stubKontinuumLister) Delete(_ context.Context, _ client.Object, _ ...cli
 
 // getSecret looks up the fixed s.secret field by name/namespace — factored
 // out of Get purely to keep that function's cyclomatic complexity down, same
-// as getMachine below.
+// as getInstance below.
 func (s stubKontinuumLister) getSecret(key client.ObjectKey, target *corev1.Secret) error {
 	if s.secretGetErr != nil {
 		return s.secretGetErr
@@ -206,14 +206,14 @@ func (s stubKontinuumLister) getSecret(key client.ObjectKey, target *corev1.Secr
 	return apierrors.NewNotFound(schema.GroupResource{Resource: secretsResource}, key.Name)
 }
 
-// getMachine looks up an Instance by name in s.machines — factored out of
+// getInstance looks up an Instance by name in s.instances — factored out of
 // Get purely to keep that function's cyclomatic complexity down.
-func (s stubKontinuumLister) getMachine(key client.ObjectKey, target *v1alpha2.Instance) error {
-	if s.machineGetErr != nil {
-		return s.machineGetErr
+func (s stubKontinuumLister) getInstance(key client.ObjectKey, target *v1alpha2.Instance) error {
+	if s.instanceGetErr != nil {
+		return s.instanceGetErr
 	}
 
-	for _, item := range s.machines {
+	for _, item := range s.instances {
 		if item.Name == key.Name {
 			*target = item
 
@@ -1742,7 +1742,7 @@ func TestHandleMachinesRendersInstances(t *testing.T) {
 	claimed.Labels = map[string]string{v1alpha2.LabelClaimedBy: "control-plane"}
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
-		return stubKontinuumLister{machines: []v1alpha2.Instance{
+		return stubKontinuumLister{instances: []v1alpha2.Instance{
 			claimed,
 			{ObjectMeta: metav1.ObjectMeta{Name: "node-b"}},
 		}}, nil
@@ -1826,7 +1826,7 @@ func TestHandleMachinesInvalidatesSessionOnForbidden(t *testing.T) {
 	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: "instances"}
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
-		return stubKontinuumLister{machineErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
+		return stubKontinuumLister{instanceErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
 	}
 
 	request := newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances")
@@ -1842,7 +1842,7 @@ func TestHandleMachineDetailRendersInstance(t *testing.T) {
 	claimed.Labels = map[string]string{v1alpha2.LabelClaimedBy: "control-plane"}
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
-		return stubKontinuumLister{machines: []v1alpha2.Instance{claimed}}, nil
+		return stubKontinuumLister{instances: []v1alpha2.Instance{claimed}}, nil
 	}
 
 	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
@@ -1923,7 +1923,7 @@ func TestHandleMachineDetailInvalidatesSessionOnForbidden(t *testing.T) {
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
 		return stubKontinuumLister{
-			machineGetErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden),
+			instanceGetErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden),
 		}, nil
 	}
 

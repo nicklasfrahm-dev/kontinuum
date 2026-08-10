@@ -13,7 +13,7 @@
 -->
 <div id="taloscluster-content" hx-get="/app/kontinuum.sh/namespaces/{{.Namespace}}/talosclusters/{{.Name}}" hx-trigger="every 15s"
      hx-vals="js:{reveal: (new URLSearchParams(location.search).get('reveal') === 'true')}"
-     hx-select="#taloscluster-content" hx-swap="outerHTML">
+     hx-select="#taloscluster-content" hx-swap="outerHTML" hx-disinherit="hx-select hx-swap">
     <a href="/app/kontinuum.sh/namespaces/{{.Namespace}}/talosclusters" class="inline-flex items-center gap-1.5 text-sm text-neutral-500 hover:text-white transition-colors mb-4">
         {{template "icon-chevron-left"}}
         Back to clusters
@@ -48,7 +48,7 @@
                 <dt class="text-sm text-neutral-500">Zone</dt>
                 <dd class="text-sm font-medium text-white">
                     {{if .HasZone}}
-                    <a href="/app/kontinuum.sh/namespaces/{{.Namespace}}/kontinuums" hx-boost="false" class="hover:text-accent hover:underline">{{.ZoneRegion}}/{{.ZoneName}}</a>
+                    <a href="/app/kontinuum.sh/namespaces/{{.Namespace}}/kontinuums" class="hover:text-accent hover:underline">{{.ZoneRegion}}/{{.ZoneName}}</a>
                     {{else}}
                     -
                     {{end}}
