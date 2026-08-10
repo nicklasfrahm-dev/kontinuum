@@ -21,6 +21,15 @@ const (
 	// once one of spec.interfaces has been successfully probed in
 	// maintenance mode.
 	DiscoveredConditionType = "Discovered"
+	// LiveConditionType tracks this Instance's liveness for as long as it's
+	// unclaimed — see issue #76. It mirrors DiscoveredConditionType exactly
+	// while unclaimed: both are set from the same probeCandidates pass, one
+	// candidate reachable in maintenance mode being the only liveness
+	// signal available pre-claim. Once claimed, this reconciler stops
+	// touching either condition (see Reconcile's own doc) and
+	// pkg/domain/taloscluster's MemberLiveConditionType takes over keeping
+	// Live fresh instead, dialing the node's real post-config identity.
+	LiveConditionType = "Live"
 
 	reasonDiscovered  = "Discovered"
 	reasonNoInterface = "NoInterfaces"
@@ -161,13 +170,19 @@ func (r *Reconciler) probeCandidates(ctx context.Context, inst *v1alpha2.Instanc
 	var lastErr error
 
 	for _, candidate := range inst.Spec.Interfaces {
-		talosVersion, interfaces, err := r.probe(ctx, candidate)
+		result, err := r.probe(ctx, candidate)
 		if err == nil {
-			fieldsChanged := inst.Status.Talos.Version != talosVersion ||
-				!reflect.DeepEqual(inst.Status.Interfaces, interfaces)
+			fieldsChanged := inst.Status.Talos.Version != result.TalosVersion ||
+				!reflect.DeepEqual(inst.Status.Interfaces, result.Interfaces) ||
+				!reflect.DeepEqual(inst.Status.Disks, result.Disks) ||
+				!reflect.DeepEqual(inst.Status.CPUs, result.CPUs) ||
+				!reflect.DeepEqual(inst.Status.Memory, result.Memory)
 
-			inst.Status.Talos.Version = talosVersion
-			inst.Status.Interfaces = interfaces
+			inst.Status.Talos.Version = result.TalosVersion
+			inst.Status.Interfaces = result.Interfaces
+			inst.Status.Disks = result.Disks
+			inst.Status.CPUs = result.CPUs
+			inst.Status.Memory = result.Memory
 
 			return r.setDiscovered(ctx, inst, metav1.ConditionTrue, fieldsChanged,
 				reasonDiscovered, "discovered via "+candidate)
@@ -186,16 +201,16 @@ func (r *Reconciler) probeCandidates(ctx context.Context, inst *v1alpha2.Instanc
 // probe bounds a single candidate's discovery call by DialTimeout — each
 // candidate gets its own budget, rather than sharing one across the whole
 // list, so one slow/unreachable candidate can't starve the rest.
-func (r *Reconciler) probe(ctx context.Context, addr string) (string, []v1alpha2.InstanceInterfaceStatus, error) {
+func (r *Reconciler) probe(ctx context.Context, addr string) (DiscoveryResult, error) {
 	dialCtx, cancel := context.WithTimeout(ctx, r.DialTimeout)
 	defer cancel()
 
-	talosVersion, interfaces, err := r.Discoverer.Discover(dialCtx, addr)
+	result, err := r.Discoverer.Discover(dialCtx, addr)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to discover %s: %w", addr, err)
+		return DiscoveryResult{}, fmt.Errorf("failed to discover %s: %w", addr, err)
 	}
 
-	return talosVersion, interfaces, nil
+	return result, nil
 }
 
 // setDiscovered records DiscoveredConditionType on inst and persists status,
@@ -204,22 +219,29 @@ func (r *Reconciler) probe(ctx context.Context, addr string) (string, []v1alpha2
 // status requeues after RetryInterval so a since-fixed (or since-failed)
 // candidate gets probed again soon; a true status requeues after the much
 // longer RecheckInterval instead, to confirm it's still there without
-// hammering it.
+// hammering it. LiveConditionType is set alongside DiscoveredConditionType,
+// same status/reason/message — see its own doc for why the two are
+// identical signals pre-claim.
 //
 // fieldsChanged is whether the caller already mutated inst.Status.Talos/
-// Interfaces before calling this (see probeCandidates' successful-probe
-// path) — SetStatusCondition's own return only knows about the condition
-// it just set, not those other fields, so a caller that changed them has
-// to say so itself.
+// Interfaces/Disks/CPUs/Memory before calling this (see probeCandidates'
+// successful-probe path) — SetStatusCondition's own return only knows
+// about the condition it just set, not those other fields, so a caller
+// that changed them has to say so itself.
 //
-// The Status().Update is skipped only when neither fieldsChanged nor
-// SetStatusCondition reports anything actually changed — this
+// The Status().Update is skipped only when none of fieldsChanged,
+// conditionChanged, or liveChanged say anything actually changed — this
 // controller's own Instance watch (see SetupWithManager's
 // For(&v1alpha2.Instance{}), which carries no predicate) re-triggers
 // Reconcile on every Update to an Instance, including its own
 // status-subresource writes; an unconditional write on every recheck
 // would self-trigger a reconcile storm the same way pkg/domain/zone's
-// identical persistStatus doc describes.
+// identical persistStatus doc describes. LastProbeTime is deliberately
+// left out of that decision: it's stamped on inst every call so it rides
+// along whenever a write happens for one of those other reasons, but
+// never forces a write by itself — a steady-state recheck that finds
+// nothing else different skips the write (and LastProbeTime along with
+// it) rather than re-triggering the same storm on every single recheck.
 func (r *Reconciler) setDiscovered(
 	ctx context.Context, inst *v1alpha2.Instance, status metav1.ConditionStatus, fieldsChanged bool,
 	reason, message string,
@@ -231,7 +253,16 @@ func (r *Reconciler) setDiscovered(
 		Message: message,
 	})
 
-	if fieldsChanged || conditionChanged {
+	liveChanged := meta.SetStatusCondition(&inst.Status.Conditions, metav1.Condition{
+		Type:    LiveConditionType,
+		Status:  status,
+		Reason:  reason,
+		Message: message,
+	})
+
+	inst.Status.LastProbeTime = metav1.Now()
+
+	if fieldsChanged || conditionChanged || liveChanged {
 		err := r.Client.Status().Update(ctx, inst)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to update instance %q status: %w", inst.Name, err)

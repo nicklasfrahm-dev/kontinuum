@@ -2741,6 +2741,15 @@ func discoveredInstance(name, talosVersion string) v1alpha2.Instance {
 			Interfaces: []v1alpha2.InstanceInterfaceStatus{
 				{Name: "eth0", MACAddress: "aa:bb:cc:dd:ee:ff", Addresses: []string{"10.0.0.5/24"}},
 			},
+			Disks: []v1alpha2.InstanceDiskStatus{
+				{DevPath: "/dev/sda", PrettySize: "512 GB", Model: "Samsung SSD", Transport: "nvme"},
+			},
+			CPUs: []v1alpha2.InstanceCPUStatus{
+				{ProductName: "AMD EPYC 7302P", CoreCount: 16, ThreadCount: 32, MaxSpeedMHz: 3000},
+			},
+			Memory: []v1alpha2.InstanceMemoryStatus{
+				{SizeMiB: 32768, Manufacturer: "Micron", Speed: 3200},
+			},
 			Conditions: []metav1.Condition{
 				{
 					Type: "Discovered", Status: metav1.ConditionTrue,
@@ -2928,7 +2937,7 @@ func TestHandleMachineDetailRendersInstance(t *testing.T) {
 	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
 
 	claimed := discoveredInstance("node-a", "v1.9.0")
-	claimed.Labels = map[string]string{v1alpha2.LabelClaimedBy: "control-plane"}
+	claimed.Labels = map[string]string{v1alpha2.LabelClaimedBy: "control-plane", "kontinuum.sh/zone": "zone-a"}
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
 		return stubKontinuumLister{instances: []v1alpha2.Instance{claimed}}, nil
@@ -2957,6 +2966,12 @@ func TestHandleMachineDetailRendersInstance(t *testing.T) {
 	assert.Contains(t, string(body), "10.0.0.5/24")
 	assert.Contains(t, string(body), "control-plane")
 	assert.Contains(t, string(body), "Discovered via 10.0.0.5")
+	assert.Contains(t, string(body), "kontinuum.sh/zone")
+	assert.Contains(t, string(body), "zone-a")
+	assert.Contains(t, string(body), "/dev/sda")
+	assert.Contains(t, string(body), "512 GB")
+	assert.Contains(t, string(body), "AMD EPYC 7302P")
+	assert.Contains(t, string(body), "32768 MiB")
 }
 
 // TestHandleMachineDetailRendersDeletingForInstanceWithDeletionTimestamp
@@ -3379,6 +3394,7 @@ func newTalosClusterKubeconfigMux(t *testing.T) *http.ServeMux {
 	}
 
 	cluster := talosClusterFixture(metav1.ConditionTrue)
+	cluster.Labels = map[string]string{"kontinuum.sh/region": "eu"}
 	zone := v1alpha2.Zone{
 		ObjectMeta: metav1.ObjectMeta{Name: "eu-eu-1a"},
 		Spec:       v1alpha2.ZoneSpec{Region: "eu", Zone: testZoneValue, Domain: "example.com"},
@@ -3433,6 +3449,8 @@ func TestHandleTalosClusterDetailRendersOverviewPoolsAndConditions(t *testing.T)
 	assert.Contains(t, string(body), "1/1", "the control-plane pool's ready/replicas count")
 	assert.Contains(t, string(body), "Pending", "the worker pool's InstancePool doesn't exist yet")
 	assert.Contains(t, string(body), "Cluster is ready", "the Ready condition's own message, capitalized")
+	assert.Contains(t, string(body), "kontinuum.sh/region")
+	assert.Contains(t, string(body), "eu")
 	assert.Contains(t, string(body),
 		`href="/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a/kubeconfig"`)
 	assert.NotContains(t, string(body), "apiVersion: v1\nkind: Config",

@@ -42,11 +42,33 @@ const (
 	// package has no per-worker health probe to honestly back it with (see
 	// reconcileWorkerPool's own doc).
 	MemberReadyConditionType = "Ready"
+	// MemberLiveConditionType is this package's own contribution to a
+	// member's Live condition (see api/v1alpha2.InstanceStatus's own doc)
+	// — the narrower gap issue #76 actually identified: control-plane
+	// members already get a continuous per-node health signal via
+	// MemberReadyConditionType above, but workers get none at all once
+	// joined. Set true the moment recordTalosVersions first dials a member
+	// with its real post-config identity (same proof-of-life Joined
+	// itself rests on), then kept fresh by recheckMemberLiveness's own
+	// periodic recheck for every member — control-plane and worker alike —
+	// once the cluster has converged, mirroring MemberReadyConditionType's
+	// own live-for-the-cluster's-lifetime shape but scoped to reachability
+	// rather than cluster health.
+	MemberLiveConditionType = "Live"
 
-	reasonMemberConfigured = "ConfigApplied"
-	reasonMemberJoined     = "Joined"
-	reasonMemberHealthy    = "Healthy"
-	reasonMemberUnhealthy  = "Unhealthy"
+	reasonMemberConfigured  = "ConfigApplied"
+	reasonMemberJoined      = "Joined"
+	reasonMemberHealthy     = "Healthy"
+	reasonMemberUnhealthy   = "Unhealthy"
+	reasonMemberLive        = "Live"
+	reasonMemberUnreachable = "Unreachable"
+
+	// messageMemberAnsweredVersion is MemberJoinedConditionType's and
+	// MemberLiveConditionType's shared success message — a successful
+	// Version RPC is simultaneously proof the member rejoined (Joined) and
+	// proof it's currently reachable (Live), so every place that records
+	// one on that basis records the other with the same message.
+	messageMemberAnsweredVersion = "node answered a Version RPC with its real, post-config Talos identity"
 )
 
 // setMemberCondition sets conditionType on member to status and persists
@@ -117,5 +139,30 @@ func clearMemberConditions(
 	err := kubeClient.Status().Update(ctx, member)
 	if err != nil {
 		logger.Warn("failed to clear stale member conditions", "instance", member.Name, "error", err)
+	}
+}
+
+// persistMemberProbe sets every one of conds on member, bumps
+// Status.LastProbeTime to probeTime, and unconditionally persists both —
+// unlike setMemberCondition's own skip-if-unchanged optimization (correct
+// for the one-shot Configured/Joined conditions it otherwise serves,
+// where an unchanged status really does mean nothing worth writing), a
+// probe's whole point is proving *when* it last ran (see
+// api/v1alpha2.InstanceStatus.LastProbeTime's own doc), which is a real
+// change on every single call here even when a condition's own status
+// doesn't flip.
+func persistMemberProbe(
+	ctx context.Context, kubeClient client.Client, logger *slog.Logger, member *v1alpha2.Instance,
+	probeTime metav1.Time, conds ...metav1.Condition,
+) {
+	for _, cond := range conds {
+		meta.SetStatusCondition(&member.Status.Conditions, cond)
+	}
+
+	member.Status.LastProbeTime = probeTime
+
+	err := kubeClient.Status().Update(ctx, member)
+	if err != nil {
+		logger.Warn("failed to persist member liveness probe", "instance", member.Name, "error", err)
 	}
 }
