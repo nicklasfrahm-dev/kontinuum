@@ -1,5 +1,5 @@
 {{define "content"}}
-<div id="registry-content" hx-get="/app/kontinuum.sh/namespaces/{{.Namespace}}/kontinuums" hx-trigger="every 15s" hx-select="#registry-content" hx-swap="outerHTML">
+<div id="registry-content" hx-get="/app/kontinuum.sh/namespaces/{{.Namespace}}/kontinuums" hx-trigger="every 15s" hx-select="#registry-content" hx-swap="outerHTML" hx-disinherit="hx-select hx-swap">
     <div class="mb-6 flex items-center justify-between gap-4">
         <div class="flex items-center gap-4">
             <div class="text-accent [&>svg]:h-10 [&>svg]:w-10">
@@ -41,7 +41,7 @@
                 {{range .Instances}}
                 <tr class="border-b border-neutral-800 last:border-b-0 hover:bg-neutral-800/50 transition-colors">
                     <td class="px-6 py-2 text-sm font-medium text-white">
-                        <a href="/app/kontinuum.sh/namespaces/{{.Namespace}}/kontinuums/{{.Name}}" hx-boost="false" class="hover:text-accent hover:underline">{{.Name}}</a>
+                        <a href="/app/kontinuum.sh/namespaces/{{.Namespace}}/kontinuums/{{.Name}}" class="hover:text-accent hover:underline">{{.Name}}</a>
                     </td>
                     <td class="px-6 py-2 text-sm text-neutral-400">{{.APIVersion}}</td>
                     <td class="px-6 py-2 text-sm text-neutral-400">{{if .Version}}{{.Version}}{{else}}-{{end}}</td>
