@@ -8,9 +8,11 @@ import (
 
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
 	talosconfig "github.com/siderolabs/talos/pkg/machinery/config"
+	"github.com/siderolabs/talos/pkg/machinery/config/container"
 	"github.com/siderolabs/talos/pkg/machinery/config/generate"
 	talossecrets "github.com/siderolabs/talos/pkg/machinery/config/generate/secrets"
 	"github.com/siderolabs/talos/pkg/machinery/config/machine"
+	"github.com/siderolabs/talos/pkg/machinery/config/types/network"
 	"github.com/siderolabs/talos/pkg/machinery/config/types/v1alpha1"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
 
@@ -66,12 +68,15 @@ func endpointFor(addr string) string {
 	return "https://" + net.JoinHostPort(addr, strconv.Itoa(kubernetesAPIPort))
 }
 
-// generateConfigs produces the control-plane and worker machine configs
-// (talosctl gen config's programmatic equivalent) for clusterName, signed
-// by bundle and targeting controlPlaneAddr's own address as both the
-// dial/apid endpoint and (via endpointFor) the cluster's Kubernetes API
-// endpoint, plus the admin Talosconfig used to dial the real
-// (non-maintenance-mode) cluster once bootstrapped.
+// generateConfigs builds the shared config generator input (talosctl gen
+// config's programmatic equivalent) for clusterName, signed by bundle and
+// targeting controlPlaneAddr's own address as both the dial/apid endpoint
+// and (via endpointFor) the cluster's Kubernetes API endpoint, plus the
+// admin Talosconfig used to dial the real (non-maintenance-mode) cluster
+// once bootstrapped. It does not itself produce per-node machine config
+// bytes — see configBytes, which every member needs its own call to
+// (passing its own hostname), rather than one shared config reused
+// verbatim across every member of a role.
 //
 // CNI is disabled (constants.NoneCNI) rather than left at Talos's own
 // flannel default: this controller installs Cilium itself (see the issue's
@@ -85,14 +90,14 @@ func endpointFor(addr string) string {
 // nowhere else for Cilium/CoreDNS/cert-manager to run.
 func generateConfigs(
 	bundle *talossecrets.Bundle, cluster *v1alpha2.TalosCluster, controlPlaneAddr string,
-) ([]byte, []byte, *clientconfig.Config, error) {
+) (*generate.Input, *clientconfig.Config, error) {
 	clusterName := cluster.Name
 
 	talosVersion, kubernetesVersion := resolveVersions(cluster)
 
 	contract, err := talosconfig.ParseContractFromVersion(talosVersion)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to parse talos version contract %q: %w", talosVersion, err)
+		return nil, nil, fmt.Errorf("failed to parse talos version contract %q: %w", talosVersion, err)
 	}
 
 	input, err := generate.NewInput(clusterName, endpointFor(controlPlaneAddr), kubernetesVersion,
@@ -103,31 +108,29 @@ func generateConfigs(
 		generate.WithAllowSchedulingOnControlPlanes(true),
 	)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to build config generator input for %q: %w", clusterName, err)
-	}
-
-	cpBytes, err := configBytes(input, machine.TypeControlPlane)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	workerBytes, err := configBytes(input, machine.TypeWorker)
-	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, fmt.Errorf("failed to build config generator input for %q: %w", clusterName, err)
 	}
 
 	talosCfg, err := input.Talosconfig()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to generate talosconfig for %q: %w", clusterName, err)
+		return nil, nil, fmt.Errorf("failed to generate talosconfig for %q: %w", clusterName, err)
 	}
 
-	return cpBytes, workerBytes, talosCfg, nil
+	return input, talosCfg, nil
 }
 
 // configBytes generates and encodes machineType's machine config from
-// input, with its install disk left to Talos's own auto-selection — see
-// applyAutoInstallDiskSelector's own doc.
-func configBytes(input *generate.Input, machineType machine.Type) ([]byte, error) {
+// input for one specific member, with its install disk left to Talos's own
+// auto-selection (see applyAutoInstallDiskSelector's own doc) and its
+// hostname set to hostname — the member's own Instance name — rather than
+// left to Talos's own DHCP/mDNS-derived default, so `kubectl get nodes` and
+// this Instance's own name agree on what to call it. The hostname is
+// carried as a separate HostnameConfig multi-document (bundled alongside
+// the main v1alpha1 config via container.New), not the legacy
+// machine.network.hostname field directly — Talos's newer versions phased
+// that field out in favor of this, and the two are mutually exclusive
+// (Talos's own config validation rejects setting both).
+func configBytes(input *generate.Input, machineType machine.Type, hostname string) ([]byte, error) {
 	provider, err := input.Config(machineType)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate %s config: %w", machineType, err)
@@ -135,7 +138,15 @@ func configBytes(input *generate.Input, machineType machine.Type) ([]byte, error
 
 	applyAutoInstallDiskSelector(provider)
 
-	data, err := provider.Bytes()
+	hostnameDoc := network.NewHostnameConfigV1Alpha1()
+	hostnameDoc.ConfigHostname = hostname
+
+	bundle, err := container.New(provider.RawV1Alpha1(), hostnameDoc)
+	if err != nil {
+		return nil, fmt.Errorf("failed to bundle %s hostname config: %w", machineType, err)
+	}
+
+	data, err := bundle.Bytes()
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode %s config: %w", machineType, err)
 	}

@@ -18,7 +18,9 @@ import (
 	"time"
 
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
+	"github.com/siderolabs/talos/pkg/machinery/config/generate"
 	talossecrets "github.com/siderolabs/talos/pkg/machinery/config/generate/secrets"
+	"github.com/siderolabs/talos/pkg/machinery/config/machine"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -224,25 +226,27 @@ func (r *Reconciler) reconcileControlPlane(
 
 	controlPlaneAddr := dialAddress(members[0])
 
-	cpBytes, _, talosCfg, err := generateConfigs(bundle, cluster, controlPlaneAddr)
+	input, talosCfg, err := generateConfigs(bundle, cluster, controlPlaneAddr)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to generate control plane config for %q: %w", cluster.Name, err)
 	}
 
-	controlPlaneNodes := r.applyControlPlaneConfig(ctx, cluster, members, cpBytes)
+	controlPlaneNodes := r.applyControlPlaneConfig(ctx, cluster, members, input)
 
 	return r.bootstrapAndCheckHealth(ctx, cluster, controlPlaneAddr, controlPlaneNodes, members, talosCfg)
 }
 
-// applyControlPlaneConfig best-effort applies cpBytes to every member —
-// see reconcileControlPlane's own doc for why a failure here is logged,
-// not fatal. Returns every member's dial address, for HealthCheck's
-// controlPlaneNodes argument. Mutates members in place (by index, not a
-// range copy) so a Configured member's bumped ResourceVersion is visible
-// to bootstrapAndCheckHealth's later recordTalosVersions call on the same
-// slice — updating from a stale copy there would otherwise conflict.
+// applyControlPlaneConfig best-effort generates (with hostname set to each
+// member's own Instance name — see configBytes' own doc) and applies a
+// machine config to every member — see reconcileControlPlane's own doc for
+// why a failure here is logged, not fatal. Returns every member's dial
+// address, for HealthCheck's controlPlaneNodes argument. Mutates members in
+// place (by index, not a range copy) so a Configured member's bumped
+// ResourceVersion is visible to bootstrapAndCheckHealth's later
+// recordTalosVersions call on the same slice — updating from a stale copy
+// there would otherwise conflict.
 func (r *Reconciler) applyControlPlaneConfig(
-	ctx context.Context, cluster *v1alpha2.TalosCluster, members []v1alpha2.Instance, cpBytes []byte,
+	ctx context.Context, cluster *v1alpha2.TalosCluster, members []v1alpha2.Instance, input *generate.Input,
 ) []string {
 	controlPlaneNodes := make([]string, 0, len(members))
 
@@ -251,7 +255,15 @@ func (r *Reconciler) applyControlPlaneConfig(
 		addr := dialAddress(*member)
 		controlPlaneNodes = append(controlPlaneNodes, addr)
 
-		err := r.Bootstrapper.ApplyConfiguration(ctx, addr, cpBytes)
+		cpBytes, err := configBytes(input, machine.TypeControlPlane, member.Name)
+		if err != nil {
+			r.Logger.Warn("failed to generate control plane configuration",
+				"cluster", cluster.Name, "instance", member.Name, "address", addr, "error", err)
+
+			continue
+		}
+
+		err = r.Bootstrapper.ApplyConfiguration(ctx, addr, cpBytes)
 		if err != nil {
 			r.Logger.Warn("failed to apply control plane configuration, node may already be past maintenance mode",
 				"cluster", cluster.Name, "address", addr, "error", err)
@@ -402,7 +414,7 @@ func (r *Reconciler) recheckControlPlaneHealth(
 
 	controlPlaneAddr := dialAddress(members[0])
 
-	_, _, talosCfg, err := generateConfigs(bundle, cluster, controlPlaneAddr)
+	_, talosCfg, err := generateConfigs(bundle, cluster, controlPlaneAddr)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to generate control plane config for %q: %w", cluster.Name, err)
 	}
@@ -511,16 +523,18 @@ func (r *Reconciler) reconcileWorkers(
 	controlPlaneAddr := dialAddress(controlPlaneMembers[0])
 
 	// Every worker pool shares the same cluster-wide talos/kubernetes
-	// version (see KubernetesSpec's own doc), so the machine config is
-	// generated once here and reused for every pool below, rather than
-	// per-pool as when versions could differ per worker.
-	_, workerBytes, talosCfg, err := generateConfigs(bundle, cluster, controlPlaneAddr)
+	// version (see KubernetesSpec's own doc), so the config generator input
+	// is built once here and reused for every pool below, rather than
+	// per-pool as when versions could differ per worker — each member still
+	// gets its own config bytes generated from it, though, since hostname
+	// (see configBytes' own doc) is per-member, not per-pool.
+	input, talosCfg, err := generateConfigs(bundle, cluster, controlPlaneAddr)
 	if err != nil {
 		return fmt.Errorf("failed to generate worker config for %q: %w", cluster.Name, err)
 	}
 
 	for _, worker := range cluster.Spec.Workers {
-		err := r.reconcileWorkerPool(ctx, cluster, worker, workerBytes, controlPlaneAddr, talosCfg)
+		err := r.reconcileWorkerPool(ctx, cluster, worker, input, controlPlaneAddr, talosCfg)
 		if err != nil {
 			return err
 		}
@@ -529,15 +543,16 @@ func (r *Reconciler) reconcileWorkers(
 	return nil
 }
 
-// reconcileWorkerPool applies workerBytes to every member claimed by
-// worker.PoolRef, then best-effort records their real Talos version — see
-// recordTalosVersions' own doc. A worker just joined by config-apply may
-// still be mid-reboot, so this frequently fails on its first attempt; that's
-// fine, it's retried on every future reconcile pass until Ready (see
-// Reconcile), same tolerance recordTalosVersions already documents for
-// control-plane members.
+// reconcileWorkerPool generates (with hostname set to each member's own
+// Instance name — see configBytes' own doc) and applies a machine config to
+// every member claimed by worker.PoolRef, then best-effort records their
+// real Talos version — see recordTalosVersions' own doc. A worker just
+// joined by config-apply may still be mid-reboot, so this frequently fails
+// on its first attempt; that's fine, it's retried on every future reconcile
+// pass until Ready (see Reconcile), same tolerance recordTalosVersions
+// already documents for control-plane members.
 func (r *Reconciler) reconcileWorkerPool(
-	ctx context.Context, cluster *v1alpha2.TalosCluster, worker v1alpha2.TalosClusterWorkerSpec, workerBytes []byte,
+	ctx context.Context, cluster *v1alpha2.TalosCluster, worker v1alpha2.TalosClusterWorkerSpec, input *generate.Input,
 	controlPlaneAddr string, talosCfg *clientconfig.Config,
 ) error {
 	members, err := resolveMembers(ctx, r.Client, cluster.Namespace, worker.PoolRef)
@@ -548,6 +563,15 @@ func (r *Reconciler) reconcileWorkerPool(
 	for i := range members {
 		member := &members[i]
 		addr := dialAddress(*member)
+
+		workerBytes, genErr := configBytes(input, machine.TypeWorker, member.Name)
+		if genErr != nil {
+			r.Logger.Warn("failed to generate worker configuration",
+				"cluster", cluster.Name, "pool", worker.PoolRef.Name, "instance", member.Name, "address", addr,
+				"error", genErr)
+
+			continue
+		}
 
 		applyErr := r.Bootstrapper.ApplyConfiguration(ctx, addr, workerBytes)
 		if applyErr != nil {
