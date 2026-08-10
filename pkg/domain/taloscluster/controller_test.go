@@ -649,6 +649,49 @@ func TestReconcileGeneratesInstallableConfigs(t *testing.T) {
 	}
 }
 
+// TestReconcileSetsHostnameToInstanceName covers configBytes' own hostname
+// contract: each member's applied config carries a hostname set to that
+// specific member's own Instance name, not left to Talos's own
+// DHCP/mDNS-derived default and not shared verbatim across every member of
+// a role — `kubectl get nodes` and this Instance's own name should agree on
+// what to call it.
+func TestReconcileSetsHostnameToInstanceName(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", controlPlaneInstanceAddress)
+	workerInstance := claimedDiscoveredInstance("worker-node-1", "worker-pool", "10.0.0.2")
+
+	fakeClient := newFakeClient(t, cluster, cpInstance, workerInstance)
+
+	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig")}
+	reconciler := newReconciler(fakeClient, bootstrapper)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName}}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	_, err = reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	require.Len(t, bootstrapper.appliedConfigs, 2, "one control-plane apply, one worker apply")
+
+	wantHostname := map[string]string{
+		controlPlaneInstanceAddress: cpInstance.Name,
+		"10.0.0.2":                  workerInstance.Name,
+	}
+
+	for index, data := range bootstrapper.appliedConfigs {
+		provider, err := configloader.NewFromBytes(data)
+		require.NoError(t, err, "applied config %d", index)
+
+		addr := bootstrapper.applyConfigCalls[index]
+		hostnameConfig := provider.NetworkHostnameConfig()
+		require.NotNil(t, hostnameConfig, "applied config %d (address %s)", index, addr)
+		assert.Equal(t, wantHostname[addr], hostnameConfig.Hostname(), "applied config %d (address %s)", index, addr)
+	}
+}
+
 // TestReconcileSetsMemberConditionsThroughBootstrapPipeline covers issue
 // #62: a claimed, Discovered Instance gets Configured set once its config
 // is applied, Joined once it answers a post-config Version RPC, and — for
