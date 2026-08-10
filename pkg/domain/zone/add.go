@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"strconv"
 
+	"github.com/davecgh/go-spew/spew"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -79,6 +83,39 @@ func addObjectName(opts AddOptions) string {
 	return opts.Region + "-" + opts.Zone
 }
 
+// instanceHash derives a short, deterministic suffix for the seed
+// Instance's name from its full spec, using the same algorithm a
+// Kubernetes Deployment uses to derive a ReplicaSet's own
+// pod-template-hash suffix from its pod template
+// (controller.ComputeHash, in k8s.io/kubernetes/pkg/controller). That
+// function itself isn't importable here without pulling in the whole
+// k8s.io/kubernetes module — a much heavier, independently-versioned
+// dependency this repo has no other reason to take — so this reimplements
+// its own two building blocks directly: DeepHashObject's spew.Fprintf-based
+// deep dump (go-spew is already an indirect dependency here via
+// client-go/apimachinery's own test helpers, and DeepHashObject's exact
+// spew.ConfigState — Indent " ", SortKeys/DisableMethods/SpewKeys true — is
+// public knowledge, reproduced below) hashed with FNV-1a-32 (hash/fnv, not
+// a cryptographic hash — collision-resistance against an adversary was
+// never the goal, just a short, stable, low-collision identity), then
+// encoded with k8s.io/apimachinery/pkg/util/rand.SafeEncodeString — the
+// exact same function ComputeHash itself calls, genuinely imported rather
+// than reimplemented, since it already lives in our existing apimachinery
+// dependency. Re-running zone-add with a spec that's since changed (e.g. a
+// different --talos-address) for the same region/zone then gets a new
+// Instance identity instead of colliding with, or silently leaving stale,
+// the old one.
+func instanceHash(spec v1alpha2.InstanceSpec) string {
+	spewConfig := spew.ConfigState{Indent: " ", SortKeys: true, DisableMethods: true, SpewKeys: true}
+
+	hasher := fnv.New32a()
+	// hash.Hash's Write (which Fprintf calls into) never returns an error,
+	// by that interface's own documented contract.
+	_, _ = spewConfig.Fprintf(hasher, "%#v", spec)
+
+	return rand.SafeEncodeString(strconv.FormatUint(uint64(hasher.Sum32()), 10))
+}
+
 // BuildAddObjects builds (without creating) the four hub-side objects
 // zone-add fans out to — see issue #29's architecture: Zone, the seed
 // Instance, a replicas:1 InstancePool selecting it, and a TalosCluster
@@ -87,9 +124,10 @@ func addObjectName(opts AddOptions) string {
 // controller find "its" TalosCluster by name alone (see controller.go's
 // mapTalosClusterToZone), and matches the naming convention Addon's own
 // resourceName already assumes (see pkg/domain/addon/resources.go). The
-// seed Instance gets its own name (suffixed -seed) since Instance is a
-// distinct Kind — no collision risk — but is labeled
-// v1alpha2.LabelRegion/LabelZone so the InstancePool's selector matches it.
+// seed Instance gets its own name, <region>-<zone>-<hash> (see
+// instanceHash), since Instance is a distinct Kind — no collision risk with
+// the other three — but is labeled v1alpha2.LabelRegion/LabelZone so the
+// InstancePool's selector matches it.
 // All four are namespaced into v1alpha2.DefaultSecretNamespace
 // ("kontinuum-system") — the admin-driven, system-managed namespace issue
 // #63's architecture reserves for zone-join's own objects, as opposed to a
@@ -105,11 +143,13 @@ func BuildAddObjects(
 		Spec:       v1alpha2.ZoneSpec{Region: opts.Region, Zone: opts.Zone, Domain: opts.Domain},
 	}
 
+	instanceSpec := v1alpha2.InstanceSpec{Interfaces: []string{opts.TalosAddress}}
+
 	instance := &v1alpha2.Instance{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: name + "-seed", Namespace: v1alpha2.DefaultSecretNamespace, Labels: labels,
+			Name: name + "-" + instanceHash(instanceSpec), Namespace: v1alpha2.DefaultSecretNamespace, Labels: labels,
 		},
-		Spec: v1alpha2.InstanceSpec{Interfaces: []string{opts.TalosAddress}},
+		Spec: instanceSpec,
 	}
 
 	pool := &v1alpha2.InstancePool{

@@ -1,6 +1,7 @@
 package zone_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -15,6 +16,22 @@ import (
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/zone"
 )
+
+// getSeedInstance finds Add's seed Instance by its region/zone labels
+// rather than a precomputed name — the name's hash suffix (see
+// zone.instanceHash) is an implementation detail tests shouldn't need to
+// reproduce.
+func getSeedInstance(t *testing.T, hubClient client.Client) v1alpha2.Instance {
+	t.Helper()
+
+	var list v1alpha2.InstanceList
+
+	require.NoError(t, hubClient.List(t.Context(), &list, client.InNamespace(v1alpha2.DefaultSecretNamespace),
+		client.MatchingLabels{v1alpha2.LabelRegion: testRegion, v1alpha2.LabelZone: testZone}))
+	require.Len(t, list.Items, 1)
+
+	return list.Items[0]
+}
 
 // fakeClientWithoutV1alpha2Scheme builds a client whose scheme can't
 // resolve any kontinuum.sh Kind — used to exercise Add's non-AlreadyExists
@@ -46,7 +63,13 @@ func TestBuildAddObjectsSharesNameAcrossZoneInstancePoolAndTalosCluster(t *testi
 	assert.Equal(t, testZoneName, zoneObj.Name)
 	assert.Equal(t, testZoneName, pool.Name)
 	assert.Equal(t, testZoneName, cluster.Name)
-	assert.Equal(t, testZoneName+"-seed", instance.Name)
+	assert.True(t, strings.HasPrefix(instance.Name, testZoneName+"-"),
+		"instance name %q should be prefixed with %q-", instance.Name, testZoneName)
+	// rand.SafeEncodeString encodes an FNV-32a sum's decimal digits 1:1, so
+	// the suffix is 1-10 chars (a uint32's max decimal width) drawn from its
+	// collision-safe alphabet (no vowels or visually-ambiguous characters).
+	hashSuffix := strings.TrimPrefix(instance.Name, testZoneName+"-")
+	assert.Regexp(t, `^[bcdfghjklmnpqrstvwxz2456789]{1,10}$`, hashSuffix)
 
 	assert.Equal(t, testRegion, zoneObj.Spec.Region)
 	assert.Equal(t, testZone, zoneObj.Spec.Zone)
@@ -64,6 +87,34 @@ func TestBuildAddObjectsSharesNameAcrossZoneInstancePoolAndTalosCluster(t *testi
 	assert.Empty(t, cluster.Spec.Kubernetes.Version)
 }
 
+// TestBuildAddObjectsInstanceNameHashesTalosAddress covers the seed
+// Instance's name deriving from opts.TalosAddress the way a Kubernetes
+// ReplicaSet derives a Pod's name suffix from its pod template hash: the
+// same address must hash to the same name every time (re-running zone-add
+// is idempotent, see Add's own doc), and a different address must hash to
+// a different name (rather than colliding with, or silently leaving stale,
+// the old Instance).
+func TestBuildAddObjectsInstanceNameHashesTalosAddress(t *testing.T) {
+	t.Parallel()
+
+	opts := testAddOptions()
+
+	firstZone, firstInstance, firstPool, firstCluster := zone.BuildAddObjects(opts)
+	secondZone, secondInstance, secondPool, secondCluster := zone.BuildAddObjects(opts)
+	assert.Equal(t, firstInstance.Name, secondInstance.Name)
+	assert.Equal(t, firstZone.Name, secondZone.Name)
+	assert.Equal(t, firstPool.Name, secondPool.Name)
+	assert.Equal(t, firstCluster.Name, secondCluster.Name)
+
+	opts.TalosAddress = "10.0.0.6"
+	thirdZone, thirdInstance, thirdPool, thirdCluster := zone.BuildAddObjects(opts)
+	assert.NotEqual(t, firstInstance.Name, thirdInstance.Name,
+		"a different --talos-address must get a new Instance identity")
+	assert.Equal(t, firstZone.Name, thirdZone.Name, "Zone/InstancePool/TalosCluster names don't depend on the spec hash")
+	assert.Equal(t, firstPool.Name, thirdPool.Name)
+	assert.Equal(t, firstCluster.Name, thirdCluster.Name)
+}
+
 func TestAddCreatesAllFourObjects(t *testing.T) {
 	t.Parallel()
 
@@ -74,13 +125,11 @@ func TestAddCreatesAllFourObjects(t *testing.T) {
 	assert.Equal(t, testZoneName, got.Name)
 
 	sharedKey := client.ObjectKey{Name: testZoneName, Namespace: v1alpha2.DefaultSecretNamespace}
-	seedKey := client.ObjectKey{Name: testZoneName + "-seed", Namespace: v1alpha2.DefaultSecretNamespace}
 
 	var z v1alpha2.Zone
-	assert.NoError(t, hubClient.Get(t.Context(), sharedKey, &z))
+	require.NoError(t, hubClient.Get(t.Context(), sharedKey, &z))
 
-	var instance v1alpha2.Instance
-	assert.NoError(t, hubClient.Get(t.Context(), seedKey, &instance))
+	getSeedInstance(t, hubClient)
 
 	var pool v1alpha2.InstancePool
 	assert.NoError(t, hubClient.Get(t.Context(), sharedKey, &pool))
@@ -105,10 +154,8 @@ func TestAddSetsOwnerReferencesFromZoneToDependents(t *testing.T) {
 	require.NoError(t, err)
 
 	sharedKey := client.ObjectKey{Name: testZoneName, Namespace: v1alpha2.DefaultSecretNamespace}
-	seedKey := client.ObjectKey{Name: testZoneName + "-seed", Namespace: v1alpha2.DefaultSecretNamespace}
 
-	var instance v1alpha2.Instance
-	require.NoError(t, hubClient.Get(t.Context(), seedKey, &instance))
+	instance := getSeedInstance(t, hubClient)
 	assertOwnedByZone(t, got, instance.OwnerReferences)
 
 	var pool v1alpha2.InstancePool
