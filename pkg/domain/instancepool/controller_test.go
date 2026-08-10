@@ -128,7 +128,14 @@ func TestReconcileReportsInsufficientCapacity(t *testing.T) {
 	assert.Equal(t, metav1.ConditionTrue, cond.Status)
 }
 
-func TestReconcileClaimingIgnoresDiscoveryState(t *testing.T) {
+// TestReconcileClaimingRequiresDiscovery covers the fix for a real
+// deadlock: claiming used to be optimistic (an undiscovered candidate was
+// still claimable, discovery expected to catch up after), but
+// instance.Reconciler stops touching an Instance entirely once claimed —
+// so an undiscovered claim left Discovered permanently unset, and
+// TalosCluster's control-plane readiness (gated on Discovered) never
+// recovered. An undiscovered candidate must now be left unclaimed instead.
+func TestReconcileClaimingRequiresDiscovery(t *testing.T) {
 	t.Parallel()
 
 	pool := &v1alpha2.InstancePool{
@@ -140,21 +147,69 @@ func TestReconcileClaimingIgnoresDiscoveryState(t *testing.T) {
 
 	reconciler := newReconciler(fakeClient)
 
-	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "pool-c"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, testRetryInterval, result.RequeueAfter, "an undiscovered candidate leaves the pool short of replicas")
+
+	var list v1alpha2.InstanceList
+
+	require.NoError(t, fakeClient.List(context.Background(), &list,
+		client.MatchingLabels{v1alpha2.LabelClaimedBy: "pool-c"}))
+	assert.Empty(t, list.Items, "an undiscovered candidate must not be claimed")
+
+	var got v1alpha2.InstancePool
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "pool-c"}, &got))
+	assert.Zero(t, got.Status.ReadyReplicas)
+
+	cond := findCondition(got.Status.Conditions, instancepool.InsufficientCapacityConditionType)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status, "no discovered candidates means insufficient capacity")
+}
+
+// TestReconcileClaimsOnceDiscovered covers the other half: a candidate left
+// unclaimed for being undiscovered becomes claimable the moment Discovered
+// flips true, with no other change needed.
+func TestReconcileClaimsOnceDiscovered(t *testing.T) {
+	t.Parallel()
+
+	pool := &v1alpha2.InstancePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-i"},
+		Spec:       v1alpha2.InstancePoolSpec{Selector: poolSelector(), Replicas: 1},
+	}
+
+	fakeClient := newFakeClient(t, pool, candidateInstance("node-a", false))
+	reconciler := newReconciler(fakeClient)
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "pool-i"},
 	})
 	require.NoError(t, err)
 
 	var list v1alpha2.InstanceList
 
 	require.NoError(t, fakeClient.List(context.Background(), &list,
-		client.MatchingLabels{v1alpha2.LabelClaimedBy: "pool-c"}))
-	assert.Len(t, list.Items, 1, "an undiscovered candidate is still claimable")
+		client.MatchingLabels{v1alpha2.LabelClaimedBy: "pool-i"}))
+	assert.Empty(t, list.Items, "not claimable before Discovered flips true")
 
-	var got v1alpha2.InstancePool
+	var got v1alpha2.Instance
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "pool-c"}, &got))
-	assert.Zero(t, got.Status.ReadyReplicas, "claimed-but-undiscovered doesn't count toward readyReplicas")
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "node-a"}, &got))
+	got.Status.Conditions = []metav1.Condition{
+		{Type: instance.DiscoveredConditionType, Status: metav1.ConditionTrue, Reason: "Discovered"},
+	}
+	require.NoError(t, fakeClient.Update(context.Background(), &got))
+
+	_, err = reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "pool-i"},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, fakeClient.List(context.Background(), &list,
+		client.MatchingLabels{v1alpha2.LabelClaimedBy: "pool-i"}))
+	assert.Len(t, list.Items, 1, "claimable once Discovered is true")
 }
 
 func TestReconcileReleasesExcessOnScaleDown(t *testing.T) {
