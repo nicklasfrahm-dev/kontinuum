@@ -117,16 +117,16 @@ type Reconciler struct {
 }
 
 // Reconcile implements reconcile.Reconciler. Once an Instance is claimed
-// (v1alpha2.LabelClaimedBy set — only ever true for one this reconciler has
-// already probed successfully, see instancepool.Reconciler's own claim
-// logic), it's never touched again: taloscluster's own member reconciler
-// takes over driving its real progress from there (Configured/Joined/Ready
-// — see issue #62's own follow-up), and maintenance-mode probing is by then
-// *expected* to fail permanently once the node's real config is applied and
-// it leaves maintenance mode — re-probing here would misread that expected
-// failure as the node going offline and incorrectly flip Discovered back to
-// false. Below that point — still unclaimed, whether or not Discovered yet
-// — probeCandidates/setDiscovered keep periodically re-verifying it: a bare
+// (v1alpha2.LabelClaimedBy set — instancepool.Reconciler's own claim only
+// ever selects an already-Discovered candidate, see its claim doc), it's
+// never touched again: taloscluster's own member reconciler takes over
+// driving its real progress from there (Configured/Joined/Ready — see issue
+// #62's own follow-up), and maintenance-mode probing is by then *expected*
+// to fail permanently once the node's real config is applied and it leaves
+// maintenance mode — re-probing here would misread that expected failure as
+// the node going offline and incorrectly flip Discovered back to false.
+// Below that point — still unclaimed, whether or not Discovered yet —
+// probeCandidates/setDiscovered keep periodically re-verifying it: a bare
 // node sitting in the discovery pool can be powered off or unplugged before
 // anything ever claims it, and without this, a stale Discovered=True would
 // stand forever and let instancepool.Reconciler claim a node that's no

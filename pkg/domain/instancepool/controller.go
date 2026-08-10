@@ -218,11 +218,20 @@ func (r *Reconciler) release(
 }
 
 // claim lists candidates matching pool.Spec.Selector, filters out anything
-// already claimed by any pool, and attempts to claim each — in name-sorted
-// order, for deterministic behavior — until either spec.replicas is met or
-// candidates are exhausted. A conflict claiming one candidate means another
-// pool won the race for it; that candidate is skipped, not retried, and
-// the next candidate is tried instead.
+// already claimed by any pool or not yet Discovered, and attempts to claim
+// each — in name-sorted order, for deterministic behavior — until either
+// spec.replicas is met or candidates are exhausted. A conflict claiming one
+// candidate means another pool won the race for it; that candidate is
+// skipped, not retried, and the next candidate is tried instead.
+//
+// The Discovered check is load-bearing, not an optimization: claiming used
+// to be optimistic (claim first, let discovery catch up), but
+// instance.Reconciler stops touching an Instance entirely once claimed (see
+// its own doc) — so claiming one before it was ever Discovered would leave
+// Discovered permanently unset, and resolveMembers/updateStatus, which both
+// gate on Discovered, would then never count it: TalosCluster's
+// control-plane readiness would deadlock forever. Requiring Discovered
+// here, before the claim, is what closes that race.
 func (r *Reconciler) claim(
 	ctx context.Context, pool *v1alpha2.InstancePool, claimed []v1alpha2.Instance,
 ) ([]v1alpha2.Instance, error) {
@@ -242,7 +251,10 @@ func (r *Reconciler) claim(
 	unclaimed := make([]v1alpha2.Instance, 0, len(candidates.Items))
 
 	for _, inst := range candidates.Items {
-		if _, alreadyClaimed := inst.Labels[v1alpha2.LabelClaimedBy]; !alreadyClaimed {
+		_, alreadyClaimed := inst.Labels[v1alpha2.LabelClaimedBy]
+		discovered := meta.IsStatusConditionTrue(inst.Status.Conditions, instance.DiscoveredConditionType)
+
+		if !alreadyClaimed && discovered {
 			unclaimed = append(unclaimed, inst)
 		}
 	}
