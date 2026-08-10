@@ -24,6 +24,8 @@ import (
 
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
 	"github.com/siderolabs/talos/pkg/machinery/nethelpers"
+	"github.com/siderolabs/talos/pkg/machinery/resources/block"
+	"github.com/siderolabs/talos/pkg/machinery/resources/hardware"
 	"github.com/siderolabs/talos/pkg/machinery/resources/network"
 
 	certutil "k8s.io/client-go/util/cert"
@@ -76,6 +78,35 @@ func seedNetworkState(t *testing.T, coreState state.CoreState) {
 	require.NoError(t, coreState.Create(ctx, addr))
 }
 
+// seedHardwareState populates coreState with one Disk, Processor, and
+// MemoryModule resource — the same COSI resources a real Talos node's
+// block/hardware controllers would publish — see instance's own
+// discoverDisks/discoverCPUs/discoverMemory doc for why these three
+// resource types are what gets read.
+func seedHardwareState(t *testing.T, coreState state.CoreState) {
+	t.Helper()
+
+	ctx := context.Background()
+
+	disk := block.NewDisk(block.NamespaceName, "sda")
+	disk.TypedSpec().DevPath = "/dev/sda"
+	disk.TypedSpec().SetSize(512_000_000_000)
+	disk.TypedSpec().Model = "Samsung SSD"
+	disk.TypedSpec().Transport = "nvme"
+	require.NoError(t, coreState.Create(ctx, disk))
+
+	cpu := hardware.NewProcessorInfo("cpu-0")
+	cpu.TypedSpec().ProductName = "AMD EPYC 7302P"
+	cpu.TypedSpec().CoreCount = 16
+	cpu.TypedSpec().ThreadCount = 32
+	require.NoError(t, coreState.Create(ctx, cpu))
+
+	mem := hardware.NewMemoryModuleInfo("dimm-0")
+	mem.TypedSpec().Size = 32768
+	mem.TypedSpec().Manufacturer = "Micron"
+	require.NoError(t, coreState.Create(ctx, mem))
+}
+
 // TestTalosDiscovererWireCompat dials a fake Talos maintenance-mode gRPC
 // server — MachineService.Version plus a real in-memory COSI state serving
 // network.LinkStatus/AddressStatus resources — with the real
@@ -103,6 +134,7 @@ func TestTalosDiscovererWireCompat(t *testing.T) {
 	inmemBuilder := inmem.NewStateWithOptions()
 	coreState := namespaced.NewState(func(ns resource.Namespace) state.CoreState { return inmemBuilder(ns) })
 	seedNetworkState(t, coreState)
+	seedHardwareState(t, coreState)
 
 	tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
 	grpcServer := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsConfig)))
@@ -124,11 +156,34 @@ func TestTalosDiscovererWireCompat(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	talosVersion, interfaces, err := discoverer.Discover(ctx, "127.0.0.1")
+	result, err := discoverer.Discover(ctx, "127.0.0.1")
 	require.NoError(t, err)
-	assert.Equal(t, talosVersionFixture, talosVersion)
-	require.Len(t, interfaces, 1)
-	assert.Equal(t, candidateInterface, interfaces[0].Name)
-	assert.Equal(t, "de:ad:be:ef:00:01", interfaces[0].MACAddress)
-	assert.Equal(t, []string{"192.168.1.10/24"}, interfaces[0].Addresses)
+	assertWireCompatResult(t, result)
+}
+
+// assertWireCompatResult asserts TestTalosDiscovererWireCompat's own
+// expectations against result — factored out purely to keep that test
+// under this repo's own funlen limit.
+func assertWireCompatResult(t *testing.T, result instance.DiscoveryResult) {
+	t.Helper()
+
+	assert.Equal(t, "v1.9.0", result.TalosVersion)
+	require.Len(t, result.Interfaces, 1)
+	assert.Equal(t, "eth0", result.Interfaces[0].Name)
+	assert.Equal(t, "de:ad:be:ef:00:01", result.Interfaces[0].MACAddress)
+	assert.Equal(t, []string{"192.168.1.10/24"}, result.Interfaces[0].Addresses)
+
+	require.Len(t, result.Disks, 1)
+	assert.Equal(t, "/dev/sda", result.Disks[0].DevPath)
+	assert.Equal(t, "Samsung SSD", result.Disks[0].Model)
+	assert.Equal(t, "nvme", result.Disks[0].Transport)
+
+	require.Len(t, result.CPUs, 1)
+	assert.Equal(t, "AMD EPYC 7302P", result.CPUs[0].ProductName)
+	assert.Equal(t, uint32(16), result.CPUs[0].CoreCount)
+	assert.Equal(t, uint32(32), result.CPUs[0].ThreadCount)
+
+	require.Len(t, result.Memory, 1)
+	assert.Equal(t, uint32(32768), result.Memory[0].SizeMiB)
+	assert.Equal(t, "Micron", result.Memory[0].Manufacturer)
 }

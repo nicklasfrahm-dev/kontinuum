@@ -1797,6 +1797,122 @@ type instanceConditionRow struct {
 	Age     string
 }
 
+// instanceDiskRow is one discovered disk, shown on the instance detail
+// page's own hardware section — see issue #76.
+type instanceDiskRow struct {
+	DevPath    string
+	PrettySize string
+	Model      string
+	Serial     string
+	Transport  string
+	Rotational bool
+}
+
+// instanceCPURow is one discovered processor socket, shown on the instance
+// detail page's own hardware section — see issue #76.
+type instanceCPURow struct {
+	Manufacturer string
+	ProductName  string
+	CoreCount    uint32
+	ThreadCount  uint32
+	MaxSpeedMHz  uint32
+}
+
+// instanceMemoryRow is one discovered memory module, shown on the instance
+// detail page's own hardware section — see issue #76.
+type instanceMemoryRow struct {
+	SizeMiB      uint32
+	Manufacturer string
+	Speed        uint32
+	Serial       string
+}
+
+// instanceInterfaceRowsFrom builds instanceDetailData's own Interfaces rows
+// — factored out purely to keep that function under this repo's own
+// funlen limit, same reason every other instance*RowsFrom helper below
+// exists.
+func instanceInterfaceRowsFrom(interfaces []v1alpha2.InstanceInterfaceStatus) []instanceInterfaceRow {
+	rows := make([]instanceInterfaceRow, 0, len(interfaces))
+	for _, iface := range interfaces {
+		rows = append(rows, instanceInterfaceRow{
+			Name:       iface.Name,
+			MACAddress: iface.MACAddress,
+			Addresses:  strings.Join(iface.Addresses, ", "),
+		})
+	}
+
+	return rows
+}
+
+// instanceConditionRowsFrom builds instanceDetailData's own Conditions rows
+// — see instanceInterfaceRowsFrom's own doc.
+func instanceConditionRowsFrom(conditions []metav1.Condition) []instanceConditionRow {
+	rows := make([]instanceConditionRow, 0, len(conditions))
+	for _, cond := range conditions {
+		rows = append(rows, instanceConditionRow{
+			Type:    cond.Type,
+			Status:  string(cond.Status),
+			OK:      cond.Status == metav1.ConditionTrue,
+			Reason:  cond.Reason,
+			Message: capitalizeFirst(cond.Message),
+			Age:     formatAge(cond.LastTransitionTime.Time),
+		})
+	}
+
+	return rows
+}
+
+// instanceDiskRowsFrom builds instanceDetailData's own Disks rows — see
+// instanceInterfaceRowsFrom's own doc.
+func instanceDiskRowsFrom(disks []v1alpha2.InstanceDiskStatus) []instanceDiskRow {
+	rows := make([]instanceDiskRow, 0, len(disks))
+	for _, disk := range disks {
+		rows = append(rows, instanceDiskRow{
+			DevPath:    disk.DevPath,
+			PrettySize: disk.PrettySize,
+			Model:      disk.Model,
+			Serial:     disk.Serial,
+			Transport:  disk.Transport,
+			Rotational: disk.Rotational,
+		})
+	}
+
+	return rows
+}
+
+// instanceCPURowsFrom builds instanceDetailData's own CPUs rows — see
+// instanceInterfaceRowsFrom's own doc.
+func instanceCPURowsFrom(cpus []v1alpha2.InstanceCPUStatus) []instanceCPURow {
+	rows := make([]instanceCPURow, 0, len(cpus))
+	for _, cpu := range cpus {
+		rows = append(rows, instanceCPURow{
+			Manufacturer: cpu.Manufacturer,
+			ProductName:  cpu.ProductName,
+			CoreCount:    cpu.CoreCount,
+			ThreadCount:  cpu.ThreadCount,
+			MaxSpeedMHz:  cpu.MaxSpeedMHz,
+		})
+	}
+
+	return rows
+}
+
+// instanceMemoryRowsFrom builds instanceDetailData's own Memory rows — see
+// instanceInterfaceRowsFrom's own doc.
+func instanceMemoryRowsFrom(modules []v1alpha2.InstanceMemoryStatus) []instanceMemoryRow {
+	rows := make([]instanceMemoryRow, 0, len(modules))
+	for _, module := range modules {
+		rows = append(rows, instanceMemoryRow{
+			SizeMiB:      module.SizeMiB,
+			Manufacturer: module.Manufacturer,
+			Speed:        module.Speed,
+			Serial:       module.Serial,
+		})
+	}
+
+	return rows
+}
+
 // handleInstanceDetail is GET
 // /app/kontinuum.sh/namespaces/{ns}/instances/{name}'s handler — it shows
 // one Instance CRD object's discovery result: Talos version, discovered
@@ -1847,28 +1963,11 @@ func (r *Router) handleInstanceDetail(writer http.ResponseWriter, request *http.
 // factored out purely to keep that function short, same as
 // kontinuumDetailData does for the Kontinuum detail page above.
 func instanceDetailData(item v1alpha2.Instance, version string, authEnabled bool) map[string]any {
-	interfaces := make([]instanceInterfaceRow, 0, len(item.Status.Interfaces))
-	for _, iface := range item.Status.Interfaces {
-		interfaces = append(interfaces, instanceInterfaceRow{
-			Name:       iface.Name,
-			MACAddress: iface.MACAddress,
-			Addresses:  strings.Join(iface.Addresses, ", "),
-		})
-	}
-
-	sortedConditions := sortConditionsNewestFirst(item.Status.Conditions)
-	conditions := make([]instanceConditionRow, 0, len(sortedConditions))
-
-	for _, cond := range sortedConditions {
-		conditions = append(conditions, instanceConditionRow{
-			Type:    cond.Type,
-			Status:  string(cond.Status),
-			OK:      cond.Status == metav1.ConditionTrue,
-			Reason:  cond.Reason,
-			Message: capitalizeFirst(cond.Message),
-			Age:     formatAge(cond.LastTransitionTime.Time),
-		})
-	}
+	interfaces := instanceInterfaceRowsFrom(item.Status.Interfaces)
+	conditions := instanceConditionRowsFrom(sortConditionsNewestFirst(item.Status.Conditions))
+	disks := instanceDiskRowsFrom(item.Status.Disks)
+	cpus := instanceCPURowsFrom(item.Status.CPUs)
+	memory := instanceMemoryRowsFrom(item.Status.Memory)
 
 	discoverySource := "Bare metal (spec.interfaces)"
 	if item.Spec.ProviderRef != nil {
@@ -1887,7 +1986,11 @@ func instanceDetailData(item v1alpha2.Instance, version string, authEnabled bool
 		"DiscoverySource":   discoverySource,
 		"Hostname":          item.Annotations[instancedomain.AnnotationHostname],
 		"ClaimedBy":         item.Labels[v1alpha2.LabelClaimedBy],
+		"Labels":            sortedLabels(item.Labels),
 		"Interfaces":        interfaces,
+		"Disks":             disks,
+		"CPUs":              cpus,
+		"Memory":            memory,
 		dataKeyConditions:   conditions,
 		dataKeyDeleting:     !item.DeletionTimestamp.IsZero(),
 	}
@@ -2285,6 +2388,7 @@ func talosClusterDetailData(
 		"ZoneObjectName":     zone.Name,
 		"ZoneRegion":         zone.Spec.Region,
 		"ZoneName":           zone.Spec.Zone,
+		"Labels":             sortedLabels(cluster.Labels),
 	}
 
 	if readyCond := conditionOfType(cluster.Status.Conditions, "Ready"); readyCond != nil {

@@ -487,7 +487,8 @@ func (r *Reconciler) bootstrapAndCheckHealth(
 }
 
 // recheckControlPlaneHealth keeps each control-plane member's
-// MemberReadyConditionType honest after the cluster has already converged
+// MemberReadyConditionType/MemberLiveConditionType and every worker's
+// MemberLiveConditionType honest after the cluster has already converged
 // once — without this, HealthCheck would only ever run while
 // ControlPlaneReadyConditionType was still false (see reconcileControlPlane
 // and bootstrapAndCheckHealth), then never again: nothing else in this
@@ -498,11 +499,15 @@ func (r *Reconciler) bootstrapAndCheckHealth(
 // ControlPlaneReadyConditionType itself back to false: doing so would
 // re-enter reconcileControlPlane, which reapplies (REBOOT-mode) config to
 // every control-plane member — exactly the wrong reaction to what might be
-// a single flaky probe. This is a read-only recheck of MemberReadyConditionType
-// only, returned via ctrl.Result.RequeueAfter — the same
-// no-event-will-tell-me-this-changed mechanism reconcileControlPlane's own
-// RetryInterval already relies on, just on a longer, steady-state cadence
-// (HealthCheckInterval) once there's nothing left to bootstrap.
+// a single flaky probe. This is a read-only recheck, returned via
+// ctrl.Result.RequeueAfter — the same no-event-will-tell-me-this-changed
+// mechanism reconcileControlPlane's own RetryInterval already relies on,
+// just on a longer, steady-state cadence (HealthCheckInterval) once
+// there's nothing left to bootstrap. Worker liveness (see issue #76) piggybacks
+// on this same cadence rather than getting its own timer: workers have no
+// cluster-wide health concept of their own to recheck, only reachability,
+// so there's no reason for that to run on a different schedule than the
+// control plane's own steady-state recheck.
 func (r *Reconciler) recheckControlPlaneHealth(
 	ctx context.Context, cluster *v1alpha2.TalosCluster, bundle *talossecrets.Bundle,
 ) (ctrl.Result, error) {
@@ -538,9 +543,20 @@ func (r *Reconciler) recheckControlPlaneHealth(
 		message = "periodic control plane health recheck failed: " + healthErr.Error()
 	}
 
+	probeTime := metav1.Now()
+
 	for i := range members {
-		setMemberCondition(ctx, r.Client, r.Logger, &members[i], MemberReadyConditionType, status, reason, message)
+		// A cluster-wide HealthCheck pass already proves this exact member
+		// reachable with its real post-config identity, same as
+		// recordTalosVersions' own rationale for setting Live — see
+		// MemberLiveConditionType's own doc.
+		persistMemberProbe(ctx, r.Client, r.Logger, &members[i], probeTime,
+			metav1.Condition{Type: MemberReadyConditionType, Status: status, Reason: reason, Message: message},
+			metav1.Condition{Type: MemberLiveConditionType, Status: status, Reason: reason, Message: message},
+		)
 	}
+
+	r.recheckWorkerLiveness(ctx, cluster, controlPlaneAddr, talosCfg)
 
 	if healthErr != nil {
 		// Same rationale as every other HealthCheck failure branch in this
@@ -552,6 +568,45 @@ func (r *Reconciler) recheckControlPlaneHealth(
 	}
 
 	return ctrl.Result{RequeueAfter: r.HealthCheckInterval}, nil
+}
+
+// recheckWorkerLiveness dials every worker pool's claimed, Discovered
+// members individually (there's no cluster-wide health check that covers
+// workers — see MemberReadyConditionType's own doc on why they don't get
+// that condition) and sets MemberLiveConditionType from whether each one
+// answers — the continuous per-worker liveness signal issue #76 identifies
+// as the real gap in this package's status model. Best-effort: a member
+// that fails to dial just flips Live false, logged, not fatal, same
+// tolerance every other per-member probe in this file already has.
+func (r *Reconciler) recheckWorkerLiveness(
+	ctx context.Context, cluster *v1alpha2.TalosCluster, controlPlaneAddr string, talosCfg *clientconfig.Config,
+) {
+	probeTime := metav1.Now()
+
+	for _, worker := range cluster.Spec.Workers {
+		members, err := resolveMembers(ctx, r.Client, cluster.Namespace, worker.PoolRef)
+		if err != nil {
+			r.Logger.Warn("failed to resolve worker pool members for liveness recheck",
+				"cluster", cluster.Name, "pool", worker.PoolRef.Name, "error", err)
+
+			continue
+		}
+
+		for i := range members {
+			member := &members[i]
+
+			status, reason, message := metav1.ConditionTrue, reasonMemberLive, messageMemberAnsweredVersion
+
+			_, versionErr := r.Bootstrapper.Version(ctx, controlPlaneAddr, dialAddress(*member), talosCfg)
+			if versionErr != nil {
+				status, reason = metav1.ConditionFalse, reasonMemberUnreachable
+				message = "periodic liveness recheck failed: " + versionErr.Error()
+			}
+
+			persistMemberProbe(ctx, r.Client, r.Logger, member, probeTime,
+				metav1.Condition{Type: MemberLiveConditionType, Status: status, Reason: reason, Message: message})
+		}
+	}
 }
 
 // reconcileAddons seeds cluster's two built-in addons (see
@@ -733,10 +788,20 @@ func (r *Reconciler) recordTalosVersions(
 		}
 
 		member.Status.Talos.Version = version
+		member.Status.LastProbeTime = metav1.Now()
 
 		meta.SetStatusCondition(&member.Status.Conditions, metav1.Condition{
 			Type: MemberJoinedConditionType, Status: metav1.ConditionTrue, Reason: reasonMemberJoined,
-			Message: "node answered a Version RPC with its real, post-config Talos identity",
+			Message: messageMemberAnsweredVersion,
+		})
+
+		// A successful Version RPC is itself proof of life — see
+		// MemberLiveConditionType's own doc for why this is set here
+		// unconditionally (not gated behind markReady the way
+		// MemberReadyConditionType below is).
+		meta.SetStatusCondition(&member.Status.Conditions, metav1.Condition{
+			Type: MemberLiveConditionType, Status: metav1.ConditionTrue, Reason: reasonMemberLive,
+			Message: messageMemberAnsweredVersion,
 		})
 
 		if markReady {

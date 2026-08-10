@@ -36,6 +36,7 @@ const (
 	nodeCName               = "node-c"
 	nodeFName               = "node-f"
 	nodeGName               = "node-g"
+	nodeHName               = "node-h"
 
 	candidateAddress1  = "10.0.0.1"
 	candidateAddress2  = "10.0.0.2"
@@ -57,6 +58,9 @@ var (
 type fakeResult struct {
 	talosVersion string
 	interfaces   []v1alpha2.InstanceInterfaceStatus
+	disks        []v1alpha2.InstanceDiskStatus
+	cpus         []v1alpha2.InstanceCPUStatus
+	memory       []v1alpha2.InstanceMemoryStatus
 	err          error
 }
 
@@ -69,17 +73,21 @@ type fakeDiscoverer struct {
 	calls   []string
 }
 
-func (f *fakeDiscoverer) Discover(
-	_ context.Context, addr string,
-) (string, []v1alpha2.InstanceInterfaceStatus, error) {
+func (f *fakeDiscoverer) Discover(_ context.Context, addr string) (instance.DiscoveryResult, error) {
 	f.calls = append(f.calls, addr)
 
 	res, ok := f.results[addr]
 	if !ok {
-		return "", nil, fmt.Errorf("%w: %s", errNoResultConfigured, addr)
+		return instance.DiscoveryResult{}, fmt.Errorf("%w: %s", errNoResultConfigured, addr)
 	}
 
-	return res.talosVersion, res.interfaces, res.err
+	return instance.DiscoveryResult{
+		TalosVersion: res.talosVersion,
+		Interfaces:   res.interfaces,
+		Disks:        res.disks,
+		CPUs:         res.cpus,
+		Memory:       res.memory,
+	}, res.err
 }
 
 // discoveredResult is the fakeResult a successfully-probed candidate
@@ -185,6 +193,44 @@ func TestReconcileDiscoversOnFirstCandidate(t *testing.T) {
 	assert.Equal(t, talosVersionFixture, got.Status.Talos.Version)
 	assert.Equal(t, []v1alpha2.InstanceInterfaceStatus{{Name: candidateInterface}}, got.Status.Interfaces)
 	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, instance.DiscoveredConditionType))
+	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, instance.LiveConditionType),
+		"Live mirrors Discovered pre-claim — see LiveConditionType's own doc")
+	assert.False(t, got.Status.LastProbeTime.IsZero(), "LastProbeTime is stamped on every probe, successful or not")
+}
+
+// TestReconcileDiscoversHardwareInventory covers issue #76: a successful
+// probe persists Disks/CPUs/Memory alongside Interfaces, straight through
+// from Discoverer's own DiscoveryResult.
+func TestReconcileDiscoversHardwareInventory(t *testing.T) {
+	t.Parallel()
+
+	obj := &v1alpha2.Instance{
+		ObjectMeta: metav1.ObjectMeta{Name: nodeHName},
+		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{"10.0.0.1"}},
+	}
+
+	disks := []v1alpha2.InstanceDiskStatus{{DevPath: "/dev/sda", PrettySize: "512 GB", Transport: "nvme"}}
+	cpus := []v1alpha2.InstanceCPUStatus{{ProductName: "AMD EPYC 7302P", CoreCount: 16, ThreadCount: 32}}
+	memory := []v1alpha2.InstanceMemoryStatus{{SizeMiB: 32768, Manufacturer: "Micron"}}
+
+	fakeClient := newFakeClient(t, obj)
+	discoverer := &fakeDiscoverer{results: map[string]fakeResult{
+		"10.0.0.1": {talosVersion: "v1.9.0", disks: disks, cpus: cpus, memory: memory},
+	}}
+
+	reconciler := newReconciler(fakeClient, discoverer)
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: nodeHName},
+	})
+	require.NoError(t, err)
+
+	var got v1alpha2.Instance
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: nodeHName}, &got))
+	assert.Equal(t, disks, got.Status.Disks)
+	assert.Equal(t, cpus, got.Status.CPUs)
+	assert.Equal(t, memory, got.Status.Memory)
 }
 
 func TestReconcileFallsBackToNextCandidate(t *testing.T) {
@@ -362,7 +408,12 @@ func TestReconcileSkipsRedundantStatusUpdate(t *testing.T) {
 					Type: instance.DiscoveredConditionType, Status: metav1.ConditionTrue,
 					Reason: reasonDiscoveredFixture, Message: "discovered via " + candidateAddress1,
 				},
+				{
+					Type: instance.LiveConditionType, Status: metav1.ConditionTrue,
+					Reason: reasonDiscoveredFixture, Message: "discovered via " + candidateAddress1,
+				},
 			},
+			LastProbeTime: metav1.Now(),
 		},
 	}
 
@@ -419,6 +470,8 @@ func TestReconcileFlipsDiscoveredFalseWhenUnclaimedNodeGoesOffline(t *testing.T)
 	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: nodeGName}, &got))
 	assert.False(t, meta.IsStatusConditionTrue(got.Status.Conditions, instance.DiscoveredConditionType),
 		"a node that stops answering must flip back to Discovered=False while still unclaimed")
+	assert.False(t, meta.IsStatusConditionTrue(got.Status.Conditions, instance.LiveConditionType),
+		"Live mirrors Discovered pre-claim, so it flips false right alongside it")
 }
 
 func TestReconcileIgnoresMissingInstance(t *testing.T) {

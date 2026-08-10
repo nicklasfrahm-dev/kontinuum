@@ -9,6 +9,8 @@ import (
 
 	"github.com/cosi-project/runtime/pkg/resource"
 	talosclient "github.com/siderolabs/talos/pkg/machinery/client"
+	"github.com/siderolabs/talos/pkg/machinery/resources/block"
+	"github.com/siderolabs/talos/pkg/machinery/resources/hardware"
 	"github.com/siderolabs/talos/pkg/machinery/resources/network"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
@@ -19,15 +21,31 @@ import (
 // dial target for a maintenance-mode address.
 const maintenanceModePort = 50000
 
+// DiscoveryResult is everything a successful Discover call learns about a
+// candidate node — see Discoverer's own doc.
+type DiscoveryResult struct {
+	// TalosVersion is the node's reported Talos version, best-effort — see
+	// Discover's own doc for why it's frequently left empty.
+	TalosVersion string
+	// Interfaces lists the node's discovered network interfaces.
+	Interfaces []v1alpha2.InstanceInterfaceStatus
+	// Disks lists the node's discovered disks — see issue #76.
+	Disks []v1alpha2.InstanceDiskStatus
+	// CPUs lists the node's discovered processor sockets — see issue #76.
+	CPUs []v1alpha2.InstanceCPUStatus
+	// Memory lists the node's discovered memory modules — see issue #76.
+	Memory []v1alpha2.InstanceMemoryStatus
+}
+
 // Discoverer probes a single candidate address for Talos maintenance-mode
 // discovery info. talosDiscoverer is the production implementation, dialing
 // a real node with github.com/siderolabs/talos/pkg/machinery/client; tests
 // inject a fake to avoid a real gRPC dial — see controller_test.go.
 type Discoverer interface {
 	// Discover connects to addr (host or IP, no port) in Talos maintenance
-	// mode and returns the node's Talos version and discovered network
-	// interfaces.
-	Discover(ctx context.Context, addr string) (string, []v1alpha2.InstanceInterfaceStatus, error)
+	// mode and returns everything learned about the node — see
+	// DiscoveryResult.
+	Discover(ctx context.Context, addr string) (DiscoveryResult, error)
 }
 
 // talosDiscoverer is Discoverer's production implementation.
@@ -47,9 +65,7 @@ func NewTalosDiscoverer() Discoverer {
 // a self-signed certificate with no CA yet issued — InsecureSkipVerify
 // mirrors talosctl's own dial behavior against a node in this state, not a
 // general relaxation of this codebase's TLS posture.
-func (talosDiscoverer) Discover(
-	ctx context.Context, addr string,
-) (string, []v1alpha2.InstanceInterfaceStatus, error) {
+func (talosDiscoverer) Discover(ctx context.Context, addr string) (DiscoveryResult, error) {
 	endpoint := net.JoinHostPort(addr, strconv.Itoa(maintenanceModePort))
 
 	talosClient, err := talosclient.New(ctx,
@@ -58,7 +74,7 @@ func (talosDiscoverer) Discover(
 		talosclient.WithEndpoints(endpoint),
 	)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to dial %s: %w", endpoint, err)
+		return DiscoveryResult{}, fmt.Errorf("failed to dial %s: %w", endpoint, err)
 	}
 	defer talosClient.Close() //nolint:errcheck // best-effort close of a short-lived discovery connection
 
@@ -82,10 +98,31 @@ func (talosDiscoverer) Discover(
 
 	interfaces, err := discoverInterfaces(ctx, talosClient)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to discover interfaces from %s: %w", endpoint, err)
+		return DiscoveryResult{}, fmt.Errorf("failed to discover interfaces from %s: %w", endpoint, err)
 	}
 
-	return talosVersion, interfaces, nil
+	disks, err := discoverDisks(ctx, talosClient)
+	if err != nil {
+		return DiscoveryResult{}, fmt.Errorf("failed to discover disks from %s: %w", endpoint, err)
+	}
+
+	cpus, err := discoverCPUs(ctx, talosClient)
+	if err != nil {
+		return DiscoveryResult{}, fmt.Errorf("failed to discover cpus from %s: %w", endpoint, err)
+	}
+
+	memory, err := discoverMemory(ctx, talosClient)
+	if err != nil {
+		return DiscoveryResult{}, fmt.Errorf("failed to discover memory from %s: %w", endpoint, err)
+	}
+
+	return DiscoveryResult{
+		TalosVersion: talosVersion,
+		Interfaces:   interfaces,
+		Disks:        disks,
+		CPUs:         cpus,
+		Memory:       memory,
+	}, nil
 }
 
 // discoverInterfaces reads talosClient's COSI network.LinkStatus/AddressStatus
@@ -140,4 +177,109 @@ func discoverInterfaces(
 	}
 
 	return interfaces, nil
+}
+
+// discoverDisks reads talosClient's COSI block.Disk resources — the same
+// resource `talosctl get disks` reads against a maintenance-mode node —
+// see issue #76.
+func discoverDisks(ctx context.Context, talosClient *talosclient.Client) ([]v1alpha2.InstanceDiskStatus, error) {
+	diskMetadata := resource.NewMetadata(block.NamespaceName, block.DiskType, "", resource.VersionUndefined)
+
+	disks, err := talosClient.COSI.List(ctx, diskMetadata)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list disk resources: %w", err)
+	}
+
+	result := make([]v1alpha2.InstanceDiskStatus, 0, len(disks.Items))
+
+	for _, item := range disks.Items {
+		disk, ok := item.(*block.Disk)
+		if !ok {
+			continue
+		}
+
+		spec := disk.TypedSpec()
+
+		result = append(result, v1alpha2.InstanceDiskStatus{
+			DevPath:    spec.DevPath,
+			Size:       spec.Size,
+			PrettySize: spec.PrettySize,
+			Model:      spec.Model,
+			Serial:     spec.Serial,
+			Transport:  spec.Transport,
+			Rotational: spec.Rotational,
+		})
+	}
+
+	return result, nil
+}
+
+// discoverCPUs reads talosClient's COSI hardware.Processor resources — the
+// same resource `talosctl get cpus` reads against a maintenance-mode node
+// — see issue #76.
+func discoverCPUs(ctx context.Context, talosClient *talosclient.Client) ([]v1alpha2.InstanceCPUStatus, error) {
+	cpuMetadata := resource.NewMetadata(hardware.NamespaceName, hardware.ProcessorType, "", resource.VersionUndefined)
+
+	cpus, err := talosClient.COSI.List(ctx, cpuMetadata)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list processor resources: %w", err)
+	}
+
+	result := make([]v1alpha2.InstanceCPUStatus, 0, len(cpus.Items))
+
+	for _, item := range cpus.Items {
+		processor, ok := item.(*hardware.Processor)
+		if !ok {
+			continue
+		}
+
+		spec := processor.TypedSpec()
+
+		result = append(result, v1alpha2.InstanceCPUStatus{
+			Manufacturer: spec.Manufacturer,
+			ProductName:  spec.ProductName,
+			CoreCount:    spec.CoreCount,
+			ThreadCount:  spec.ThreadCount,
+			MaxSpeedMHz:  spec.MaxSpeed,
+		})
+	}
+
+	return result, nil
+}
+
+// discoverMemory reads talosClient's COSI hardware.MemoryModule resources —
+// the same resource `talosctl get memorymodules` reads against a
+// maintenance-mode node — see issue #76. Empty modules (no DIMM installed
+// in that slot, Size 0) are skipped, mirroring `talosctl get memorymodules`'
+// own display, which reports every physical slot regardless of occupancy.
+func discoverMemory(ctx context.Context, talosClient *talosclient.Client) ([]v1alpha2.InstanceMemoryStatus, error) {
+	memMetadata := resource.NewMetadata(hardware.NamespaceName, hardware.MemoryModuleType, "", resource.VersionUndefined)
+
+	modules, err := talosClient.COSI.List(ctx, memMetadata)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list memory module resources: %w", err)
+	}
+
+	result := make([]v1alpha2.InstanceMemoryStatus, 0, len(modules.Items))
+
+	for _, item := range modules.Items {
+		module, ok := item.(*hardware.MemoryModule)
+		if !ok {
+			continue
+		}
+
+		spec := module.TypedSpec()
+		if spec.Size == 0 {
+			continue
+		}
+
+		result = append(result, v1alpha2.InstanceMemoryStatus{
+			SizeMiB:      spec.Size,
+			Manufacturer: spec.Manufacturer,
+			Speed:        spec.Speed,
+			Serial:       spec.SerialNumber,
+		})
+	}
+
+	return result, nil
 }
