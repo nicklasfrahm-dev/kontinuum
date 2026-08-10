@@ -34,9 +34,11 @@ Fans out a new zone's hub-side objects and, once its `TalosCluster` is bootstrap
 
 1. **Fan-out** (`kontinuum zone add`, `pkg/domain/zone`'s shared
    `BuildAddObjects`/`Add`) — creates four hub-side objects, all sharing
-   one name, `<region>-<zone>`, except the seed `Instance` (`-seed`
-   suffixed, since `Instance` is a distinct Kind with no naming collision
-   risk): a `Zone`, the seed `Instance` (`spec.interfaces` from
+   one name, `<region>-<zone>`, except the seed `Instance` (suffixed with a
+   short hash of `--talos-address`, the same way a Kubernetes ReplicaSet
+   hashes its pod template — re-running `zone add` with the same address is
+   idempotent, and a different address gets a new `Instance` identity
+   instead of colliding): a `Zone`, the seed `Instance` (`spec.interfaces` from
    `--talos-address`, labeled `kontinuum.sh/region`/`kontinuum.sh/zone`), a
    `replicas: 1` `InstancePool` selecting that `Instance` by those same
    labels, and a `TalosCluster` whose control plane references that pool.
