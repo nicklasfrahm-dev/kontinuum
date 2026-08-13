@@ -1,6 +1,6 @@
 site_name: Kontinuum
 site_description: A Kubernetes-style API server built on kommodity's libkapi
-site_url: https://nicklasfrahm-dev.github.io/kontinuum/
+site_url: https://docs.kontinuum.sh/
 repo_name: nicklasfrahm-dev/kontinuum
 repo_url: https://github.com/nicklasfrahm-dev/kontinuum
 edit_uri: edit/main/docs/
