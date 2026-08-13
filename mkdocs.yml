@@ -44,6 +44,7 @@ extra_css:
 nav:
   - Overview:
       - Welcome: index.md
+      - Vision & roadmap: vision.md
       - Architecture: architecture.md
   - Quickstart:
       - Running via Docker: running-via-docker.md
