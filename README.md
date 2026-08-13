@@ -1,6 +1,8 @@
 # kontinuum
 
-A Kubernetes-style API server built on [kommodity](https://github.com/kommodity-io/kommodity)'s `libkapi` package. It embeds a generic apiserver + apiextensions (CRD) server + aggregation layer, backed by pluggable storage (SQLite, PostgreSQL, etcd, ...).
+Kontinuum is a framework for building your own private (or public) cloud on hardware you control. One Kubernetes-style API discovers bare-metal machines, claims them into pools, and bootstraps Kubernetes clusters on top of them — and is growing to cover networking, virtualization, and managed databases as well. See the [vision & roadmap](https://nicklasfrahm-dev.github.io/kontinuum/vision/) for what's available today versus planned.
+
+Under the hood, kontinuum is a real Kubernetes-style API server, built on [kommodity](https://github.com/kommodity-io/kommodity)'s `libkapi` package, so you get `kubectl`, CRDs, and everything else that comes with speaking the Kubernetes API, backed by whatever storage you point it at (SQLite, PostgreSQL, etcd, ...).
 
 Full documentation: **[nicklasfrahm-dev.github.io/kontinuum](https://nicklasfrahm-dev.github.io/kontinuum/)**
 

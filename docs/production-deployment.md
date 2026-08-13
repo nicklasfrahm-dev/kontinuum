@@ -1,0 +1,3 @@
+# Production deployment
+
+Kontinuum ships with no TLS by default — the server itself only speaks plain HTTP. Before exposing it outside a trusted network, put a TLS-terminating proxy in front of it, the same way the [local dev environment](local-setup.md) does with Caddy; any reverse proxy, load balancer, or ingress that terminates TLS works just as well in production. Pair that with deliberate authentication: kontinuum refuses to start until you either set `KONTINUUM_OIDC_ISSUER_URL` to require OIDC-backed logins and API access, or explicitly opt into anonymous, always-allow access via `KONTINUUM_INSECURE_ALLOW_ANONYMOUS=true`. For anything beyond a trusted network or a local demo, that means OIDC — see [Authentication](authentication.md) for how to configure it.
