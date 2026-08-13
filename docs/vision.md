@@ -64,7 +64,7 @@ Managed data services for workloads running on kontinuum-provisioned clusters.
 | Capability | Status | Notes |
 | --- | --- | --- |
 | Managed PostgreSQL | 📋&nbsp;Planned | Not started. (Kontinuum itself can already use PostgreSQL as *its own* storage backend via `KONTINUUM_SERVER_STORAGE` — that's a deployment option for kontinuum, not a managed database offering for tenant workloads.) |
-| Managed MongoDB (via [FerretDB](https://www.ferretdb.com/)) | 📋&nbsp;Planned | Not started. |
+| Managed MongoDB (via [FerretDB](https://github.com/FerretDB/FerretDB)) | 📋&nbsp;Planned | Not started. |
 
 ## Contributing to the roadmap
 
