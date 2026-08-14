@@ -1,0 +1,98 @@
+{{/*
+    rolebinding-add-modal is the "Add role binding"/"Add cluster role
+    binding" dialog shared by iam_namespace_content.html and
+    iam_cluster_content.html — same native-<dialog> + swappable-body shape
+    as role_add_modal.html/zone_add_modal.html. .RoleBindingKind ("role
+    binding" or "cluster role binding") and .RoleBindingAddURL (set by
+    roleBindingAddFormData/clusterRoleBindingAddFormData in router.go) are
+    what make this one template work for both scopes.
+*/}}
+{{define "rolebinding-add-modal"}}
+<dialog id="rolebinding-add-modal" class="bg-neutral-900 border border-neutral-800 rounded-xl p-0 w-full max-w-lg text-neutral-100 backdrop:bg-black/60">
+    <div class="px-6 py-3 border-b border-neutral-800 flex items-center justify-between gap-2">
+        <h2 class="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+            <span class="text-accent [&>svg]:h-4 [&>svg]:w-4">{{template "icon-key"}}</span>
+            Add {{.RoleBindingKind}}
+        </h2>
+        <button type="button" onclick="this.closest('dialog').close()"
+                class="text-neutral-500 hover:text-white transition-colors text-lg leading-none" aria-label="Close">
+            &times;
+        </button>
+    </div>
+    <div id="rolebinding-add-modal-body" class="p-6">
+        {{template "rolebinding-add-modal-body" .}}
+    </div>
+</dialog>
+{{end}}
+
+{{/*
+    rolebinding-add-modal-body is the swappable part of the dialog above —
+    handleRoleBindingAdd/handleClusterRoleBindingAdd's POST response
+    replaces just #rolebinding-add-modal-body's innerHTML with this same
+    template (see Router.renderRoleBindingAddModalBody), so the modal never
+    navigates away from the page underneath.
+*/}}
+{{define "rolebinding-add-modal-body"}}
+{{if .CreatedBinding}}
+<div class="bg-accent/10 border border-accent/30 rounded-xl px-4 py-3 text-sm text-accent">
+    Created {{.RoleBindingKind}} <span class="font-medium">{{.CreatedBinding}}</span>.
+</div>
+{{else}}
+{{if .BindingError}}
+<div class="mb-4 bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 text-sm text-red-400">
+    {{.BindingError}}
+</div>
+{{end}}
+{{if not .RoleOptions}}
+<p class="text-sm text-neutral-500">
+    No roles exist yet in this scope — add one on the "Roles" tab first, then come back here to bind it to a subject.
+</p>
+{{else}}
+<form hx-post="{{.RoleBindingAddURL}}" hx-target="#rolebinding-add-modal-body" hx-swap="innerHTML" class="space-y-4">
+    <label class="block">
+        <span class="text-xs uppercase tracking-wider text-neutral-500">Name</span>
+        <input type="text" name="name" value="{{.BindingName}}" required placeholder="my-binding"
+               class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+    </label>
+    <label class="block">
+        <span class="text-xs uppercase tracking-wider text-neutral-500">Role</span>
+        <select name="role-ref" required
+                class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 focus:outline-none focus:border-accent">
+            <option value="" disabled {{if not .RoleRefName}}selected{{end}}>Select a role</option>
+            {{range .RoleOptions}}
+            <option value="{{.}}" {{if eq . $.RoleRefName}}selected{{end}}>{{.}}</option>
+            {{end}}
+        </select>
+    </label>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <label class="block">
+            <span class="text-xs uppercase tracking-wider text-neutral-500">Subject kind</span>
+            <select name="subject-kind"
+                    class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 focus:outline-none focus:border-accent">
+                <option value="Group" {{if eq .SubjectKind "Group"}}selected{{end}}>Group</option>
+                <option value="User" {{if eq .SubjectKind "User"}}selected{{end}}>User</option>
+                <option value="ServiceAccount" {{if eq .SubjectKind "ServiceAccount"}}selected{{end}}>ServiceAccount</option>
+            </select>
+        </label>
+        <label class="block">
+            <span class="text-xs uppercase tracking-wider text-neutral-500">Subject name</span>
+            <input type="text" name="subject-name" value="{{.SubjectName}}" required placeholder="team-platform"
+                   class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+        </label>
+    </div>
+    <label class="block">
+        <span class="text-xs uppercase tracking-wider text-neutral-500">Subject namespace</span>
+        <input type="text" name="subject-namespace" value="{{if .SubjectNamespace}}{{.SubjectNamespace}}{{else}}{{.Namespace}}{{end}}" placeholder="only used for a ServiceAccount subject"
+               class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+        <span class="mt-1 block text-xs text-neutral-600">Only required when subject kind is ServiceAccount.</span>
+    </label>
+    <div class="flex justify-end pt-2">
+        <button type="submit"
+                class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg bg-accent text-neutral-950 hover:bg-accent/90 transition-colors">
+            Add {{.RoleBindingKind}}
+        </button>
+    </div>
+</form>
+{{end}}
+{{end}}
+{{end}}

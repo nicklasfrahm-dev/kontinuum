@@ -1,0 +1,145 @@
+{{define "content"}}
+<div>
+    <div class="mb-6 flex items-center justify-between gap-4 flex-wrap">
+        <div class="flex items-center gap-4">
+            <div class="text-accent [&>svg]:h-10 [&>svg]:w-10">
+                {{template "icon-shield"}}
+            </div>
+            <div>
+                <h1 class="text-xl font-bold text-white">Cluster roles</h1>
+                <p class="mt-1 text-sm text-neutral-500">Cluster-scoped roles and role bindings for this kontinuum deployment.</p>
+            </div>
+        </div>
+        {{if .AuthEnabled}}
+        {{if eq .View "roles"}}
+        <button type="button" onclick="openRoleAddModal()"
+                class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium uppercase tracking-wider rounded-lg bg-accent text-neutral-950 hover:bg-accent/90 transition-colors">
+            {{template "icon-shield"}}
+            Add cluster role
+        </button>
+        {{else}}
+        <button type="button" onclick="openRoleBindingAddModal()"
+                class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium uppercase tracking-wider rounded-lg bg-accent text-neutral-950 hover:bg-accent/90 transition-colors">
+            {{template "icon-key"}}
+            Add cluster role binding
+        </button>
+        {{end}}
+        {{end}}
+    </div>
+
+    {{if not .AuthEnabled}}
+    <div class="bg-neutral-900 border border-neutral-800 rounded-xl px-6 py-4 flex items-start gap-3 text-neutral-500">
+        {{template "icon-info"}}
+        <p class="text-sm">
+            OIDC is not configured for this deployment, so kontinuum accepts unauthenticated requests — every
+            request has full access, and there are no roles or role bindings to show.
+        </p>
+    </div>
+    {{else}}
+
+    <div class="mb-4 inline-flex rounded-lg border border-neutral-800 bg-neutral-900 p-1 text-xs font-medium uppercase tracking-wider">
+        <a href="/app/iam/cluster/roles"
+           class="px-3 py-1.5 rounded-md transition-colors {{if eq .View "roles"}}bg-accent text-neutral-950{{else}}text-neutral-400 hover:text-white{{end}}">
+            Roles
+        </a>
+        <a href="/app/iam/cluster/rolebindings"
+           class="px-3 py-1.5 rounded-md transition-colors {{if eq .View "bindings"}}bg-accent text-neutral-950{{else}}text-neutral-400 hover:text-white{{end}}">
+            Role bindings
+        </a>
+    </div>
+
+    {{if eq .View "roles"}}
+    <div class="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+        <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
+            {{template "icon-shield"}}
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider">Cluster roles <span class="text-neutral-500">{{len .Roles}}</span></h2>
+        </div>
+        {{if .Roles}}
+        <div class="divide-y divide-neutral-800">
+            {{range .Roles}}
+            {{template "role-row" .}}
+            {{end}}
+        </div>
+        {{else}}
+        <p class="px-6 py-4 text-sm text-neutral-500">No cluster roles found.</p>
+        {{end}}
+    </div>
+    {{else}}
+    <div class="space-y-6">
+        <div class="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+            <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
+                {{template "icon-info"}}
+                <h2 class="text-sm font-bold text-white uppercase tracking-wider">Managed by OIDC admin group config</h2>
+            </div>
+            <p class="px-6 pt-3 text-xs text-neutral-600">
+                Reconciled from this deployment's own OIDC admin-group configuration — read-only here; edit that
+                configuration to change them.
+            </p>
+            {{$managedCount := 0}}
+            <dl class="divide-y divide-neutral-800 mt-3">
+                {{range .RoleBindings}}
+                {{if .Managed}}
+                {{$managedCount = 1}}
+                {{template "role-binding-row" .}}
+                {{end}}
+                {{end}}
+            </dl>
+            {{if not $managedCount}}
+            <p class="px-6 py-4 text-sm text-neutral-500">No admin groups are configured.</p>
+            {{end}}
+        </div>
+
+        <div class="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+            <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
+                {{template "icon-key"}}
+                <h2 class="text-sm font-bold text-white uppercase tracking-wider">Cluster role bindings</h2>
+            </div>
+            {{$otherCount := 0}}
+            <dl class="divide-y divide-neutral-800">
+                {{range .RoleBindings}}
+                {{if not .Managed}}
+                {{$otherCount = 1}}
+                {{template "role-binding-row" .}}
+                {{end}}
+                {{end}}
+            </dl>
+            {{if not $otherCount}}
+            <p class="px-6 py-4 text-sm text-neutral-500">No other cluster role bindings found.</p>
+            {{end}}
+        </div>
+    </div>
+    {{end}}
+    {{end}}
+
+    {{template "role-add-modal" .}}
+    {{template "rolebinding-add-modal" .}}
+</div>
+
+<script>
+    // See iam_namespace_content.html's own copy of this script for why.
+    var roleAddModalPristineHTML = document.getElementById('role-add-modal-body').innerHTML;
+    var rolebindingAddModalPristineHTML = document.getElementById('rolebinding-add-modal-body').innerHTML;
+
+    function openRoleAddModal() {
+        var body = document.getElementById('role-add-modal-body');
+        body.innerHTML = roleAddModalPristineHTML;
+        htmx.process(body);
+        document.getElementById('role-add-modal').showModal();
+    }
+
+    function openRoleBindingAddModal() {
+        var body = document.getElementById('rolebinding-add-modal-body');
+        body.innerHTML = rolebindingAddModalPristineHTML;
+        htmx.process(body);
+        document.getElementById('rolebinding-add-modal').showModal();
+    }
+
+    ['role-add-modal', 'rolebinding-add-modal'].forEach(function (id) {
+        document.getElementById(id).addEventListener('click', function (event) {
+            if (event.target === this) {
+                this.close();
+            }
+        });
+    });
+</script>
+{{end}}
