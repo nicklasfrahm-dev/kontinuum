@@ -1,0 +1,203 @@
+{{/*
+    role-add-modal is the "Add role"/"Add cluster role" dialog shared by
+    iam_namespace_content.html and iam_cluster_content.html — a native
+    <dialog>, opened via each page's own openRoleAddModal() and closed via
+    Escape, a backdrop click, or the header's close button, following
+    zone_add_modal.html's exact pattern. .RoleKind ("role" or "cluster
+    role") and .RoleAddURL (set by roleAddFormData/clusterRoleAddFormData in
+    router.go) are what make this one template work for both scopes.
+*/}}
+{{define "role-add-modal"}}
+<dialog id="role-add-modal" class="bg-neutral-900 border border-neutral-800 rounded-xl p-0 w-full max-w-2xl text-neutral-100 backdrop:bg-black/60">
+    <div class="px-6 py-3 border-b border-neutral-800 flex items-center justify-between gap-2">
+        <h2 class="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+            <span class="text-accent [&>svg]:h-4 [&>svg]:w-4">{{template "icon-shield"}}</span>
+            Add {{.RoleKind}}
+        </h2>
+        <button type="button" onclick="this.closest('dialog').close()"
+                class="text-neutral-500 hover:text-white transition-colors text-lg leading-none" aria-label="Close">
+            &times;
+        </button>
+    </div>
+    <div id="role-add-modal-body" class="p-6 max-h-[75vh] overflow-y-auto">
+        {{template "role-add-modal-body" .}}
+    </div>
+</dialog>
+
+{{/*
+    Rule-row add/remove is wired once here via event delegation on
+    document, rather than bound to the rows themselves — the rows
+    (#role-add-rules' children) get replaced wholesale on every htmx swap
+    of #role-add-modal-body (a failed submission redisplays the form) and
+    on every "reopen" reset (see openRoleAddModal in iam_namespace_content/
+    iam_cluster_content.html), so any listener bound directly to a row
+    would be gone with it. Delegating to document and looking elements up
+    fresh by ID on every click sidesteps needing to re-wire after either.
+*/}}
+<script>
+(function () {
+    document.addEventListener('click', function (event) {
+        var addButton = event.target.closest('[data-add-rule]');
+        if (addButton) {
+            var containerId = addButton.getAttribute('data-add-rule');
+            var container = document.getElementById(containerId);
+            var template = document.getElementById(containerId + '-template');
+            var index = container.children.length;
+            var html = template.innerHTML.split('__INDEX__').join(String(index));
+            var wrapper = document.createElement('div');
+            wrapper.innerHTML = html.trim();
+            container.appendChild(wrapper.firstElementChild);
+
+            return;
+        }
+
+        var removeButton = event.target.closest('[data-remove-rule]');
+        if (removeButton) {
+            removeButton.closest('[data-rule-row]').remove();
+        }
+    });
+})();
+</script>
+{{end}}
+
+{{/*
+    role-add-modal-body is the swappable part of the dialog above —
+    handleRoleAdd/handleClusterRoleAdd's POST response replaces just
+    #role-add-modal-body's innerHTML with this same template, executed
+    directly (see Router.renderRoleAddModalBody), so the modal never
+    navigates away from the page underneath.
+*/}}
+{{define "role-add-modal-body"}}
+{{if .CreatedRole}}
+<div class="bg-accent/10 border border-accent/30 rounded-xl px-4 py-3 text-sm text-accent">
+    Created {{.RoleKind}} <span class="font-medium">{{.CreatedRole}}</span>.
+</div>
+{{else}}
+{{if .RoleError}}
+<div class="mb-4 bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 text-sm text-red-400">
+    {{.RoleError}}
+</div>
+{{end}}
+<form hx-post="{{.RoleAddURL}}" hx-target="#role-add-modal-body" hx-swap="innerHTML" class="space-y-4">
+    <label class="block">
+        <span class="text-xs uppercase tracking-wider text-neutral-500">Name</span>
+        <input type="text" name="name" value="{{.RoleName}}" required placeholder="my-role"
+               class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+    </label>
+
+    <div>
+        <div class="flex items-center justify-between">
+            <span class="text-xs uppercase tracking-wider text-neutral-500">Rules</span>
+            <button type="button" data-add-rule="role-add-rules"
+                    class="text-xs font-medium text-accent hover:text-accent/80 transition-colors">
+                + Add rule
+            </button>
+        </div>
+        <div id="role-add-rules" class="mt-2 space-y-3">
+            {{if .Rules}}
+            {{range $i, $rule := .Rules}}
+            {{template "role-add-rule-row" dict "Index" $i "APIGroups" $rule.APIGroups "Resources" $rule.Resources "Verbs" $rule.Verbs}}
+            {{end}}
+            {{else}}
+            {{template "role-add-rule-row" dict "Index" 0 "APIGroups" "" "Resources" ""}}
+            {{end}}
+        </div>
+    </div>
+
+    <div class="flex justify-end pt-2">
+        <button type="submit"
+                class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg bg-accent text-neutral-950 hover:bg-accent/90 transition-colors">
+            Add {{.RoleKind}}
+        </button>
+    </div>
+</form>
+
+{{/*
+    Cloned client-side by role-add-modal's own script on every "+ Add
+    rule" click, with __INDEX__ replaced by the row's fresh index — see
+    that script's own doc.
+*/}}
+<template id="role-add-rules-template">
+    {{template "role-add-rule-row" dict "Index" "__INDEX__" "APIGroups" "" "Resources" ""}}
+</template>
+{{end}}
+{{end}}
+
+{{/*
+    role-add-rule-row renders one rbacv1.PolicyRule's editable form —
+    always three fields: comma-separated API groups (blank means the core
+    group), comma-separated resources, and a fixed set of verb checkboxes.
+    Index is either a real 0-based position (server-rendered rows) or the
+    literal string "__INDEX__" (the client-side clone template above),
+    substituted into every field name so the submitted "rules[N][field]"
+    keys line up with parseRuleFields in router.go.
+*/}}
+{{define "role-add-rule-row"}}
+<div class="bg-neutral-800/50 border border-neutral-700 rounded-lg p-3 space-y-2" data-rule-row>
+    <div class="flex items-start justify-between gap-2">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 flex-1">
+            <label class="block">
+                <span class="text-[10px] uppercase tracking-wider text-neutral-500">API groups</span>
+                <input type="text" name="rules[{{.Index}}][apiGroups]" value="{{.APIGroups}}" placeholder="blank = core"
+                       class="mt-1 w-full bg-neutral-900 border border-neutral-700 rounded-md px-2 py-1.5 text-xs text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+            </label>
+            <label class="block">
+                <span class="text-[10px] uppercase tracking-wider text-neutral-500">Resources</span>
+                <input type="text" name="rules[{{.Index}}][resources]" value="{{.Resources}}" required placeholder="pods, deployments"
+                       class="mt-1 w-full bg-neutral-900 border border-neutral-700 rounded-md px-2 py-1.5 text-xs text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+            </label>
+        </div>
+        <button type="button" data-remove-rule
+                class="text-neutral-500 hover:text-red-400 transition-colors text-sm leading-none mt-4" aria-label="Remove rule">
+            &times;
+        </button>
+    </div>
+    <div class="flex flex-wrap gap-x-3 gap-y-1">
+        <label class="inline-flex items-center gap-1 text-[11px] text-neutral-400">
+            <input type="checkbox" name="rules[{{.Index}}][verbs]" value="*" {{if hasVerb .Verbs "*"}}checked{{end}}
+                   class="rounded border-neutral-600 bg-neutral-900 text-accent focus:ring-accent focus:ring-offset-0">
+            * (all)
+        </label>
+        <label class="inline-flex items-center gap-1 text-[11px] text-neutral-400">
+            <input type="checkbox" name="rules[{{.Index}}][verbs]" value="get" {{if hasVerb .Verbs "get"}}checked{{end}}
+                   class="rounded border-neutral-600 bg-neutral-900 text-accent focus:ring-accent focus:ring-offset-0">
+            get
+        </label>
+        <label class="inline-flex items-center gap-1 text-[11px] text-neutral-400">
+            <input type="checkbox" name="rules[{{.Index}}][verbs]" value="list" {{if hasVerb .Verbs "list"}}checked{{end}}
+                   class="rounded border-neutral-600 bg-neutral-900 text-accent focus:ring-accent focus:ring-offset-0">
+            list
+        </label>
+        <label class="inline-flex items-center gap-1 text-[11px] text-neutral-400">
+            <input type="checkbox" name="rules[{{.Index}}][verbs]" value="watch" {{if hasVerb .Verbs "watch"}}checked{{end}}
+                   class="rounded border-neutral-600 bg-neutral-900 text-accent focus:ring-accent focus:ring-offset-0">
+            watch
+        </label>
+        <label class="inline-flex items-center gap-1 text-[11px] text-neutral-400">
+            <input type="checkbox" name="rules[{{.Index}}][verbs]" value="create" {{if hasVerb .Verbs "create"}}checked{{end}}
+                   class="rounded border-neutral-600 bg-neutral-900 text-accent focus:ring-accent focus:ring-offset-0">
+            create
+        </label>
+        <label class="inline-flex items-center gap-1 text-[11px] text-neutral-400">
+            <input type="checkbox" name="rules[{{.Index}}][verbs]" value="update" {{if hasVerb .Verbs "update"}}checked{{end}}
+                   class="rounded border-neutral-600 bg-neutral-900 text-accent focus:ring-accent focus:ring-offset-0">
+            update
+        </label>
+        <label class="inline-flex items-center gap-1 text-[11px] text-neutral-400">
+            <input type="checkbox" name="rules[{{.Index}}][verbs]" value="patch" {{if hasVerb .Verbs "patch"}}checked{{end}}
+                   class="rounded border-neutral-600 bg-neutral-900 text-accent focus:ring-accent focus:ring-offset-0">
+            patch
+        </label>
+        <label class="inline-flex items-center gap-1 text-[11px] text-neutral-400">
+            <input type="checkbox" name="rules[{{.Index}}][verbs]" value="delete" {{if hasVerb .Verbs "delete"}}checked{{end}}
+                   class="rounded border-neutral-600 bg-neutral-900 text-accent focus:ring-accent focus:ring-offset-0">
+            delete
+        </label>
+        <label class="inline-flex items-center gap-1 text-[11px] text-neutral-400">
+            <input type="checkbox" name="rules[{{.Index}}][verbs]" value="deletecollection" {{if hasVerb .Verbs "deletecollection"}}checked{{end}}
+                   class="rounded border-neutral-600 bg-neutral-900 text-accent focus:ring-accent focus:ring-offset-0">
+            deletecollection
+        </label>
+    </div>
+</div>
+{{end}}

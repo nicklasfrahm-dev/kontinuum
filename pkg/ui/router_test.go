@@ -172,6 +172,22 @@ type stubKontinuumLister struct {
 	// pools backs Get calls for a *v1alpha2.InstancePool — used by
 	// handleTalosClusterDetail's pool breakdown (see fetchPoolRow).
 	pools []v1alpha2.InstancePool
+	// roles/roleBindings/clusterRoles back List calls for the IAM roles
+	// pages (see handleIAMNamespaceRoles/handleIAMNamespaceRoleBindings/
+	// handleIAMClusterRoles). listErr, reused from the
+	// *rbacv1.ClusterRoleBindingList case above, is returned for any of
+	// these list kinds too — no test needs to distinguish between them.
+	roles        []rbacv1.Role
+	roleBindings []rbacv1.RoleBinding
+	clusterRoles []rbacv1.ClusterRole
+	// created, when non-nil, receives a copy of every object passed to
+	// Create — a pointer so appends survive stubKontinuumLister being
+	// copied by value on every kontinuumsFor(ctx) call (see the "add"
+	// handler tests, which pass in a *[]client.Object they inspect after
+	// the request completes). createErr, when set, is returned instead of
+	// recording anything.
+	created   *[]client.Object
+	createErr error
 }
 
 // Get looks up either a Kontinuum by name in items or, for a *corev1.Secret,
@@ -220,12 +236,6 @@ func (s stubKontinuumLister) List(_ context.Context, list client.ObjectList, _ .
 		}
 
 		target.Items = s.items
-	case *rbacv1.ClusterRoleBindingList:
-		if s.listErr != nil {
-			return s.listErr
-		}
-
-		target.Items = s.bindings
 	case *v1alpha2.InstanceList:
 		if s.instanceErr != nil {
 			return s.instanceErr
@@ -238,6 +248,8 @@ func (s stubKontinuumLister) List(_ context.Context, list client.ObjectList, _ .
 		}
 
 		target.Items = s.talosClusters
+	default:
+		return s.listRBAC(list)
 	}
 
 	return nil
@@ -245,6 +257,54 @@ func (s stubKontinuumLister) List(_ context.Context, list client.ObjectList, _ .
 
 func (s stubKontinuumLister) Delete(_ context.Context, _ client.Object, _ ...client.DeleteOption) error {
 	return s.deleteErr
+}
+
+// Create records obj into s.created (see that field's own doc) or returns
+// s.createErr.
+func (s stubKontinuumLister) Create(_ context.Context, obj client.Object, _ ...client.CreateOption) error {
+	if s.createErr != nil {
+		return s.createErr
+	}
+
+	if s.created != nil {
+		*s.created = append(*s.created, obj)
+	}
+
+	return nil
+}
+
+// listRBAC backs List's RBAC-related list kinds (ClusterRoleBindingList,
+// RoleList, RoleBindingList, ClusterRoleList) — split out of List purely to
+// keep that function's cyclomatic complexity down.
+func (s stubKontinuumLister) listRBAC(list client.ObjectList) error {
+	switch target := list.(type) {
+	case *rbacv1.ClusterRoleBindingList:
+		if s.listErr != nil {
+			return s.listErr
+		}
+
+		target.Items = s.bindings
+	case *rbacv1.RoleList:
+		if s.listErr != nil {
+			return s.listErr
+		}
+
+		target.Items = s.roles
+	case *rbacv1.RoleBindingList:
+		if s.listErr != nil {
+			return s.listErr
+		}
+
+		target.Items = s.roleBindings
+	case *rbacv1.ClusterRoleList:
+		if s.listErr != nil {
+			return s.listErr
+		}
+
+		target.Items = s.clusterRoles
+	}
+
+	return nil
 }
 
 // getSecret looks up the fixed s.secret field by name/namespace — factored
@@ -351,6 +411,19 @@ func newTestDeleteRequest(t *testing.T, target string) *http.Request {
 	t.Helper()
 
 	return httptest.NewRequestWithContext(context.Background(), http.MethodDelete, target, nil)
+}
+
+// newTestFormRequest builds a form-encoded POST request against target —
+// used by the IAM "add" handler tests below, which (unlike
+// newTestZoneAddRequest) need more than one fixed URL.
+func newTestFormRequest(t *testing.T, target string, form url.Values) *http.Request {
+	t.Helper()
+
+	request := httptest.NewRequestWithContext(
+		context.Background(), http.MethodPost, target, strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	return request
 }
 
 // TestHandleHomeRedirectsToDefaultTenantInstances covers GET /app/home
@@ -1304,7 +1377,8 @@ func TestHandleRegistryUsesForwardedProtoForKubeconfigOrigin(t *testing.T) {
 
 // adminGroupBinding builds a fixture rbacv1.ClusterRoleBinding shaped the
 // way pkg/domain/adminrbac's controller creates one — labeled as managed
-// and annotated with the OIDC group it grants — for handleIAM's tests.
+// and annotated with the OIDC group it grants — for the IAM cluster
+// bindings tests.
 func adminGroupBinding(name, group string) rbacv1.ClusterRoleBinding {
 	return rbacv1.ClusterRoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1313,10 +1387,29 @@ func adminGroupBinding(name, group string) rbacv1.ClusterRoleBinding {
 			Annotations: map[string]string{adminrbac.AdminGroupAnnotation: group},
 		},
 		RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: adminrbac.RoleName},
+		Subjects: []rbacv1.Subject{
+			{Kind: rbacv1.GroupKind, APIGroup: rbacv1.GroupName, Name: group},
+		},
 	}
 }
 
-func TestHandleIAMShowsAdminGroupBindings(t *testing.T) {
+func TestHandleIAMRedirectsToClusterRoleBindings(t *testing.T) {
+	t.Parallel()
+
+	mux := newRedirectTestMux(t)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/iam"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusFound, resp.StatusCode)
+	assert.Equal(t, "/app/iam/cluster/rolebindings", resp.Header.Get("Location"))
+}
+
+func TestHandleIAMNamespaceRolesShowsRoles(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -1327,20 +1420,23 @@ func TestHandleIAMShowsAdminGroupBindings(t *testing.T) {
 	cfg.OIDC.IssuerURL = testOIDCIssuerURL
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
-		return stubKontinuumLister{bindings: []rbacv1.ClusterRoleBinding{
-			adminGroupBinding("kontinuum-admin-aaaaaaaaaaaa", "platform-admins"),
-			adminGroupBinding("kontinuum-admin-bbbbbbbbbbbb", "sre"),
+		return stubKontinuumLister{roles: []rbacv1.Role{
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "pod-reader", Namespace: "demo"},
+				Rules: []rbacv1.PolicyRule{
+					{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get", "list"}},
+				},
+			},
 		}}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
-		cfg, true, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", cfg, true, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/iam"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/demo/iam/roles"))
 
 	resp := recorder.Result()
 
@@ -1349,22 +1445,58 @@ func TestHandleIAMShowsAdminGroupBindings(t *testing.T) {
 	require.NoError(t, resp.Body.Close())
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Contains(t, string(body), "Role bindings")
-	assert.Contains(t, string(body), "platform-admins")
-	assert.Contains(t, string(body), "sre")
-	assert.Contains(t, string(body), adminrbac.RoleName)
-	assert.Contains(t, string(body), "kontinuum-admin-aaaaaaaaaaaa")
-	assert.NotContains(t, string(body), "No admin groups are configured")
+	assert.Contains(t, string(body), "pod-reader")
+	assert.Contains(t, string(body), "pods")
 }
 
-func TestHandleIAMInvalidatesSessionOnForbidden(t *testing.T) {
+func TestHandleIAMNamespaceRoleBindingsShowsBindings(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
 		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
 	}
 
-	forbiddenReason := schema.GroupResource{Group: rbacv1.GroupName, Resource: "clusterrolebindings"}
+	cfg := config.Config{}
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{roleBindings: []rbacv1.RoleBinding{
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "pod-reader-binding", Namespace: "demo"},
+				Subjects:   []rbacv1.Subject{{Kind: rbacv1.GroupKind, Name: "sre"}},
+				RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: "pod-reader"},
+			},
+		}}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", cfg, true, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/demo/iam/rolebindings"))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), "pod-reader-binding")
+	assert.Contains(t, string(body), "Group: sre")
+	assert.Contains(t, string(body), "pod-reader")
+}
+
+func TestHandleIAMNamespaceInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	forbiddenReason := schema.GroupResource{Group: rbacv1.GroupName, Resource: "roles"}
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
 		return stubKontinuumLister{listErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
@@ -1381,14 +1513,13 @@ func TestHandleIAMInvalidatesSessionOnForbidden(t *testing.T) {
 	cfg := config.Config{}
 	cfg.OIDC.IssuerURL = testOIDCIssuerURL
 
-	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
-		cfg, true, invalidateSession)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", cfg, true, invalidateSession)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/iam"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/demo/iam/roles"))
 
 	resp := recorder.Result()
 
@@ -1398,7 +1529,7 @@ func TestHandleIAMInvalidatesSessionOnForbidden(t *testing.T) {
 	assert.NotEmpty(t, invalidatedWith)
 }
 
-func TestHandleIAMShowsNoticeWhenOIDCDisabled(t *testing.T) {
+func TestHandleIAMNamespaceShowsNoticeWhenOIDCDisabled(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -1409,14 +1540,13 @@ func TestHandleIAMShowsNoticeWhenOIDCDisabled(t *testing.T) {
 		return stubKontinuumLister{}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
-		config.Config{}, false, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/iam"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/demo/iam/roles"))
 
 	resp := recorder.Result()
 
@@ -1426,10 +1556,10 @@ func TestHandleIAMShowsNoticeWhenOIDCDisabled(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, string(body), "OIDC is not configured")
-	assert.NotContains(t, string(body), "Role bindings")
+	assert.NotContains(t, string(body), "No roles found")
 }
 
-func TestHandleIAMShowsNoBindingsMessageWhenNoneExist(t *testing.T) {
+func TestHandleIAMClusterRoleBindingsSeparatesManagedFromOther(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -1440,17 +1570,23 @@ func TestHandleIAMShowsNoBindingsMessageWhenNoneExist(t *testing.T) {
 	cfg.OIDC.IssuerURL = testOIDCIssuerURL
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
-		return stubKontinuumLister{}, nil
+		return stubKontinuumLister{bindings: []rbacv1.ClusterRoleBinding{
+			adminGroupBinding("kontinuum-admin-aaaaaaaaaaaa", "platform-admins"),
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "custom-binding"},
+				Subjects:   []rbacv1.Subject{{Kind: rbacv1.UserKind, APIGroup: rbacv1.GroupName, Name: "jane"}},
+				RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "custom-role"},
+			},
+		}}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
-		cfg, true, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", cfg, true, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/iam"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/iam/cluster/rolebindings"))
 
 	resp := recorder.Result()
 
@@ -1459,8 +1595,300 @@ func TestHandleIAMShowsNoBindingsMessageWhenNoneExist(t *testing.T) {
 	require.NoError(t, resp.Body.Close())
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Contains(t, string(body), "Role bindings")
-	assert.Contains(t, string(body), "No admin groups are configured")
+	assert.Contains(t, string(body), "Managed by OIDC admin group config")
+	assert.Contains(t, string(body), "platform-admins")
+	assert.Contains(t, string(body), "custom-binding")
+	assert.Contains(t, string(body), "jane")
+}
+
+func TestHandleRoleAddCreatesRoleAndReturnsSuccessFragment(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	var created []client.Object
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{created: &created}, nil
+	}
+
+	cfg := config.Config{}
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", cfg, true, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	form := url.Values{
+		"name":                {"pod-reader"},
+		"rules[0][apiGroups]": {""},
+		"rules[0][resources]": {"pods"},
+		"rules[0][verbs]":     {"get", "list"},
+	}
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestFormRequest(t,
+		"/app/kontinuum.sh/namespaces/demo/iam/roles", form))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), "Created role")
+	assert.Contains(t, string(body), "pod-reader")
+
+	require.Len(t, created, 1)
+
+	role, ok := created[0].(*rbacv1.Role)
+	require.True(t, ok)
+	assert.Equal(t, "pod-reader", role.Name)
+	assert.Equal(t, "demo", role.Namespace)
+	require.Len(t, role.Rules, 1)
+	assert.Equal(t, []string{""}, role.Rules[0].APIGroups)
+	assert.Equal(t, []string{"pods"}, role.Rules[0].Resources)
+	assert.ElementsMatch(t, []string{"get", "list"}, role.Rules[0].Verbs)
+}
+
+func TestHandleRoleAddRequiresName(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	var created []client.Object
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{created: &created}, nil
+	}
+
+	cfg := config.Config{}
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", cfg, true, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	form := url.Values{"rules[0][resources]": {"pods"}}
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestFormRequest(t,
+		"/app/kontinuum.sh/namespaces/demo/iam/roles", form))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), "Name is required")
+	assert.Empty(t, created)
+}
+
+func TestHandleClusterRoleAddCreatesClusterRole(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	var created []client.Object
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{created: &created}, nil
+	}
+
+	cfg := config.Config{}
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", cfg, true, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	form := url.Values{
+		"name":                {"custom-role"},
+		"rules[0][resources]": {"nodes"},
+		"rules[0][verbs]":     {"*"},
+	}
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestFormRequest(t, "/app/iam/cluster/roles", form))
+
+	resp := recorder.Result()
+
+	require.NoError(t, resp.Body.Close())
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	require.Len(t, created, 1)
+
+	clusterRole, ok := created[0].(*rbacv1.ClusterRole)
+	require.True(t, ok)
+	assert.Equal(t, "custom-role", clusterRole.Name)
+	assert.Empty(t, clusterRole.Namespace)
+	require.Len(t, clusterRole.Rules, 1)
+	assert.Equal(t, []string{"nodes"}, clusterRole.Rules[0].Resources)
+}
+
+func TestHandleRoleBindingAddCreatesRoleBinding(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	var created []client.Object
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{
+			created: &created,
+			roles:   []rbacv1.Role{{ObjectMeta: metav1.ObjectMeta{Name: "pod-reader", Namespace: "demo"}}},
+		}, nil
+	}
+
+	cfg := config.Config{}
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", cfg, true, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	form := url.Values{
+		"name":         {"pod-reader-binding"},
+		"subject-kind": {"Group"},
+		"subject-name": {"sre"},
+		"role-ref":     {"pod-reader"},
+	}
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestFormRequest(t,
+		"/app/kontinuum.sh/namespaces/demo/iam/rolebindings", form))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), "Created role binding")
+
+	require.Len(t, created, 1)
+
+	binding, ok := created[0].(*rbacv1.RoleBinding)
+	require.True(t, ok)
+	assert.Equal(t, "pod-reader-binding", binding.Name)
+	assert.Equal(t, "demo", binding.Namespace)
+	require.Len(t, binding.Subjects, 1)
+	assert.Equal(t, rbacv1.GroupKind, binding.Subjects[0].Kind)
+	assert.Equal(t, "sre", binding.Subjects[0].Name)
+	assert.Equal(t, "Role", binding.RoleRef.Kind)
+	assert.Equal(t, "pod-reader", binding.RoleRef.Name)
+}
+
+func TestHandleRoleBindingAddRequiresRoleRef(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	var created []client.Object
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{
+			created: &created,
+			roles:   []rbacv1.Role{{ObjectMeta: metav1.ObjectMeta{Name: "pod-reader", Namespace: "demo"}}},
+		}, nil
+	}
+
+	cfg := config.Config{}
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", cfg, true, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	form := url.Values{
+		"name":         {"pod-reader-binding"},
+		"subject-kind": {"Group"},
+		"subject-name": {"sre"},
+	}
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestFormRequest(t,
+		"/app/kontinuum.sh/namespaces/demo/iam/rolebindings", form))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), "A role is required")
+	assert.Empty(t, created)
+}
+
+func TestHandleClusterRoleBindingAddCreatesClusterRoleBinding(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	var created []client.Object
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{
+			created:      &created,
+			clusterRoles: []rbacv1.ClusterRole{{ObjectMeta: metav1.ObjectMeta{Name: "custom-role"}}},
+		}, nil
+	}
+
+	cfg := config.Config{}
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", cfg, true, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	form := url.Values{
+		"name":         {"custom-binding"},
+		"subject-kind": {"User"},
+		"subject-name": {"jane"},
+		"role-ref":     {"custom-role"},
+	}
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestFormRequest(t, "/app/iam/cluster/rolebindings", form))
+
+	resp := recorder.Result()
+
+	require.NoError(t, resp.Body.Close())
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	require.Len(t, created, 1)
+
+	binding, ok := created[0].(*rbacv1.ClusterRoleBinding)
+	require.True(t, ok)
+	assert.Equal(t, "custom-binding", binding.Name)
+	require.Len(t, binding.Subjects, 1)
+	assert.Equal(t, rbacv1.UserKind, binding.Subjects[0].Kind)
+	assert.Equal(t, "jane", binding.Subjects[0].Name)
+	assert.Equal(t, "ClusterRole", binding.RoleRef.Kind)
+	assert.Equal(t, "custom-role", binding.RoleRef.Name)
 }
 
 func TestRegisterRoutesDefaultsToUnconditionalAppRedirect(t *testing.T) {

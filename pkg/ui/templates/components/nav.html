@@ -24,8 +24,12 @@
            class="p-2 rounded-lg {{if eq .ActiveMenu "registry"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-registry"}}
         </a>
-        <a href="/app/iam"
-           class="p-2 rounded-lg {{if eq .ActiveMenu "iam"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
+        <a href="/app/kontinuum.sh/namespaces/{{.CurrentTenant}}/iam/roles"
+           class="p-2 rounded-lg {{if eq .ActiveMenu "iam-namespace"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
+            {{template "icon-key"}}
+        </a>
+        <a href="/app/iam/cluster/roles"
+           class="p-2 rounded-lg {{if eq .ActiveMenu "iam-cluster"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-shield"}}
         </a>
         <a href="/app/connect"
@@ -73,10 +77,15 @@
             {{template "icon-registry"}}
             Registry
         </a>
-        <a href="/app/iam"
-           class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "iam"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
+        <a href="/app/kontinuum.sh/namespaces/{{.CurrentTenant}}/iam/roles"
+           class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "iam-namespace"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
+            {{template "icon-key"}}
+            Namespace roles
+        </a>
+        <a href="/app/iam/cluster/roles"
+           class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "iam-cluster"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-shield"}}
-            IAM
+            Cluster roles
         </a>
         <a href="/app/connect"
            class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "connect"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
