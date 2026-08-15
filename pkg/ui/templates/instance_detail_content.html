@@ -51,7 +51,7 @@
 
     <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
         <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
-            {{template "icon-server"}}
+            {{template "icon-ethernet-port"}}
             <h2 class="text-sm font-bold text-white uppercase tracking-wider">Interfaces <span class="text-neutral-500">{{len .Interfaces}}</span></h2>
         </div>
         {{if .Interfaces}}
@@ -80,7 +80,7 @@
 
     <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
         <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
-            {{template "icon-info"}}
+            {{template "icon-list-checks"}}
             <h2 class="text-sm font-bold text-white uppercase tracking-wider">Conditions <span class="text-neutral-500">{{len .Conditions}}</span></h2>
         </div>
         {{if .Conditions}}
