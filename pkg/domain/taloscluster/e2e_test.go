@@ -227,7 +227,8 @@ func reconcileAddonsOnce(
 	}
 
 	for _, a := range addons.Items {
-		_, err := addonReconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: a.Name}})
+		_, err := addonReconciler.Reconcile(ctx,
+			ctrl.Request{NamespacedName: types.NamespacedName{Name: a.Name, Namespace: a.Namespace}})
 		if err != nil {
 			logger.Warn("addon reconcile error (may be transient while bootstrapping)", "addon", a.Name, "error", err)
 		}
@@ -243,7 +244,7 @@ func logAddonStatuses(ctx context.Context, logger *slog.Logger, fakeClient clien
 	for _, addonItem := range addons.Items {
 		var got v1alpha2.Addon
 
-		err := fakeClient.Get(ctx, types.NamespacedName{Name: addonItem.Name}, &got)
+		err := fakeClient.Get(ctx, types.NamespacedName{Name: addonItem.Name, Namespace: addonItem.Namespace}, &got)
 		if err != nil {
 			logger.Warn("progress: failed to refetch addon status", "addon", addonItem.Name, "error", err)
 

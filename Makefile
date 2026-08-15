@@ -85,6 +85,13 @@ image: ## Build the container image
 
 ##@ Quality
 
+.PHONY: verify
+# The full set AGENTS.md's own "Validating changes" section requires
+# before considering any task done — kept here as one target specifically
+# so that requirement is one command to run, not a list to remember (or
+# skip a line of under time pressure).
+verify: build vet lint test test-e2e tidy docs-lint ## Run every required verification (build, vet, lint, test, test-e2e, tidy, docs-lint)
+
 .PHONY: test
 test: generate ## Run tests
 	$(GOTEST) -v ./...
@@ -129,13 +136,42 @@ docs: ## Serve documentation locally with live-reload (http://127.0.0.1:8000)
 	@$(DOCSVENV)/bin/pip install --quiet -r docs/requirements.txt
 	$(DOCSVENV)/bin/mkdocs serve
 
+# LYCHEEVERSION/LYCHEEBIN mirror .github/workflows/ci.yml's own
+# lycheeverse/lychee-action pin — kept in sync by hand, since the action
+# has no machine-readable version file to derive this from.
+LYCHEEVERSION := v0.24.2
+LYCHEEOS := $(shell uname -s | tr '[:upper:]' '[:lower:]' | sed 's/darwin/apple-darwin/;s/linux/unknown-linux-gnu/')
+LYCHEEARCH := $(shell uname -m | sed 's/aarch64/aarch64/;s/arm64/aarch64/;s/x86_64/x86_64/')
+LYCHEEBIN := .venv/lychee-$(LYCHEEVERSION)/lychee
+
+$(LYCHEEBIN):
+	@printf '$(CYAN)Downloading lychee $(LYCHEEVERSION)...$(RESET)\n'
+	@mkdir -p $(dir $(LYCHEEBIN))
+	curl -sL https://github.com/lycheeverse/lychee/releases/download/lychee-$(LYCHEEVERSION)/lychee-$(LYCHEEARCH)-$(LYCHEEOS).tar.gz \
+		| tar -xz -C $(dir $(LYCHEEBIN)) --strip-components=1
+
+.PHONY: docs-lint
+# Mirrors .github/workflows/ci.yml's "Build docs" job exactly, including
+# the --remap that sends mkdocs' own https://docs.kontinuum.sh/... links
+# (site_url-derived — sitemap.xml, canonical tags) to this local build
+# instead of the live site, which would otherwise 404 on any PR that adds
+# a page not deployed yet — see that workflow step's own comment.
+docs-lint: $(LYCHEEBIN) ## Build docs strictly and check for broken links (mirrors CI's "Build docs" job)
+	@printf '$(CYAN)Installing documentation dependencies...$(RESET)\n'
+	@python3 -m venv $(DOCSVENV)
+	@$(DOCSVENV)/bin/pip install --quiet -r docs/requirements.txt
+	$(DOCSVENV)/bin/mkdocs build --strict
+	$(LYCHEEBIN) --no-progress --exclude-loopback --root-dir $(CURDIR)/site \
+		--remap "https://docs.kontinuum.sh file://$(CURDIR)/site" \
+		site
+
+.PHONY: docs-clean
+docs-clean: ## Remove the documentation virtualenv, cached lychee binary, and built site
+	rm -rf $(DOCSVENV) $(dir $(LYCHEEBIN)) site
+
 ##@ Cleanup
 
 .PHONY: clean
 clean: ## Remove build artifacts
 	rm -rf $(BINDIR) pkg/ui/assets/vendor
 	$(GOCMD) clean
-
-.PHONY: docs-clean
-docs-clean: ## Remove the documentation virtualenv and built site
-	rm -rf $(DOCSVENV) site

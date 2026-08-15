@@ -97,7 +97,7 @@ General
   help           Display this help
 
 Development
-  generate       Regenerate deepcopy methods and CRDs for api/... via controller-gen
+  generate       Regenerate deepcopy methods, CRDs, and vendored web assets
   build          Build the binary
   run            Run the server locally with dev-friendly logging (info, console)
   install        Build the binary and install it to ~/.local/bin
@@ -107,6 +107,7 @@ Development
   image          Build the container image
 
 Quality
+  verify         Run every required verification (build, vet, lint, test, test-e2e, tidy, docs-lint)
   test           Run tests
   test-e2e       Run gated end-to-end tests (requires Docker; boots real containers)
   vet            Run go vet
@@ -116,10 +117,11 @@ Quality
 
 Documentation
   docs           Serve documentation locally with live-reload (http://127.0.0.1:8000)
+  docs-lint      Build docs strictly and check for broken links (mirrors CI's "Build docs" job)
+  docs-clean     Remove the documentation virtualenv, cached lychee binary, and built site
 
 Cleanup
   clean          Remove build artifacts
-  docs-clean     Remove the documentation virtualenv and built site
 ```
 
 ## Container
