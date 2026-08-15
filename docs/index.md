@@ -5,9 +5,8 @@ Kontinuum is a framework for building your own private (or public) cloud on hard
 Under the hood, kontinuum is a real Kubernetes-style API server, built on [kommodity](https://github.com/kommodity-io/kommodity)'s `libkapi` package, so you get `kubectl`, CRDs, and everything else that comes with speaking the Kubernetes API, backed by whatever storage you point it at (SQLite, PostgreSQL, etcd, ...).
 
 <p align="center" markdown>
-  ![Login screen](screenshots/login.png){ width="32%" }
-  ![Topology view](screenshots/topology.png){ width="32%" }
-  ![Settings view](screenshots/settings.png){ width="32%" }
+  ![Login screen](screenshots/login.png){ width="45%" }
+  ![Topology view](screenshots/topology.png){ width="45%" }
 </p>
 
 ## Where to go next

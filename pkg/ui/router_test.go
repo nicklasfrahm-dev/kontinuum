@@ -35,7 +35,7 @@ var errFactory = errors.New("factory failed")
 // TestHandleRegistryInvalidatesSessionOnForbidden.
 var errTestForbidden = errors.New("forbidden: user is not in admin group")
 
-// Shared OIDC test fixture values, reused across handleSettings tests.
+// Shared OIDC test fixture values, reused across handleRegistryKubeconfigDownload tests.
 const (
 	testOIDCIssuerURL = "https://auth.example.com"
 	testOIDCClientID  = "kontinuum"
@@ -380,7 +380,7 @@ func TestRegisterRoutesUsesCustomAppRootAndProtect(t *testing.T) {
 	mux.ServeHTTP(httptest.NewRecorder(), newTestRequest(t, "/app/home"))
 	assert.Equal(t, 1, protectCalls)
 
-	mux.ServeHTTP(httptest.NewRecorder(), newTestRequest(t, "/app/settings"))
+	mux.ServeHTTP(httptest.NewRecorder(), newTestRequest(t, "/app/registry/kubeconfig"))
 	assert.Equal(t, 2, protectCalls)
 }
 
@@ -781,16 +781,16 @@ func TestHandleKontinuumDetailInvalidatesSessionOnForbiddenSecretGet(t *testing.
 		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-1"), kontinuumFactory)
 }
 
-// settingsKubeconfigBody issues GET /app/settings/kubeconfig through mux,
+// registryKubeconfigBody issues GET /app/registry/kubeconfig through mux,
 // optionally overriding Host and X-Forwarded-Proto to match whatever the
 // page-level request used (pass "" to leave either at its default). Since
-// settings_content.html no longer embeds the kubeconfig directly (see
-// handleSettingsKubeconfigDownload's own doc), tests that need to assert on
+// registry_content.html no longer embeds the kubeconfig directly (see
+// handleRegistryKubeconfigDownload's own doc), tests that need to assert on
 // its actual contents fetch it separately from the page itself.
-func settingsKubeconfigBody(t *testing.T, mux *http.ServeMux, host, forwardedProto string) string {
+func registryKubeconfigBody(t *testing.T, mux *http.ServeMux, host, forwardedProto string) string {
 	t.Helper()
 
-	request := newTestRequest(t, "/app/settings/kubeconfig")
+	request := newTestRequest(t, "/app/registry/kubeconfig")
 	if host != "" {
 		request.Host = host
 	}
@@ -814,7 +814,7 @@ func settingsKubeconfigBody(t *testing.T, mux *http.ServeMux, host, forwardedPro
 	return string(body)
 }
 
-func TestHandleSettingsShowsOIDCKubeconfigWhenAuthEnabled(t *testing.T) {
+func TestHandleRegistryShowsOIDCKubeconfigWhenAuthEnabled(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -836,7 +836,7 @@ func TestHandleSettingsShowsOIDCKubeconfigWhenAuthEnabled(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/settings"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"))
 
 	resp := recorder.Result()
 
@@ -847,11 +847,11 @@ func TestHandleSettingsShowsOIDCKubeconfigWhenAuthEnabled(t *testing.T) {
 	assert.Contains(t, string(body), "kubectl access")
 	assert.Contains(t, string(body), "KUBECONFIG")
 	assert.Contains(t, string(body), "kontinuum config import")
-	assert.Contains(t, string(body), `href="/app/settings/kubeconfig"`)
+	assert.Contains(t, string(body), `href="/app/registry/kubeconfig"`)
 	assert.NotContains(t, string(body), "server: http://example.com",
 		"the kubeconfig's own contents must never be rendered into the initial page")
 
-	kubeconfig := settingsKubeconfigBody(t, mux, "", "")
+	kubeconfig := registryKubeconfigBody(t, mux, "", "")
 	assert.Contains(t, kubeconfig, "server: http://example.com")
 	assert.NotContains(t, kubeconfig, "insecure-skip-tls-verify")
 	assert.Contains(t, kubeconfig, "name: kontinuum-example.com\n    cluster:")
@@ -866,7 +866,7 @@ func TestHandleSettingsShowsOIDCKubeconfigWhenAuthEnabled(t *testing.T) {
 	assert.Contains(t, kubeconfig, "--oidc-client-id="+testOIDCClientID)
 }
 
-func TestHandleSettingsShowsNoAuthKubeconfigWhenOIDCDisabled(t *testing.T) {
+func TestHandleRegistryShowsNoAuthKubeconfigWhenOIDCDisabled(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -884,7 +884,7 @@ func TestHandleSettingsShowsNoAuthKubeconfigWhenOIDCDisabled(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/settings"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"))
 
 	resp := recorder.Result()
 
@@ -897,10 +897,10 @@ func TestHandleSettingsShowsNoAuthKubeconfigWhenOIDCDisabled(t *testing.T) {
 	assert.Contains(t, string(body), "kubectl access")
 	assert.Contains(t, string(body), "No authentication is required")
 	assert.Contains(t, string(body), "kontinuum config import")
-	assert.Contains(t, string(body), `href="/app/settings/kubeconfig"`)
+	assert.Contains(t, string(body), `href="/app/registry/kubeconfig"`)
 	assert.Contains(t, string(body), "KUBECONFIG")
 
-	kubeconfig := settingsKubeconfigBody(t, mux, "", "")
+	kubeconfig := registryKubeconfigBody(t, mux, "", "")
 	assert.Contains(t, kubeconfig, "server: http://example.com")
 	assert.Contains(t, kubeconfig, "name: kontinuum-example.com\n    cluster:")
 	assert.Contains(t, kubeconfig, "cluster: kontinuum-example.com")
@@ -909,7 +909,7 @@ func TestHandleSettingsShowsNoAuthKubeconfigWhenOIDCDisabled(t *testing.T) {
 	assert.NotContains(t, kubeconfig, "users:")
 }
 
-func TestHandleSettingsStripsPortFromKubeconfigClusterName(t *testing.T) {
+func TestHandleRegistryStripsPortFromKubeconfigClusterName(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -930,7 +930,7 @@ func TestHandleSettingsStripsPortFromKubeconfigClusterName(t *testing.T) {
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
 
-	kubeconfig := settingsKubeconfigBody(t, mux, "example.com:8443", "")
+	kubeconfig := registryKubeconfigBody(t, mux, "example.com:8443", "")
 	assert.Contains(t, kubeconfig, "server: http://example.com:8443")
 	assert.Contains(t, kubeconfig, "name: kontinuum-example.com\n    cluster:")
 	assert.Contains(t, kubeconfig, "cluster: kontinuum-example.com")
@@ -940,7 +940,7 @@ func TestHandleSettingsStripsPortFromKubeconfigClusterName(t *testing.T) {
 	assert.NotContains(t, kubeconfig, "oidc@example.com:8443")
 }
 
-func TestHandleSettingsSetsInsecureSkipTLSVerifyForLocalHostsOverHTTPS(t *testing.T) {
+func TestHandleRegistrySetsInsecureSkipTLSVerifyForLocalHostsOverHTTPS(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -964,12 +964,12 @@ func TestHandleSettingsSetsInsecureSkipTLSVerifyForLocalHostsOverHTTPS(t *testin
 
 		// A TLS-terminating reverse proxy is what would actually front a
 		// local deployment reached over https — see requestOrigin.
-		kubeconfig := settingsKubeconfigBody(t, mux, host, "https")
+		kubeconfig := registryKubeconfigBody(t, mux, host, "https")
 		assert.Contains(t, kubeconfig, "insecure-skip-tls-verify: true", "host %q", host)
 	}
 }
 
-func TestHandleSettingsOmitsInsecureSkipTLSVerifyForPlainHTTP(t *testing.T) {
+func TestHandleRegistryOmitsInsecureSkipTLSVerifyForPlainHTTP(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -994,12 +994,12 @@ func TestHandleSettingsOmitsInsecureSkipTLSVerifyForPlainHTTP(t *testing.T) {
 		mux := http.NewServeMux()
 		router.RegisterRoutes(mux, nil, nil)
 
-		kubeconfig := settingsKubeconfigBody(t, mux, host, "")
+		kubeconfig := registryKubeconfigBody(t, mux, host, "")
 		assert.NotContains(t, kubeconfig, "insecure-skip-tls-verify", "host %q", host)
 	}
 }
 
-func TestHandleSettingsUsesForwardedProtoForKubeconfigOrigin(t *testing.T) {
+func TestHandleRegistryUsesForwardedProtoForKubeconfigOrigin(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -1020,7 +1020,7 @@ func TestHandleSettingsUsesForwardedProtoForKubeconfigOrigin(t *testing.T) {
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
 
-	kubeconfig := settingsKubeconfigBody(t, mux, "", "https")
+	kubeconfig := registryKubeconfigBody(t, mux, "", "https")
 	assert.Contains(t, kubeconfig, "server: https://example.com")
 	assert.Contains(t, kubeconfig, "name: oidc@kontinuum-example.com")
 	assert.NotContains(t, kubeconfig, "insecure-skip-tls-verify")

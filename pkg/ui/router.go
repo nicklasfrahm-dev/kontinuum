@@ -101,7 +101,6 @@ const (
 	pageTalosClusters  = "talosclusters"
 	pageTalosCluster   = "taloscluster"
 	pageIAM            = "iam"
-	pageSettings       = "settings"
 )
 
 // defaultTenantNamespace is where GET /app and /app/home land a caller who
@@ -172,7 +171,6 @@ func mustParsePage(content ...string) *template.Template {
 		"templates/components/icon_cluster.html",
 		"templates/components/icon_kubernetes.html",
 		"templates/components/icon_shield.html",
-		"templates/components/icon_settings.html",
 		"templates/components/icon_logout.html",
 		"templates/components/icon_book_open_text.html",
 		"templates/components/icon_external_link.html",
@@ -202,9 +200,11 @@ type Router struct {
 }
 
 // NewRouter creates a new UI router backed by namespacesFor, kontinuumsFor,
-// and zonesFor. cfg is shown on the settings page and is expected to
-// already be redacted (see config.Config.Redact) — Router does not redact it
-// itself. The "Add zone" form leaves zonedomain.AddOptions.Domain empty for
+// and zonesFor. cfg drives the registry page's own kubectl access card
+// (its OIDC settings decide whether the served kubeconfig needs a login
+// step) and is expected to already be redacted (see config.Config.Redact) —
+// Router does not redact it itself. The "Add zone" form leaves
+// zonedomain.AddOptions.Domain empty for
 // pkg/domain/zone.Add to infer from an already-registered Kontinuum — see
 // that field's own doc — rather than this Router needing a domain of its
 // own. authEnabled shows or hides the nav's logout link; pass true only
@@ -218,7 +218,11 @@ func NewRouter(
 	pages := map[string]*template.Template{
 		pageRegistry: mustParsePage("templates/registry_content.html",
 			"templates/components/icon_trash.html", "templates/components/icon_globe.html",
-			"templates/components/zone_add_modal.html"),
+			"templates/components/zone_add_modal.html", "templates/components/icon_terminal.html",
+			"templates/components/copy_snippet.html", "templates/components/icon_copy.html",
+			"templates/components/icon_check.html", "templates/components/icon_download.html",
+			"templates/components/icon_eye.html", "templates/components/icon_eye_off.html",
+			"templates/components/reveal_panel.html", "templates/components/reveal_panel_script.html"),
 		pageKontinuum: mustParsePage("templates/kontinuum_content.html",
 			"templates/components/icon_chevron_left.html", "templates/components/icon_eye.html",
 			"templates/components/icon_eye_off.html", "templates/components/icon_copy.html",
@@ -240,12 +244,6 @@ func NewRouter(
 			"templates/components/copy_snippet.html"),
 		pageIAM: mustParsePage("templates/iam_content.html",
 			"templates/components/icon_key.html", "templates/components/icon_info.html"),
-		pageSettings: mustParsePage("templates/settings_content.html",
-			"templates/components/icon_copy.html", "templates/components/icon_download.html",
-			"templates/components/icon_eye.html", "templates/components/icon_eye_off.html",
-			"templates/components/icon_terminal.html", "templates/components/icon_check.html",
-			"templates/components/reveal_panel.html", "templates/components/reveal_panel_script.html",
-			"templates/components/copy_snippet.html"),
 	}
 
 	return &Router{
@@ -273,7 +271,7 @@ func NewRouter(
 // appRoot and protect let a caller layer authentication onto the UI without
 // this package needing to know anything about it. appRoot overrides the
 // GET /app handler; nil keeps the default unconditional redirect to
-// defaultInstancesPath. protect wraps the /app/home and /app/settings
+// defaultInstancesPath. protect wraps the /app/home and /app/registry/kubeconfig
 // handlers; nil leaves them unprotected. See pkg/auth for kontinuum's OIDC
 // login flow, which supplies both when OIDC is configured, and redirects to
 // /app/home itself on a successful login — kept as a real route (rather than
@@ -306,8 +304,7 @@ func (r *Router) RegisterRoutes(
 	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/talosclusters/{name}/kubeconfig",
 		protect(r.handleTalosClusterKubeconfigDownload))
 	mux.HandleFunc("GET /app/iam", protect(r.handleIAM))
-	mux.HandleFunc("GET /app/settings", protect(r.handleSettings))
-	mux.HandleFunc("GET /app/settings/kubeconfig", protect(r.handleSettingsKubeconfigDownload))
+	mux.HandleFunc("GET /app/registry/kubeconfig", protect(r.handleRegistryKubeconfigDownload))
 }
 
 func handleRoot(writer http.ResponseWriter, request *http.Request) {
@@ -1575,30 +1572,17 @@ func (r *Router) handleTalosClusterKubeconfigDownload(writer http.ResponseWriter
 	_, _ = writer.Write(kubeconfig)
 }
 
-func (r *Router) handleSettings(writer http.ResponseWriter, request *http.Request) {
-	data := map[string]any{
-		"Title":       "Settings",
-		"ActiveMenu":  "settings",
-		"Version":     r.version,
-		"AuthEnabled": r.authEnabled,
-	}
-
-	r.render(writer, request, pageSettings, data)
-}
-
-// handleSettingsKubeconfigDownload is GET /app/settings/kubeconfig's
-// handler — it serves the same synthetic OIDC-login kubeconfig
-// settings_content.html's own kubectl-access card shows, computed by
-// kubeconfig() the same way handleSettings itself used to embed directly
-// into the page (kontinuum's default is no authentication at all, not "no
+// handleRegistryKubeconfigDownload is GET /app/registry/kubeconfig's
+// handler — it serves the synthetic OIDC-login kubeconfig
+// registry_content.html's own kubectl-access card shows, computed by
+// kubeconfig() (kontinuum's default is no authentication at all, not "no
 // access," so there's always a working kubeconfig here, not just when OIDC
-// happens to be enabled). This is now its own endpoint instead, serving two
-// different callers: the page's `<a download>` link, and its "Reveal"
-// button, which fetches this same endpoint via JS only when clicked and
-// renders the response text inline — mirrors
-// handleTalosClusterKubeconfigDownload's identical dual role for a
+// happens to be enabled). Serves two different callers: the page's
+// `<a download>` link, and its "Reveal" button, which fetches this same
+// endpoint via JS only when clicked and renders the response text inline —
+// mirrors handleTalosClusterKubeconfigDownload's identical dual role for a
 // different kubeconfig.
-func (r *Router) handleSettingsKubeconfigDownload(writer http.ResponseWriter, request *http.Request) {
+func (r *Router) handleRegistryKubeconfigDownload(writer http.ResponseWriter, request *http.Request) {
 	content := kubeconfig(requestOrigin(request), request.Host, r.cfg.OIDC.IssuerURL, r.cfg.OIDC.ClientID)
 
 	writer.Header().Set("Content-Type", "application/yaml")

@@ -7,9 +7,8 @@ Under the hood, kontinuum is a real Kubernetes-style API server, built on [kommo
 Full documentation: **[nicklasfrahm-dev.github.io/kontinuum](https://nicklasfrahm-dev.github.io/kontinuum/)**
 
 <p align="center">
-  <img src="docs/screenshots/login.png" width="32%" alt="Login screen" />
-  <img src="docs/screenshots/topology.png" width="32%" alt="Topology view" />
-  <img src="docs/screenshots/settings.png" width="32%" alt="Settings view" />
+  <img src="docs/screenshots/login.png" width="45%" alt="Login screen" />
+  <img src="docs/screenshots/topology.png" width="45%" alt="Topology view" />
 </p>
 
 ## Quick start
