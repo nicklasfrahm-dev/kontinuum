@@ -19,14 +19,17 @@ import (
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/registry"
 )
 
-const testHeartbeatInterval = 10 * time.Millisecond
+const (
+	testHeartbeatInterval = 10 * time.Millisecond
+	testServerName        = "test-server"
+)
 
-// testServerKey() is "test-server"'s own NamespacedName — every Heartbeat
+// testServerKey() is testServerName's own NamespacedName — every Heartbeat
 // fixture in this file registers as v1alpha2.KontinuumSystemNamespace (see
 // Heartbeat.Start's own doc), so every Get/Request below needs both, not
 // just Name.
 func testServerKey() types.NamespacedName {
-	return types.NamespacedName{Name: "test-server", Namespace: v1alpha2.KontinuumSystemNamespace}
+	return types.NamespacedName{Name: testServerName, Namespace: v1alpha2.KontinuumSystemNamespace}
 }
 
 // testSecretData is a placeholder value for Heartbeat.SecretData in tests —
@@ -69,9 +72,9 @@ func TestHeartbeatRegistersAndUpdatesStatus(t *testing.T) {
 
 	heartbeat := &registry.Heartbeat{
 		Client:     fakeClient,
-		Name:       "test-server",
+		Name:       testServerName,
 		Role:       v1alpha2.RoleWorker,
-		Spec:       v1alpha2.KontinuumSpec{Region: "eu", Zone: "eu-1a"},
+		Spec:       v1alpha2.KontinuumSpec{Region: "eu", Zone: e2eZone},
 		Interval:   testHeartbeatInterval,
 		Logger:     slog.Default(),
 		Version:    "v1.2.3",
@@ -97,7 +100,7 @@ func TestHeartbeatRegistersAndUpdatesStatus(t *testing.T) {
 
 	assert.Equal(t, v1alpha2.RoleWorker, server.Status.Role)
 	assert.Equal(t, "eu", server.Spec.Region)
-	assert.Equal(t, "eu-1a", server.Spec.Zone)
+	assert.Equal(t, e2eZone, server.Spec.Zone)
 	assert.Equal(t, "v1.2.3", server.Status.Version)
 	assert.Equal(t, v1alpha2.KontinuumSecretReference{
 		Name:      "kontinuum-test-server",
@@ -107,7 +110,7 @@ func TestHeartbeatRegistersAndUpdatesStatus(t *testing.T) {
 	assert.Equal(t, testConfig, server.Status.Config)
 
 	firstHeartbeat := server.Status.LastHeartbeatTime.Time
-	assertHeartbeatAdvancesThenDeregisters(t, fakeClient, "test-server", cancel, done, firstHeartbeat)
+	assertHeartbeatAdvancesThenDeregisters(t, fakeClient, testServerName, cancel, done, firstHeartbeat)
 }
 
 // assertHeartbeatAdvancesThenDeregisters waits for name's Kontinuum object
@@ -151,16 +154,16 @@ func TestHeartbeatStartAdoptsPreexistingRegistration(t *testing.T) {
 	// graceful deregistration lost the race with the new process starting,
 	// or the TTL reconciler hasn't expired it yet.
 	fakeClient := newFakeClient(t, &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-server", Namespace: v1alpha2.KontinuumSystemNamespace},
-		Spec:       v1alpha2.KontinuumSpec{Region: "eu", Zone: "eu-1a"},
+		ObjectMeta: metav1.ObjectMeta{Name: testServerName, Namespace: v1alpha2.KontinuumSystemNamespace},
+		Spec:       v1alpha2.KontinuumSpec{Region: "eu", Zone: e2eZone},
 		Status:     v1alpha2.KontinuumStatus{Role: v1alpha2.RoleWorker},
 	})
 
 	heartbeat := &registry.Heartbeat{
 		Client:   fakeClient,
-		Name:     "test-server",
+		Name:     testServerName,
 		Role:     v1alpha2.RoleWorker,
-		Spec:     v1alpha2.KontinuumSpec{Region: "eu", Zone: "eu-1a"},
+		Spec:     v1alpha2.KontinuumSpec{Region: "eu", Zone: e2eZone},
 		Interval: testHeartbeatInterval,
 		Logger:   slog.Default(),
 	}
@@ -198,9 +201,9 @@ func TestHeartbeatReregistersIfDeletedExternally(t *testing.T) {
 
 	heartbeat := &registry.Heartbeat{
 		Client:   fakeClient,
-		Name:     "test-server",
+		Name:     testServerName,
 		Role:     v1alpha2.RoleWorker,
-		Spec:     v1alpha2.KontinuumSpec{Region: "eu", Zone: "eu-1a"},
+		Spec:     v1alpha2.KontinuumSpec{Region: "eu", Zone: e2eZone},
 		Interval: testHeartbeatInterval,
 		Logger:   slog.Default(),
 	}
@@ -238,7 +241,7 @@ func TestHeartbeatReregistersIfDeletedExternally(t *testing.T) {
 	require.NoError(t, fakeClient.Get(context.Background(), testServerKey(), &recreated))
 	assert.Equal(t, v1alpha2.RoleWorker, recreated.Status.Role)
 	assert.Equal(t, "eu", recreated.Spec.Region)
-	assert.Equal(t, "eu-1a", recreated.Spec.Zone)
+	assert.Equal(t, e2eZone, recreated.Spec.Zone)
 }
 
 func TestHeartbeatReconcileReregistersOnDelete(t *testing.T) {
@@ -248,7 +251,7 @@ func TestHeartbeatReconcileReregistersOnDelete(t *testing.T) {
 
 	heartbeat := &registry.Heartbeat{
 		Client: fakeClient,
-		Name:   "test-server",
+		Name:   testServerName,
 		Role:   v1alpha2.RoleControlPlane,
 		Logger: slog.Default(),
 	}
@@ -269,13 +272,13 @@ func TestHeartbeatReconcileNoOpsWhenServerExists(t *testing.T) {
 	t.Parallel()
 
 	fakeClient := newFakeClient(t, &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-server", Namespace: v1alpha2.KontinuumSystemNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: testServerName, Namespace: v1alpha2.KontinuumSystemNamespace},
 		Status:     v1alpha2.KontinuumStatus{Role: v1alpha2.RoleWorker},
 	})
 
 	heartbeat := &registry.Heartbeat{
 		Client: fakeClient,
-		Name:   "test-server",
+		Name:   testServerName,
 		Logger: slog.Default(),
 	}
 
@@ -290,12 +293,12 @@ func TestHeartbeatDeregisterIsIdempotent(t *testing.T) {
 	t.Parallel()
 
 	fakeClient := newFakeClient(t, &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-server", Namespace: v1alpha2.KontinuumSystemNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: testServerName, Namespace: v1alpha2.KontinuumSystemNamespace},
 	})
 
 	heartbeat := &registry.Heartbeat{
 		Client: fakeClient,
-		Name:   "test-server",
+		Name:   testServerName,
 		Logger: slog.Default(),
 	}
 
@@ -319,12 +322,12 @@ func TestHeartbeatDeregisterPreventsReconcileFromReregistering(t *testing.T) {
 	t.Parallel()
 
 	fakeClient := newFakeClient(t, &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-server", Namespace: v1alpha2.KontinuumSystemNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: testServerName, Namespace: v1alpha2.KontinuumSystemNamespace},
 	})
 
 	heartbeat := &registry.Heartbeat{
 		Client: fakeClient,
-		Name:   "test-server",
+		Name:   testServerName,
 		Role:   v1alpha2.RoleWorker,
 		Logger: slog.Default(),
 	}
@@ -355,7 +358,7 @@ func TestHeartbeatDeregisterStopsBeatFromReregistering(t *testing.T) {
 
 	heartbeat := &registry.Heartbeat{
 		Client:   fakeClient,
-		Name:     "test-server",
+		Name:     testServerName,
 		Role:     v1alpha2.RoleWorker,
 		Interval: testHeartbeatInterval,
 		Logger:   slog.Default(),

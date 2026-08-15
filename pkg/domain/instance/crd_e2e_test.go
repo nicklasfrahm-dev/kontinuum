@@ -25,6 +25,8 @@ const (
 	e2eHealthzTimeout    = 10 * time.Second
 	e2eHealthzInterval   = 50 * time.Millisecond
 	e2eEventuallyTimeout = 5 * time.Second
+
+	e2eZoneName = "eu-1a"
 )
 
 // TestZoneJoinCRDsApplyAndRoundTrip is the testable milestone issue #27
@@ -67,8 +69,8 @@ func TestZoneJoinCRDsApplyAndRoundTrip(t *testing.T) {
 	}
 
 	zone := &v1alpha2.Zone{
-		ObjectMeta: metav1.ObjectMeta{Name: "eu-1a", Namespace: v1alpha2.KontinuumSystemNamespace},
-		Spec:       v1alpha2.ZoneSpec{Region: "eu", Zone: "eu-1a", Domain: "example.com"},
+		ObjectMeta: metav1.ObjectMeta{Name: e2eZoneName, Namespace: v1alpha2.KontinuumSystemNamespace},
+		Spec:       v1alpha2.ZoneSpec{Region: "eu", Zone: e2eZoneName, Domain: "example.com"},
 	}
 	require.NoError(t, client.Create(ctx, zone))
 
@@ -83,7 +85,7 @@ func TestZoneJoinCRDsApplyAndRoundTrip(t *testing.T) {
 	require.NoError(t, client.Create(ctx, pool))
 
 	cluster := &v1alpha2.TalosCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "eu-1a", Namespace: v1alpha2.KontinuumSystemNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: e2eZoneName, Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec: v1alpha2.TalosClusterSpec{
 			ControlPlane: v1alpha2.TalosClusterMemberSpec{
 				PoolRef: v1alpha2.InstancePoolReference{Name: "cp-pool"},

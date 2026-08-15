@@ -41,18 +41,18 @@ func newFakeHubClient(t *testing.T, objects ...client.Object) client.Client {
 		Build()
 }
 
-// registeredKontinuumWithDomain is a Kontinuum that's already published a
-// DNS domain on its own status.config.server.dns.domain — seeded into a
-// fake hub client so pkg/domain/zone.Add's own domain inference (see
-// AddOptions.Domain's doc) has something to find, the same way a real
-// hub's self-registration would provide it.
-func registeredKontinuumWithDomain(name, domain string) *v1alpha2.Kontinuum {
+// registeredKontinuumWithDomain is a Kontinuum named "hub" that's already
+// published testDomain on its own status.config.server.dns.domain —
+// seeded into a fake hub client so pkg/domain/zone.Add's own domain
+// inference (see AddOptions.Domain's doc) has something to find, the same
+// way a real hub's self-registration would provide it.
+func registeredKontinuumWithDomain() *v1alpha2.Kontinuum {
 	return &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		ObjectMeta: metav1.ObjectMeta{Name: "hub"},
 		Status: v1alpha2.KontinuumStatus{
 			Config: v1alpha2.KontinuumConfigStatus{
 				Server: v1alpha2.KontinuumServerConfigStatus{
-					DNS: v1alpha2.KontinuumDNSConfigStatus{Domain: domain},
+					DNS: v1alpha2.KontinuumDNSConfigStatus{Domain: testDomain},
 				},
 			},
 		},
@@ -70,7 +70,7 @@ func testCmd(out *bytes.Buffer) *cobra.Command {
 func TestRunZoneAddCreatesZoneObjects(t *testing.T) {
 	t.Parallel()
 
-	hubClient := newFakeHubClient(t, registeredKontinuumWithDomain("hub", testDomain))
+	hubClient := newFakeHubClient(t, registeredKontinuumWithDomain())
 	buf := &bytes.Buffer{}
 	cmd := testCmd(buf)
 
@@ -92,7 +92,7 @@ func TestRunZoneAddCreatesZoneObjects(t *testing.T) {
 func TestRunZoneAddThreadsUnregisterInstancesOnDeleteFlag(t *testing.T) {
 	t.Parallel()
 
-	hubClient := newFakeHubClient(t, registeredKontinuumWithDomain("hub", testDomain))
+	hubClient := newFakeHubClient(t, registeredKontinuumWithDomain())
 	buf := &bytes.Buffer{}
 	cmd := testCmd(buf)
 
@@ -150,7 +150,7 @@ func TestRunZoneAddWaitReturnsOnceInstalled(t *testing.T) {
 		},
 	}
 
-	hubClient := newFakeHubClient(t, existing, registeredKontinuumWithDomain("hub", testDomain))
+	hubClient := newFakeHubClient(t, existing, registeredKontinuumWithDomain())
 	buf := &bytes.Buffer{}
 	cmd := testCmd(buf)
 
@@ -165,7 +165,7 @@ func TestRunZoneAddWaitReturnsOnceInstalled(t *testing.T) {
 func TestRunZoneAddWaitTimesOut(t *testing.T) {
 	t.Parallel()
 
-	hubClient := newFakeHubClient(t, registeredKontinuumWithDomain("hub", testDomain))
+	hubClient := newFakeHubClient(t, registeredKontinuumWithDomain())
 	buf := &bytes.Buffer{}
 	cmd := testCmd(buf)
 

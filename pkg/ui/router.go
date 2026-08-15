@@ -105,6 +105,22 @@ const (
 	pageIAM            = "iam"
 )
 
+// Template data-map keys every page's own render() call shares — layout.html
+// and its nav read these off every page's data map identically, so each
+// handler below builds its map with these same keys rather than repeating
+// the literal at every call site.
+const (
+	dataKeyTitle        = "Title"
+	dataKeyActiveMenu   = "ActiveMenu"
+	dataKeyVersion      = "Version"
+	dataKeyNamespace    = "Namespace"
+	dataKeyInstances    = "Instances"
+	dataKeyAuthEnabled  = "AuthEnabled"
+	dataKeyTalosVersion = "TalosVersion"
+	dataKeyName         = "Name"
+	dataKeyAge          = "Age"
+)
+
 // defaultTenantNamespace is where GET /app and /app/home land a caller who
 // hasn't picked a tenant yet — v1alpha2.KontinuumSystemNamespace
 // ("kontinuum-system"), the one namespace guaranteed to exist and be worth
@@ -635,13 +651,13 @@ func (r *Router) renderRegistry(writer http.ResponseWriter, request *http.Reques
 	}
 
 	data := map[string]any{
-		"Title":       "Registry",
-		"ActiveMenu":  "registry",
-		"Version":     r.version,
-		"Namespace":   namespace,
-		"Instances":   instances,
-		"Zones":       zones,
-		"AuthEnabled": r.authEnabled,
+		dataKeyTitle:       "Registry",
+		dataKeyActiveMenu:  "registry",
+		dataKeyVersion:     r.version,
+		dataKeyNamespace:   namespace,
+		dataKeyInstances:   instances,
+		"Zones":            zones,
+		dataKeyAuthEnabled: r.authEnabled,
 	}
 
 	// The "Add zone" modal's own fragment data — always empty on a plain
@@ -738,7 +754,7 @@ func (r *Router) zoneAddFormData(fields zoneAddFields, createdZone, formErr stri
 		"Region":              fields.region,
 		"Zone":                fields.zone,
 		"TalosAddress":        fields.talosAddress,
-		"TalosVersion":        fields.talosVersion,
+		dataKeyTalosVersion:   fields.talosVersion,
 		"KubernetesVersion":   fields.kubernetesVersion,
 		"UnregisterInstances": fields.unregisterInstances,
 		"CreatedZone":         createdZone,
@@ -951,32 +967,32 @@ func kontinuumDetailData(
 	cfg := item.Status.Config
 
 	return map[string]any{
-		"Title":           item.Name,
-		"ActiveMenu":      "registry",
-		"Version":         version,
-		"AuthEnabled":     authEnabled,
-		"Name":            item.Name,
-		"Namespace":       item.Namespace,
-		"Role":            item.Status.Role,
-		"Region":          item.Spec.Region,
-		"Zone":            item.Spec.Zone,
-		"LastHeartbeat":   formatAge(item.Status.LastHeartbeatTime.Time),
-		"Age":             formatAge(item.CreationTimestamp.Time),
-		"APIVersion":      v1alpha2.GroupVersion().String(),
-		"InstanceVersion": item.Status.Version,
-		"Addr":            cfg.Server.Addr,
-		"StorageBackend":  storageBackendName(cfg.Server.Storage),
-		"StorageTarget":   cfg.Server.Storage,
-		"SecretName":      item.Status.SecretRef.Name,
-		"SecretNamespace": item.Status.SecretRef.Namespace,
-		"SecretDataReady": secretDataReady,
-		"LogLevel":        cfg.Log.Level,
-		"LogFormat":       cfg.Log.Format,
-		"OIDCEnabled":     cfg.OIDC.Enabled,
-		"OIDCIssuerURL":   cfg.OIDC.IssuerURL,
-		"OIDCClientID":    cfg.OIDC.ClientID,
-		"OIDCRedirectURL": cfg.OIDC.RedirectURL,
-		"OIDCAdminGroups": cfg.OIDC.AdminGroups,
+		dataKeyTitle:       item.Name,
+		dataKeyActiveMenu:  "registry",
+		dataKeyVersion:     version,
+		dataKeyAuthEnabled: authEnabled,
+		dataKeyName:        item.Name,
+		dataKeyNamespace:   item.Namespace,
+		"Role":             item.Status.Role,
+		"Region":           item.Spec.Region,
+		"Zone":             item.Spec.Zone,
+		"LastHeartbeat":    formatAge(item.Status.LastHeartbeatTime.Time),
+		dataKeyAge:         formatAge(item.CreationTimestamp.Time),
+		"APIVersion":       v1alpha2.GroupVersion().String(),
+		"InstanceVersion":  item.Status.Version,
+		"Addr":             cfg.Server.Addr,
+		"StorageBackend":   storageBackendName(cfg.Server.Storage),
+		"StorageTarget":    cfg.Server.Storage,
+		"SecretName":       item.Status.SecretRef.Name,
+		"SecretNamespace":  item.Status.SecretRef.Namespace,
+		"SecretDataReady":  secretDataReady,
+		"LogLevel":         cfg.Log.Level,
+		"LogFormat":        cfg.Log.Format,
+		"OIDCEnabled":      cfg.OIDC.Enabled,
+		"OIDCIssuerURL":    cfg.OIDC.IssuerURL,
+		"OIDCClientID":     cfg.OIDC.ClientID,
+		"OIDCRedirectURL":  cfg.OIDC.RedirectURL,
+		"OIDCAdminGroups":  cfg.OIDC.AdminGroups,
 	}
 }
 
@@ -1085,11 +1101,11 @@ func (r *Router) handleIAM(writer http.ResponseWriter, request *http.Request) {
 	}
 
 	r.render(writer, request, pageIAM, map[string]any{
-		"Title":       "IAM",
-		"ActiveMenu":  "iam",
-		"Version":     r.version,
-		"AuthEnabled": r.authEnabled,
-		"Bindings":    bindings,
+		dataKeyTitle:       "IAM",
+		dataKeyActiveMenu:  "iam",
+		dataKeyVersion:     r.version,
+		dataKeyAuthEnabled: r.authEnabled,
+		"Bindings":         bindings,
 	})
 }
 
@@ -1225,12 +1241,12 @@ func (r *Router) handleInstances(writer http.ResponseWriter, request *http.Reque
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 
 	r.render(writer, request, pageInstances, map[string]any{
-		"Title":       "Instances",
-		"ActiveMenu":  "instances",
-		"Version":     r.version,
-		"AuthEnabled": r.authEnabled,
-		"Namespace":   namespace,
-		"Instances":   rows,
+		dataKeyTitle:       "Instances",
+		dataKeyActiveMenu:  "instances",
+		dataKeyVersion:     r.version,
+		dataKeyAuthEnabled: r.authEnabled,
+		dataKeyNamespace:   namespace,
+		dataKeyInstances:   rows,
 	})
 }
 
@@ -1330,20 +1346,20 @@ func instanceDetailData(item v1alpha2.Instance, version string, authEnabled bool
 	}
 
 	return map[string]any{
-		"Title":           item.Name,
-		"ActiveMenu":      "instances",
-		"Version":         version,
-		"AuthEnabled":     authEnabled,
-		"Name":            item.Name,
-		"Namespace":       item.Namespace,
-		"Age":             formatAge(item.CreationTimestamp.Time),
-		"TalosVersion":    item.Status.Talos.Version,
-		"Discovered":      meta.IsStatusConditionTrue(item.Status.Conditions, instancedomain.DiscoveredConditionType),
-		"DiscoverySource": discoverySource,
-		"ClaimedBy":       item.Labels[v1alpha2.LabelClaimedBy],
-		"Interfaces":      interfaces,
-		"Conditions":      conditions,
-		"Deleting":        !item.DeletionTimestamp.IsZero(),
+		dataKeyTitle:        item.Name,
+		dataKeyActiveMenu:   "instances",
+		dataKeyVersion:      version,
+		dataKeyAuthEnabled:  authEnabled,
+		dataKeyName:         item.Name,
+		dataKeyNamespace:    item.Namespace,
+		dataKeyAge:          formatAge(item.CreationTimestamp.Time),
+		dataKeyTalosVersion: item.Status.Talos.Version,
+		"Discovered":        meta.IsStatusConditionTrue(item.Status.Conditions, instancedomain.DiscoveredConditionType),
+		"DiscoverySource":   discoverySource,
+		"ClaimedBy":         item.Labels[v1alpha2.LabelClaimedBy],
+		"Interfaces":        interfaces,
+		"Conditions":        conditions,
+		"Deleting":          !item.DeletionTimestamp.IsZero(),
 	}
 }
 
@@ -1486,12 +1502,12 @@ func (r *Router) handleTalosClusters(writer http.ResponseWriter, request *http.R
 	sort.Slice(clusters, func(i, j int) bool { return clusters[i].Name < clusters[j].Name })
 
 	r.render(writer, request, pageTalosClusters, map[string]any{
-		"Title":         "Clusters",
-		"ActiveMenu":    "talosclusters",
-		"Version":       r.version,
-		"AuthEnabled":   r.authEnabled,
-		"Namespace":     namespace,
-		"TalosClusters": clusters,
+		dataKeyTitle:       "Clusters",
+		dataKeyActiveMenu:  "talosclusters",
+		dataKeyVersion:     r.version,
+		dataKeyAuthEnabled: r.authEnabled,
+		dataKeyNamespace:   namespace,
+		"TalosClusters":    clusters,
 	})
 }
 
@@ -1701,15 +1717,15 @@ func talosClusterDetailData(
 	}
 
 	data := map[string]any{
-		"Title":              cluster.Name,
-		"ActiveMenu":         "talosclusters",
-		"Version":            version,
-		"AuthEnabled":        authEnabled,
-		"Name":               cluster.Name,
-		"Namespace":          cluster.Namespace,
-		"TalosVersion":       cluster.Spec.Talos.Version,
+		dataKeyTitle:         cluster.Name,
+		dataKeyActiveMenu:    "talosclusters",
+		dataKeyVersion:       version,
+		dataKeyAuthEnabled:   authEnabled,
+		dataKeyName:          cluster.Name,
+		dataKeyNamespace:     cluster.Namespace,
+		dataKeyTalosVersion:  cluster.Spec.Talos.Version,
 		"KubernetesVersion":  cluster.Spec.Kubernetes.Version,
-		"Age":                formatAge(cluster.CreationTimestamp.Time),
+		dataKeyAge:           formatAge(cluster.CreationTimestamp.Time),
 		"Pools":              pools,
 		"Conditions":         conditions,
 		"Deleting":           !cluster.DeletionTimestamp.IsZero(),

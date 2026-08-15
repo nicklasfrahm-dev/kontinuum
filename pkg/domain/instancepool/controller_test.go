@@ -24,6 +24,20 @@ import (
 
 const testRetryInterval = 30 * time.Second
 
+const (
+	nodeAName = "node-a"
+
+	poolAName         = "pool-a"
+	poolBName         = "pool-b"
+	poolCName         = "pool-c"
+	poolDName         = "pool-d"
+	poolIName         = "pool-i"
+	racePoolAName     = "race-pool-a"
+	racePoolBName     = "race-pool-b"
+	poolFinalizerName = "pool-finalizer"
+	poolTeardownName  = "pool-teardown"
+)
+
 func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
 	t.Helper()
 
@@ -69,17 +83,17 @@ func TestReconcileClaimsUpToReplicas(t *testing.T) {
 	t.Parallel()
 
 	pool := &v1alpha2.InstancePool{
-		ObjectMeta: metav1.ObjectMeta{Name: "pool-a"},
+		ObjectMeta: metav1.ObjectMeta{Name: poolAName},
 		Spec:       v1alpha2.InstancePoolSpec{Selector: poolSelector(), Replicas: 2},
 	}
 
 	fakeClient := newFakeClient(t, pool,
-		candidateInstance("node-a", true), candidateInstance("node-b", true), candidateInstance("node-c", true))
+		candidateInstance(nodeAName, true), candidateInstance("node-b", true), candidateInstance("node-c", true))
 
 	reconciler := newReconciler(fakeClient)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "pool-a"},
+		NamespacedName: types.NamespacedName{Name: poolAName},
 	})
 	require.NoError(t, err)
 	assert.Zero(t, result, "meeting replicas needs no requeue")
@@ -87,14 +101,14 @@ func TestReconcileClaimsUpToReplicas(t *testing.T) {
 	var list v1alpha2.InstanceList
 
 	require.NoError(t, fakeClient.List(context.Background(), &list,
-		client.MatchingLabels{v1alpha2.LabelClaimedBy: "pool-a"}))
+		client.MatchingLabels{v1alpha2.LabelClaimedBy: poolAName}))
 	assert.Len(t, list.Items, 2, "only replicas candidates should be claimed")
-	assert.Equal(t, "node-a", list.Items[0].Name, "claims proceed in name-sorted order")
+	assert.Equal(t, nodeAName, list.Items[0].Name, "claims proceed in name-sorted order")
 	assert.Equal(t, "node-b", list.Items[1].Name)
 
 	var got v1alpha2.InstancePool
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "pool-a"}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: poolAName}, &got))
 	assert.Equal(t, int32(2), got.Status.ReadyReplicas)
 
 	cond := findCondition(got.Status.Conditions, instancepool.InsufficientCapacityConditionType)
@@ -114,23 +128,23 @@ func TestReconcileReportsInsufficientCapacity(t *testing.T) {
 	t.Parallel()
 
 	pool := &v1alpha2.InstancePool{
-		ObjectMeta: metav1.ObjectMeta{Name: "pool-b"},
+		ObjectMeta: metav1.ObjectMeta{Name: poolBName},
 		Spec:       v1alpha2.InstancePoolSpec{Selector: poolSelector(), Replicas: 3},
 	}
 
-	fakeClient := newFakeClient(t, pool, candidateInstance("node-a", true))
+	fakeClient := newFakeClient(t, pool, candidateInstance(nodeAName, true))
 
 	reconciler := newReconciler(fakeClient)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "pool-b"},
+		NamespacedName: types.NamespacedName{Name: poolBName},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, testRetryInterval, result.RequeueAfter)
 
 	var got v1alpha2.InstancePool
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "pool-b"}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: poolBName}, &got))
 
 	cond := findCondition(got.Status.Conditions, instancepool.InsufficientCapacityConditionType)
 	require.NotNil(t, cond)
@@ -152,16 +166,16 @@ func TestReconcileClaimingRequiresDiscovery(t *testing.T) {
 	t.Parallel()
 
 	pool := &v1alpha2.InstancePool{
-		ObjectMeta: metav1.ObjectMeta{Name: "pool-c"},
+		ObjectMeta: metav1.ObjectMeta{Name: poolCName},
 		Spec:       v1alpha2.InstancePoolSpec{Selector: poolSelector(), Replicas: 1},
 	}
 
-	fakeClient := newFakeClient(t, pool, candidateInstance("node-a", false))
+	fakeClient := newFakeClient(t, pool, candidateInstance(nodeAName, false))
 
 	reconciler := newReconciler(fakeClient)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "pool-c"},
+		NamespacedName: types.NamespacedName{Name: poolCName},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, testRetryInterval, result.RequeueAfter, "an undiscovered candidate leaves the pool short of replicas")
@@ -169,12 +183,12 @@ func TestReconcileClaimingRequiresDiscovery(t *testing.T) {
 	var list v1alpha2.InstanceList
 
 	require.NoError(t, fakeClient.List(context.Background(), &list,
-		client.MatchingLabels{v1alpha2.LabelClaimedBy: "pool-c"}))
+		client.MatchingLabels{v1alpha2.LabelClaimedBy: poolCName}))
 	assert.Empty(t, list.Items, "an undiscovered candidate must not be claimed")
 
 	var got v1alpha2.InstancePool
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "pool-c"}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: poolCName}, &got))
 	assert.Zero(t, got.Status.ReadyReplicas)
 
 	cond := findCondition(got.Status.Conditions, instancepool.InsufficientCapacityConditionType)
@@ -189,39 +203,39 @@ func TestReconcileClaimsOnceDiscovered(t *testing.T) {
 	t.Parallel()
 
 	pool := &v1alpha2.InstancePool{
-		ObjectMeta: metav1.ObjectMeta{Name: "pool-i"},
+		ObjectMeta: metav1.ObjectMeta{Name: poolIName},
 		Spec:       v1alpha2.InstancePoolSpec{Selector: poolSelector(), Replicas: 1},
 	}
 
-	fakeClient := newFakeClient(t, pool, candidateInstance("node-a", false))
+	fakeClient := newFakeClient(t, pool, candidateInstance(nodeAName, false))
 	reconciler := newReconciler(fakeClient)
 
 	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "pool-i"},
+		NamespacedName: types.NamespacedName{Name: poolIName},
 	})
 	require.NoError(t, err)
 
 	var list v1alpha2.InstanceList
 
 	require.NoError(t, fakeClient.List(context.Background(), &list,
-		client.MatchingLabels{v1alpha2.LabelClaimedBy: "pool-i"}))
+		client.MatchingLabels{v1alpha2.LabelClaimedBy: poolIName}))
 	assert.Empty(t, list.Items, "not claimable before Discovered flips true")
 
 	var got v1alpha2.Instance
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "node-a"}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: nodeAName}, &got))
 	got.Status.Conditions = []metav1.Condition{
 		{Type: instance.DiscoveredConditionType, Status: metav1.ConditionTrue, Reason: "Discovered"},
 	}
 	require.NoError(t, fakeClient.Update(context.Background(), &got))
 
 	_, err = reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "pool-i"},
+		NamespacedName: types.NamespacedName{Name: poolIName},
 	})
 	require.NoError(t, err)
 
 	require.NoError(t, fakeClient.List(context.Background(), &list,
-		client.MatchingLabels{v1alpha2.LabelClaimedBy: "pool-i"}))
+		client.MatchingLabels{v1alpha2.LabelClaimedBy: poolIName}))
 	assert.Len(t, list.Items, 1, "claimable once Discovered is true")
 }
 
@@ -229,31 +243,31 @@ func TestReconcileReleasesExcessOnScaleDown(t *testing.T) {
 	t.Parallel()
 
 	pool := &v1alpha2.InstancePool{
-		ObjectMeta: metav1.ObjectMeta{Name: "pool-d"},
+		ObjectMeta: metav1.ObjectMeta{Name: poolDName},
 		Spec:       v1alpha2.InstancePoolSpec{Selector: poolSelector(), Replicas: 1},
 	}
 
-	claimedA := candidateInstance("node-a", true)
-	claimedA.Labels[v1alpha2.LabelClaimedBy] = "pool-d"
+	claimedA := candidateInstance(nodeAName, true)
+	claimedA.Labels[v1alpha2.LabelClaimedBy] = poolDName
 
 	claimedB := candidateInstance("node-b", true)
-	claimedB.Labels[v1alpha2.LabelClaimedBy] = "pool-d"
+	claimedB.Labels[v1alpha2.LabelClaimedBy] = poolDName
 
 	fakeClient := newFakeClient(t, pool, claimedA, claimedB)
 
 	reconciler := newReconciler(fakeClient)
 
 	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "pool-d"},
+		NamespacedName: types.NamespacedName{Name: poolDName},
 	})
 	require.NoError(t, err)
 
 	var list v1alpha2.InstanceList
 
 	require.NoError(t, fakeClient.List(context.Background(), &list,
-		client.MatchingLabels{v1alpha2.LabelClaimedBy: "pool-d"}))
+		client.MatchingLabels{v1alpha2.LabelClaimedBy: poolDName}))
 	require.Len(t, list.Items, 1, "excess claims are released")
-	assert.Equal(t, "node-a", list.Items[0].Name, "release keeps the name-sorted-first claim")
+	assert.Equal(t, nodeAName, list.Items[0].Name, "release keeps the name-sorted-first claim")
 
 	var released v1alpha2.Instance
 
@@ -284,15 +298,15 @@ func TestReconcileNoDoubleClaimUnderRace(t *testing.T) {
 	t.Parallel()
 
 	poolA := &v1alpha2.InstancePool{
-		ObjectMeta: metav1.ObjectMeta{Name: "race-pool-a"},
+		ObjectMeta: metav1.ObjectMeta{Name: racePoolAName},
 		Spec:       v1alpha2.InstancePoolSpec{Selector: poolSelector(), Replicas: 1},
 	}
 	poolB := &v1alpha2.InstancePool{
-		ObjectMeta: metav1.ObjectMeta{Name: "race-pool-b"},
+		ObjectMeta: metav1.ObjectMeta{Name: racePoolBName},
 		Spec:       v1alpha2.InstancePoolSpec{Selector: poolSelector(), Replicas: 1},
 	}
 
-	fakeClient := newFakeClient(t, poolA, poolB, candidateInstance("node-a", true))
+	fakeClient := newFakeClient(t, poolA, poolB, candidateInstance(nodeAName, true))
 
 	reconciler := newReconciler(fakeClient)
 
@@ -300,7 +314,7 @@ func TestReconcileNoDoubleClaimUnderRace(t *testing.T) {
 
 	waitGroup.Add(2)
 
-	for _, name := range []string{"race-pool-a", "race-pool-b"} {
+	for _, name := range []string{racePoolAName, racePoolBName} {
 		go func(poolName string) {
 			defer waitGroup.Done()
 
@@ -314,16 +328,16 @@ func TestReconcileNoDoubleClaimUnderRace(t *testing.T) {
 
 	var got v1alpha2.Instance
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "node-a"}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: nodeAName}, &got))
 	require.Contains(t, got.Labels, v1alpha2.LabelClaimedBy)
-	assert.Contains(t, []string{"race-pool-a", "race-pool-b"}, got.Labels[v1alpha2.LabelClaimedBy])
+	assert.Contains(t, []string{racePoolAName, racePoolBName}, got.Labels[v1alpha2.LabelClaimedBy])
 
 	var poolAList, poolBList v1alpha2.InstanceList
 
 	require.NoError(t, fakeClient.List(context.Background(), &poolAList,
-		client.MatchingLabels{v1alpha2.LabelClaimedBy: "race-pool-a"}))
+		client.MatchingLabels{v1alpha2.LabelClaimedBy: racePoolAName}))
 	require.NoError(t, fakeClient.List(context.Background(), &poolBList,
-		client.MatchingLabels{v1alpha2.LabelClaimedBy: "race-pool-b"}))
+		client.MatchingLabels{v1alpha2.LabelClaimedBy: racePoolBName}))
 	assert.Equal(t, 1, len(poolAList.Items)+len(poolBList.Items), "exactly one pool must win the single candidate")
 }
 
@@ -331,7 +345,7 @@ func TestReconcileAddsFinalizerOnNormalReconcile(t *testing.T) {
 	t.Parallel()
 
 	pool := &v1alpha2.InstancePool{
-		ObjectMeta: metav1.ObjectMeta{Name: "pool-finalizer"},
+		ObjectMeta: metav1.ObjectMeta{Name: poolFinalizerName},
 		Spec:       v1alpha2.InstancePoolSpec{Selector: poolSelector(), Replicas: 1},
 	}
 
@@ -339,13 +353,13 @@ func TestReconcileAddsFinalizerOnNormalReconcile(t *testing.T) {
 	reconciler := newReconciler(fakeClient)
 
 	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "pool-finalizer"},
+		NamespacedName: types.NamespacedName{Name: poolFinalizerName},
 	})
 	require.NoError(t, err)
 
 	var got v1alpha2.InstancePool
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "pool-finalizer"}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: poolFinalizerName}, &got))
 	assert.Contains(t, got.Finalizers, instancepool.InstancePoolFinalizer)
 }
 
@@ -358,11 +372,11 @@ func TestReconcileTeardownReleasesClaimedInstancesBeforeRemovingFinalizer(t *tes
 	t.Parallel()
 
 	pool := &v1alpha2.InstancePool{
-		ObjectMeta: metav1.ObjectMeta{Name: "pool-teardown", Finalizers: []string{instancepool.InstancePoolFinalizer}},
+		ObjectMeta: metav1.ObjectMeta{Name: poolTeardownName, Finalizers: []string{instancepool.InstancePoolFinalizer}},
 		Spec:       v1alpha2.InstancePoolSpec{Selector: poolSelector(), Replicas: 1},
 	}
-	claimedInstance := candidateInstance("node-a", true)
-	claimedInstance.Labels[v1alpha2.LabelClaimedBy] = "pool-teardown"
+	claimedInstance := candidateInstance(nodeAName, true)
+	claimedInstance.Labels[v1alpha2.LabelClaimedBy] = poolTeardownName
 
 	fakeClient := newFakeClient(t, pool, claimedInstance)
 	reconciler := newReconciler(fakeClient)
@@ -375,18 +389,18 @@ func TestReconcileTeardownReleasesClaimedInstancesBeforeRemovingFinalizer(t *tes
 	// carries the finalizer added on its first normal reconcile.
 	var toDelete v1alpha2.InstancePool
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "pool-teardown"}, &toDelete))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: poolTeardownName}, &toDelete))
 	require.NoError(t, fakeClient.Delete(context.Background(), &toDelete))
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "pool-teardown"},
+		NamespacedName: types.NamespacedName{Name: poolTeardownName},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, testRetryInterval, result.RequeueAfter, "must requeue to confirm the release actually landed")
 
 	var releasedInstance v1alpha2.Instance
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "node-a"}, &releasedInstance))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: nodeAName}, &releasedInstance))
 	assert.NotContains(t, releasedInstance.Labels, v1alpha2.LabelClaimedBy,
 		"instance must be released, not left claimed")
 
@@ -394,18 +408,18 @@ func TestReconcileTeardownReleasesClaimedInstancesBeforeRemovingFinalizer(t *tes
 	// removal in this same pass, is what confirms zero remain claimed.
 	var stillPresent v1alpha2.InstancePool
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "pool-teardown"}, &stillPresent))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: poolTeardownName}, &stillPresent))
 	assert.Contains(t, stillPresent.Finalizers, instancepool.InstancePoolFinalizer)
 
 	result, err = reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "pool-teardown"},
+		NamespacedName: types.NamespacedName{Name: poolTeardownName},
 	})
 	require.NoError(t, err)
 	assert.Zero(t, result)
 
 	var gone v1alpha2.InstancePool
 
-	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "pool-teardown"}, &gone)
+	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: poolTeardownName}, &gone)
 	assert.True(t, apierrors.IsNotFound(err), "instance pool must be fully deleted once the finalizer is removed")
 }
 

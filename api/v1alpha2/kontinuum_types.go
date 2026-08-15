@@ -14,11 +14,7 @@ const (
 	// KontinuumSystemNamespace is the one shared namespace every hub-side
 	// object lives in today — Zone, Instance, InstancePool, TalosCluster,
 	// Addon, and where a Kontinuum's own status.secretRef.namespace points
-	// by default, created automatically if it doesn't already exist. This
-	// is a namespace name, not a credential — gosec's G101 flags it purely
-	// because "Secret" appears in the identifier.
-	//
-	//nolint:gosec // false positive: a namespace name, not a credential
+	// by default, created automatically if it doesn't already exist.
 	KontinuumSystemNamespace = "kontinuum-system"
 )
 

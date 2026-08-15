@@ -50,7 +50,7 @@ func TestIgnoreNotFoundOrNoMatch(t *testing.T) {
 	t.Parallel()
 
 	notFoundResource := schema.GroupResource{Group: "gateway.networking.k8s.io", Resource: "httproutes"}
-	notFound := apierrors.NewNotFound(notFoundResource, "kontinuum")
+	notFound := apierrors.NewNotFound(notFoundResource, testDownstreamResourceName)
 	noResourceMatch := &meta.NoResourceMatchError{PartialResource: schema.GroupVersionResource{
 		Group: "gateway.networking.k8s.io", Version: "v1",
 	}}
@@ -101,7 +101,7 @@ func TestReconcileTeardownDeletesDownstreamAndTalosCluster(t *testing.T) {
 	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
 
-	require.NoError(t, downstream.Get(t.Context(), client.ObjectKey{Name: "kontinuum-system"}, &corev1.Namespace{}),
+	require.NoError(t, downstream.Get(t.Context(), client.ObjectKey{Name: testDownstreamNamespace}, &corev1.Namespace{}),
 		"install pass must have created the downstream namespace")
 
 	// Delete — sets DeletionTimestamp; the finalizer keeps the Zone around.
@@ -119,10 +119,10 @@ func TestReconcileTeardownDeletesDownstreamAndTalosCluster(t *testing.T) {
 	err = hubClient.Get(t.Context(), testZoneKey(), &gone)
 	assert.True(t, apierrors.IsNotFound(err), "zone must be fully deleted once the finalizer is removed")
 
-	err = downstream.Get(t.Context(), client.ObjectKey{Name: "kontinuum-system"}, &corev1.Namespace{})
+	err = downstream.Get(t.Context(), client.ObjectKey{Name: testDownstreamNamespace}, &corev1.Namespace{})
 	assert.True(t, apierrors.IsNotFound(err), "downstream namespace must be deleted")
 
-	err = downstream.Get(t.Context(), client.ObjectKey{Name: "kontinuum"}, &certmanagerv1.ClusterIssuer{})
+	err = downstream.Get(t.Context(), client.ObjectKey{Name: testDownstreamResourceName}, &certmanagerv1.ClusterIssuer{})
 	assert.True(t, apierrors.IsNotFound(err),
 		"the cluster-scoped ClusterIssuer must be deleted explicitly, not just cascaded via the namespace")
 

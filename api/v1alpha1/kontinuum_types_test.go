@@ -36,8 +36,8 @@ func TestKontinuumDeepCopyIsIndependent(t *testing.T) {
 	t.Parallel()
 
 	original := &v1alpha1.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: "test"},
-		Spec:       v1alpha1.KontinuumSpec{Role: v1alpha1.RoleWorker, Region: "eu", Zone: "eu-1a"},
+		ObjectMeta: metav1.ObjectMeta{Name: conversionTestName},
+		Spec:       v1alpha1.KontinuumSpec{Role: v1alpha1.RoleWorker, Region: "eu", Zone: conversionTestZone},
 		Status:     v1alpha1.KontinuumStatus{LastHeartbeatTime: metav1.Now()},
 	}
 
@@ -45,7 +45,7 @@ func TestKontinuumDeepCopyIsIndependent(t *testing.T) {
 	copied.Name = "changed"
 	copied.Spec.Region = "us"
 
-	assert.Equal(t, "test", original.Name)
+	assert.Equal(t, conversionTestName, original.Name)
 	assert.Equal(t, "eu", original.Spec.Region)
 	assert.Equal(t, "changed", copied.Name)
 	assert.Equal(t, "us", copied.Spec.Region)

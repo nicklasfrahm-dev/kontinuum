@@ -66,13 +66,13 @@ func seedNetworkState(t *testing.T, coreState state.CoreState) {
 
 	ctx := context.Background()
 
-	link := network.NewLinkStatus(network.NamespaceName, "eth0")
+	link := network.NewLinkStatus(network.NamespaceName, candidateInterface)
 	link.TypedSpec().HardwareAddr = nethelpers.HardwareAddr{0xde, 0xad, 0xbe, 0xef, 0x00, 0x01}
 	require.NoError(t, coreState.Create(ctx, link))
 
 	addr := network.NewAddressStatus(network.NamespaceName, "eth0/192.168.1.10/24")
 	addr.TypedSpec().Address = netip.MustParsePrefix("192.168.1.10/24")
-	addr.TypedSpec().LinkName = "eth0"
+	addr.TypedSpec().LinkName = candidateInterface
 	require.NoError(t, coreState.Create(ctx, addr))
 }
 
@@ -107,7 +107,7 @@ func TestTalosDiscovererWireCompat(t *testing.T) {
 	tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
 	grpcServer := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsConfig)))
 
-	machineapi.RegisterMachineServiceServer(grpcServer, &fakeMachineServer{tag: "v1.9.0"})
+	machineapi.RegisterMachineServiceServer(grpcServer, &fakeMachineServer{tag: talosVersionFixture})
 	cosiv1alpha1.RegisterStateServer(grpcServer, cosiserver.NewState(coreState))
 
 	serveErr := make(chan error, 1)
@@ -126,9 +126,9 @@ func TestTalosDiscovererWireCompat(t *testing.T) {
 
 	talosVersion, interfaces, err := discoverer.Discover(ctx, "127.0.0.1")
 	require.NoError(t, err)
-	assert.Equal(t, "v1.9.0", talosVersion)
+	assert.Equal(t, talosVersionFixture, talosVersion)
 	require.Len(t, interfaces, 1)
-	assert.Equal(t, "eth0", interfaces[0].Name)
+	assert.Equal(t, candidateInterface, interfaces[0].Name)
 	assert.Equal(t, "de:ad:be:ef:00:01", interfaces[0].MACAddress)
 	assert.Equal(t, []string{"192.168.1.10/24"}, interfaces[0].Addresses)
 }

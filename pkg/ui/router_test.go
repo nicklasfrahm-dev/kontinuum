@@ -49,13 +49,49 @@ const secretsResource = "secrets"
 // clusters list/detail/kubeconfig-download tests below (see
 // talosClusterFixture) and TestHandleZoneAddCreatesZoneAndReturnsSuccessFragment,
 // where it coincidentally matches zone-add's own <region>-<zone> naming
-// (region "eu", zone "eu-1a" — see addObjectName's doc).
+// (region "eu", zone testZoneValue — see addObjectName's doc).
 const testTalosClusterName = "eu-eu-1a"
 
 // talosClustersResource is the GroupResource "resource" name used to build
 // fake NotFound/Forbidden errors for the clusters pages' tests below — see
 // secretsResource for the equivalent used by the config-secret tests.
 const talosClustersResource = "talosclusters"
+
+// kontinuumsResource, instancesResource, and zonesResource are the same
+// pattern as talosClustersResource/secretsResource above, for the
+// registry/instances/zones pages' own NotFound/Forbidden fixtures.
+const (
+	kontinuumsResource = "kontinuums"
+	instancesResource  = "instances"
+	zonesResource      = "zones"
+)
+
+// testTalosAddress is the shared --talos-address fixture value reused
+// across every "Add zone" form-submission test below.
+const testTalosAddress = "10.0.0.5"
+
+// testZoneValue is the shared zone fixture value ("eu", testZoneValue) reused
+// across zone-add/zone-delete tests below — see testTalosClusterName's own
+// doc for why this coincidentally matches its own <region>-<zone> naming.
+const testZoneValue = "eu-1a"
+
+// zoneAddFormRegionKey/zoneAddFormZoneKey/zoneAddFormTalosAddressKey are the
+// "Add zone" form's own field names (see zone_add_modal.html), reused across
+// every url.Values fixture below that submits that form.
+const (
+	zoneAddFormRegionKey       = "region"
+	zoneAddFormZoneKey         = "zone"
+	zoneAddFormTalosAddressKey = "talos-address"
+)
+
+// zoneAddForm builds the "Add zone" form's own minimal valid submission
+// (region/zone/talos-address only) — reused by every test below that
+// doesn't need to vary those three fields.
+func zoneAddForm() url.Values {
+	return url.Values{
+		zoneAddFormRegionKey: {"eu"}, zoneAddFormZoneKey: {testZoneValue}, zoneAddFormTalosAddressKey: {testTalosAddress},
+	}
+}
 
 // stubNamespaceLister is a fixed-response ui.NamespaceLister for tests.
 type stubNamespaceLister struct {
@@ -150,7 +186,7 @@ func (s stubKontinuumLister) Get(
 			}
 		}
 
-		return apierrors.NewNotFound(schema.GroupResource{Group: v1alpha2.GroupName, Resource: "kontinuums"}, key.Name)
+		return apierrors.NewNotFound(schema.GroupResource{Group: v1alpha2.GroupName, Resource: kontinuumsResource}, key.Name)
 	}
 }
 
@@ -221,7 +257,7 @@ func (s stubKontinuumLister) getInstance(key client.ObjectKey, target *v1alpha2.
 		}
 	}
 
-	return apierrors.NewNotFound(schema.GroupResource{Group: v1alpha2.GroupName, Resource: "instances"}, key.Name)
+	return apierrors.NewNotFound(schema.GroupResource{Group: v1alpha2.GroupName, Resource: instancesResource}, key.Name)
 }
 
 // getTalosCluster backs Get's *v1alpha2.TalosCluster case.
@@ -254,7 +290,7 @@ func (s stubKontinuumLister) getZone(key client.ObjectKey, target *v1alpha2.Zone
 		}
 	}
 
-	return apierrors.NewNotFound(schema.GroupResource{Group: v1alpha2.GroupName, Resource: "zones"}, key.Name)
+	return apierrors.NewNotFound(schema.GroupResource{Group: v1alpha2.GroupName, Resource: zonesResource}, key.Name)
 }
 
 // getInstancePool backs Get's *v1alpha2.InstancePool case — used by
@@ -608,7 +644,7 @@ func TestHandleKontinuumDetailReturnsServerErrorWhenFactoryFails(t *testing.T) {
 func TestHandleKontinuumDetailInvalidatesSessionOnForbidden(t *testing.T) {
 	t.Parallel()
 
-	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: "kontinuums"}
+	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: kontinuumsResource}
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
 		return stubKontinuumLister{getErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
@@ -1275,7 +1311,7 @@ func TestHandleRegistryRendersZones(t *testing.T) {
 	scheme := apiruntime.NewScheme()
 	require.NoError(t, v1alpha2.AddToScheme(scheme))
 
-	notReadyZone := zoneWithCondition("eu-eu-1a", "eu", "eu-1a", metav1.ConditionFalse, "WaitingForCertificate",
+	notReadyZone := zoneWithCondition("eu-eu-1a", "eu", testZoneValue, metav1.ConditionFalse, "WaitingForCertificate",
 		"waiting for cert-manager to issue eu-1a.eu.example.com's certificate")
 	readyZone := zoneWithCondition("eu-eu-1b", "eu", "eu-1b", metav1.ConditionTrue, "Installed",
 		"kontinuum-server installed")
@@ -1324,7 +1360,7 @@ func TestHandleRegistryRendersDeletingForZoneWithDeletionTimestamp(t *testing.T)
 	scheme := apiruntime.NewScheme()
 	require.NoError(t, v1alpha2.AddToScheme(scheme))
 
-	deletingZone := zoneWithCondition("eu-eu-1a", "eu", "eu-1a", metav1.ConditionTrue, "Installed",
+	deletingZone := zoneWithCondition("eu-eu-1a", "eu", testZoneValue, metav1.ConditionTrue, "Installed",
 		"kontinuum-server installed")
 	now := metav1.Now()
 	deletingZone.DeletionTimestamp = &now
@@ -1458,7 +1494,7 @@ func assertForbiddenInvalidatesSession(
 func TestHandleRegistryInvalidatesSessionOnForbidden(t *testing.T) {
 	t.Parallel()
 
-	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: "kontinuums"}
+	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: kontinuumsResource}
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
 		return stubKontinuumLister{err: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
@@ -1529,7 +1565,7 @@ func TestHandleDeleteInstanceReturnsBadGatewayOnFailure(t *testing.T) {
 func TestHandleDeleteInstanceInvalidatesSessionOnForbidden(t *testing.T) {
 	t.Parallel()
 
-	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: "kontinuums"}
+	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: kontinuumsResource}
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
 		return stubKontinuumLister{deleteErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
@@ -1578,7 +1614,7 @@ func registeredKontinuumWithDomain(name, domain string) *v1alpha2.Kontinuum {
 type forbiddenZoneClient struct{ client.Client }
 
 func (forbiddenZoneClient) Create(context.Context, client.Object, ...client.CreateOption) error {
-	return apierrors.NewForbidden(schema.GroupResource{Group: v1alpha2.GroupName, Resource: "zones"}, "",
+	return apierrors.NewForbidden(schema.GroupResource{Group: v1alpha2.GroupName, Resource: zonesResource}, "",
 		errTestForbidden)
 }
 
@@ -1586,14 +1622,14 @@ func (forbiddenZoneClient) Create(context.Context, client.Object, ...client.Crea
 // AddOptions.Domain's doc) lists Kontinuums before ever reaching Create,
 // so that's the first call a Forbidden hub actually rejects.
 func (forbiddenZoneClient) List(context.Context, client.ObjectList, ...client.ListOption) error {
-	return apierrors.NewForbidden(schema.GroupResource{Group: v1alpha2.GroupName, Resource: "kontinuums"}, "",
+	return apierrors.NewForbidden(schema.GroupResource{Group: v1alpha2.GroupName, Resource: kontinuumsResource}, "",
 		errTestForbidden)
 }
 
 // Delete is overridden for handleDeleteZone's own forbidden test — the only
 // call that handler makes through client.Client.
 func (forbiddenZoneClient) Delete(context.Context, client.Object, ...client.DeleteOption) error {
-	return apierrors.NewForbidden(schema.GroupResource{Group: v1alpha2.GroupName, Resource: "zones"}, "",
+	return apierrors.NewForbidden(schema.GroupResource{Group: v1alpha2.GroupName, Resource: zonesResource}, "",
 		errTestForbidden)
 }
 
@@ -1669,7 +1705,7 @@ func TestHandleZoneAddCreatesZoneAndReturnsSuccessFragment(t *testing.T) {
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
 
-	form := url.Values{"region": {"eu"}, "zone": {"eu-1a"}, "talos-address": {"10.0.0.5"}}
+	form := zoneAddForm()
 
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder, newTestZoneAddRequest(t, form))
@@ -1720,7 +1756,7 @@ func TestHandleZoneAddThreadsUnregisterInstancesCheckboxToClusterSpec(t *testing
 	router.RegisterRoutes(mux, nil, nil)
 
 	form := url.Values{
-		"region": {"eu"}, "zone": {"eu-1a"}, "talos-address": {"10.0.0.5"},
+		zoneAddFormRegionKey: {"eu"}, zoneAddFormZoneKey: {testZoneValue}, zoneAddFormTalosAddressKey: {testTalosAddress},
 		"unregister-instances": {"on"},
 	}
 
@@ -1760,7 +1796,7 @@ func TestHandleZoneAddPreservesUnregisterInstancesCheckboxOnValidationError(t *t
 	router.RegisterRoutes(mux, nil, nil)
 
 	// talos-address deliberately omitted — Add's own validation rejects it.
-	form := url.Values{"region": {"eu"}, "zone": {"eu-1a"}, "unregister-instances": {"on"}}
+	form := url.Values{zoneAddFormRegionKey: {"eu"}, zoneAddFormZoneKey: {testZoneValue}, "unregister-instances": {"on"}}
 
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder, newTestZoneAddRequest(t, form))
@@ -1791,7 +1827,7 @@ func TestHandleZoneAddRerendersFormOnValidationError(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	// talos-address deliberately omitted — Add's own validation rejects it.
-	form := url.Values{"region": {"eu"}, "zone": {"eu-1a"}}
+	form := url.Values{zoneAddFormRegionKey: {"eu"}, zoneAddFormZoneKey: {testZoneValue}}
 
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder, newTestZoneAddRequest(t, form))
@@ -1822,7 +1858,7 @@ func TestHandleZoneAddReturnsServerErrorWhenFactoryFails(t *testing.T) {
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
 
-	form := url.Values{"region": {"eu"}, "zone": {"eu-1a"}, "talos-address": {"10.0.0.5"}}
+	form := zoneAddForm()
 
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder, newTestZoneAddRequest(t, form))
@@ -1855,7 +1891,7 @@ func TestHandleZoneAddInvalidatesSessionOnForbidden(t *testing.T) {
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
 
-	form := url.Values{"region": {"eu"}, "zone": {"eu-1a"}, "talos-address": {"10.0.0.5"}}
+	form := zoneAddForm()
 
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder, newTestZoneAddRequest(t, form))
@@ -1881,7 +1917,7 @@ func TestHandleDeleteZoneRemovesZoneAndRerendersRegistry(t *testing.T) {
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
 
 	zoneClient := newTestZoneClient(t, &v1alpha2.Zone{
-		ObjectMeta: metav1.ObjectMeta{Name: "eu-1a", Namespace: v1alpha2.KontinuumSystemNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: testZoneValue, Namespace: v1alpha2.KontinuumSystemNamespace},
 	})
 	zonesFactory := func(context.Context) (client.Client, error) { return zoneClient, nil }
 
@@ -1892,7 +1928,7 @@ func TestHandleDeleteZoneRemovesZoneAndRerendersRegistry(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestZoneDeleteRequest(t, "kontinuum-system", "eu-1a"))
+	mux.ServeHTTP(recorder, newTestZoneDeleteRequest(t, "kontinuum-system", testZoneValue))
 
 	resp := recorder.Result()
 
@@ -1906,7 +1942,7 @@ func TestHandleDeleteZoneRemovesZoneAndRerendersRegistry(t *testing.T) {
 
 	var got v1alpha2.Zone
 
-	zoneKey := client.ObjectKey{Name: "eu-1a", Namespace: v1alpha2.KontinuumSystemNamespace}
+	zoneKey := client.ObjectKey{Name: testZoneValue, Namespace: v1alpha2.KontinuumSystemNamespace}
 	assert.True(t, apierrors.IsNotFound(zoneClient.Get(context.Background(), zoneKey, &got)))
 }
 
@@ -1924,7 +1960,7 @@ func TestHandleDeleteZoneReturnsBadGatewayOnFailure(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestZoneDeleteRequest(t, "kontinuum-system", "eu-1a"))
+	mux.ServeHTTP(recorder, newTestZoneDeleteRequest(t, "kontinuum-system", testZoneValue))
 
 	resp := recorder.Result()
 
@@ -1955,7 +1991,7 @@ func TestHandleDeleteZoneInvalidatesSessionOnForbidden(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestZoneDeleteRequest(t, "kontinuum-system", "eu-1a"))
+	mux.ServeHTTP(recorder, newTestZoneDeleteRequest(t, "kontinuum-system", testZoneValue))
 
 	resp := recorder.Result()
 
@@ -1972,7 +2008,7 @@ func TestRegistryPageEmbedsLeaveZoneButtonAndModal(t *testing.T) {
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
 
 	zoneClient := newTestZoneClient(t, &v1alpha2.Zone{
-		ObjectMeta: metav1.ObjectMeta{Name: "eu-1a", Namespace: v1alpha2.KontinuumSystemNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: testZoneValue, Namespace: v1alpha2.KontinuumSystemNamespace},
 	})
 	zonesFactory := func(context.Context) (client.Client, error) { return zoneClient, nil }
 
@@ -2173,7 +2209,7 @@ func TestHandleMachinesReturnsServerErrorWhenFactoryFails(t *testing.T) {
 func TestHandleMachinesInvalidatesSessionOnForbidden(t *testing.T) {
 	t.Parallel()
 
-	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: "instances"}
+	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: instancesResource}
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
 		return stubKontinuumLister{instanceErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
@@ -2274,7 +2310,7 @@ func TestHandleMachineDetailReturnsServerErrorWhenFactoryFails(t *testing.T) {
 func TestHandleMachineDetailInvalidatesSessionOnForbidden(t *testing.T) {
 	t.Parallel()
 
-	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: "instances"}
+	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: instancesResource}
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
 		return stubKontinuumLister{
@@ -2380,7 +2416,7 @@ func TestHandleDeleteMachineReturnsBadGatewayOnFailure(t *testing.T) {
 func TestHandleDeleteMachineInvalidatesSessionOnForbidden(t *testing.T) {
 	t.Parallel()
 
-	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: "instances"}
+	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: instancesResource}
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
 		return stubKontinuumLister{deleteErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
@@ -2588,7 +2624,7 @@ func newTalosClusterKubeconfigMux(t *testing.T) *http.ServeMux {
 	cluster := talosClusterFixture(metav1.ConditionTrue)
 	zone := v1alpha2.Zone{
 		ObjectMeta: metav1.ObjectMeta{Name: "eu-eu-1a"},
-		Spec:       v1alpha2.ZoneSpec{Region: "eu", Zone: "eu-1a", Domain: "example.com"},
+		Spec:       v1alpha2.ZoneSpec{Region: "eu", Zone: testZoneValue, Domain: "example.com"},
 	}
 	controlPlanePool := v1alpha2.InstancePool{
 		ObjectMeta: metav1.ObjectMeta{Name: "eu-eu-1a"},

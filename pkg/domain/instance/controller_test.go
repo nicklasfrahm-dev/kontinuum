@@ -28,8 +28,17 @@ const (
 	testRecheckInterval = 5 * time.Minute
 
 	reasonDiscoveredFixture = "Discovered"
+	nodeAName               = "node-a"
+	nodeBName               = "node-b"
+	nodeCName               = "node-c"
 	nodeFName               = "node-f"
 	nodeGName               = "node-g"
+
+	candidateAddress1  = "10.0.0.1"
+	candidateAddress2  = "10.0.0.2"
+	candidateInterface = "eth0"
+
+	talosVersionFixture = "v1.9.0"
 )
 
 // errNoResultConfigured, errConnectionRefused, and errIOTimeout are fixed
@@ -70,6 +79,17 @@ func (f *fakeDiscoverer) Discover(
 	return res.talosVersion, res.interfaces, res.err
 }
 
+// discoveredResult is the fakeResult a successfully-probed candidate
+// returns — talosVersionFixture and one candidateInterface interface,
+// reused across every test below that just needs "discovery succeeded"
+// without a distinct version/interface of its own.
+func discoveredResult() fakeResult {
+	return fakeResult{
+		talosVersion: talosVersionFixture,
+		interfaces:   []v1alpha2.InstanceInterfaceStatus{{Name: candidateInterface}},
+	}
+}
+
 func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
 	t.Helper()
 
@@ -100,30 +120,30 @@ func TestReconcileDiscoversOnFirstCandidate(t *testing.T) {
 	t.Parallel()
 
 	obj := &v1alpha2.Instance{
-		ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
-		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{"10.0.0.1"}},
+		ObjectMeta: metav1.ObjectMeta{Name: nodeAName},
+		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{candidateAddress1}},
 	}
 
 	fakeClient := newFakeClient(t, obj)
 	discoverer := &fakeDiscoverer{results: map[string]fakeResult{
-		"10.0.0.1": {talosVersion: "v1.9.0", interfaces: []v1alpha2.InstanceInterfaceStatus{{Name: "eth0"}}},
+		candidateAddress1: discoveredResult(),
 	}}
 
 	reconciler := newReconciler(fakeClient, discoverer)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "node-a"},
+		NamespacedName: types.NamespacedName{Name: nodeAName},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, testRecheckInterval, result.RequeueAfter,
 		"a successful discovery keeps periodically rechecking while still unclaimed")
-	assert.Equal(t, []string{"10.0.0.1"}, discoverer.calls)
+	assert.Equal(t, []string{candidateAddress1}, discoverer.calls)
 
 	var got v1alpha2.Instance
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "node-a"}, &got))
-	assert.Equal(t, "v1.9.0", got.Status.Talos.Version)
-	assert.Equal(t, []v1alpha2.InstanceInterfaceStatus{{Name: "eth0"}}, got.Status.Interfaces)
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: nodeAName}, &got))
+	assert.Equal(t, talosVersionFixture, got.Status.Talos.Version)
+	assert.Equal(t, []v1alpha2.InstanceInterfaceStatus{{Name: candidateInterface}}, got.Status.Interfaces)
 	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, instance.DiscoveredConditionType))
 }
 
@@ -131,28 +151,28 @@ func TestReconcileFallsBackToNextCandidate(t *testing.T) {
 	t.Parallel()
 
 	obj := &v1alpha2.Instance{
-		ObjectMeta: metav1.ObjectMeta{Name: "node-b"},
-		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{"10.0.0.1", "10.0.0.2"}},
+		ObjectMeta: metav1.ObjectMeta{Name: nodeBName},
+		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{candidateAddress1, candidateAddress2}},
 	}
 
 	fakeClient := newFakeClient(t, obj)
 	discoverer := &fakeDiscoverer{results: map[string]fakeResult{
-		"10.0.0.1": {err: errConnectionRefused},
-		"10.0.0.2": {talosVersion: "v1.9.0", interfaces: []v1alpha2.InstanceInterfaceStatus{{Name: "eth0"}}},
+		candidateAddress1: {err: errConnectionRefused},
+		candidateAddress2: discoveredResult(),
 	}}
 
 	reconciler := newReconciler(fakeClient, discoverer)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "node-b"},
+		NamespacedName: types.NamespacedName{Name: nodeBName},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, testRecheckInterval, result.RequeueAfter)
-	assert.Equal(t, []string{"10.0.0.1", "10.0.0.2"}, discoverer.calls)
+	assert.Equal(t, []string{candidateAddress1, candidateAddress2}, discoverer.calls)
 
 	var got v1alpha2.Instance
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "node-b"}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: nodeBName}, &got))
 	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, instance.DiscoveredConditionType))
 }
 
@@ -160,27 +180,27 @@ func TestReconcileAllCandidatesFail(t *testing.T) {
 	t.Parallel()
 
 	obj := &v1alpha2.Instance{
-		ObjectMeta: metav1.ObjectMeta{Name: "node-c"},
-		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{"10.0.0.1", "10.0.0.2"}},
+		ObjectMeta: metav1.ObjectMeta{Name: nodeCName},
+		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{candidateAddress1, candidateAddress2}},
 	}
 
 	fakeClient := newFakeClient(t, obj)
 	discoverer := &fakeDiscoverer{results: map[string]fakeResult{
-		"10.0.0.1": {err: errConnectionRefused},
-		"10.0.0.2": {err: errIOTimeout},
+		candidateAddress1: {err: errConnectionRefused},
+		candidateAddress2: {err: errIOTimeout},
 	}}
 
 	reconciler := newReconciler(fakeClient, discoverer)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "node-c"},
+		NamespacedName: types.NamespacedName{Name: nodeCName},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, testRetryInterval, result.RequeueAfter)
 
 	var got v1alpha2.Instance
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "node-c"}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: nodeCName}, &got))
 
 	cond := meta.FindStatusCondition(got.Status.Conditions, instance.DiscoveredConditionType)
 	require.NotNil(t, cond)
@@ -219,9 +239,9 @@ func TestReconcileSkipsClaimedInstance(t *testing.T) {
 			Name:   "node-e",
 			Labels: map[string]string{v1alpha2.LabelClaimedBy: "cp-pool"},
 		},
-		Spec: v1alpha2.InstanceSpec{Interfaces: []string{"10.0.0.1"}},
+		Spec: v1alpha2.InstanceSpec{Interfaces: []string{candidateAddress1}},
 		Status: v1alpha2.InstanceStatus{
-			Talos: v1alpha2.InstanceTalosStatus{Version: "v1.9.0"},
+			Talos: v1alpha2.InstanceTalosStatus{Version: talosVersionFixture},
 			Conditions: []metav1.Condition{
 				{Type: instance.DiscoveredConditionType, Status: metav1.ConditionTrue, Reason: reasonDiscoveredFixture},
 			},
@@ -251,9 +271,9 @@ func TestReconcileRechecksUnclaimedDiscoveredInstance(t *testing.T) {
 
 	obj := &v1alpha2.Instance{
 		ObjectMeta: metav1.ObjectMeta{Name: nodeFName},
-		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{"10.0.0.1"}},
+		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{candidateAddress1}},
 		Status: v1alpha2.InstanceStatus{
-			Talos: v1alpha2.InstanceTalosStatus{Version: "v1.9.0"},
+			Talos: v1alpha2.InstanceTalosStatus{Version: talosVersionFixture},
 			Conditions: []metav1.Condition{
 				{Type: instance.DiscoveredConditionType, Status: metav1.ConditionTrue, Reason: reasonDiscoveredFixture},
 			},
@@ -262,7 +282,7 @@ func TestReconcileRechecksUnclaimedDiscoveredInstance(t *testing.T) {
 
 	fakeClient := newFakeClient(t, obj)
 	discoverer := &fakeDiscoverer{results: map[string]fakeResult{
-		"10.0.0.1": {talosVersion: "v1.9.0", interfaces: []v1alpha2.InstanceInterfaceStatus{{Name: "eth0"}}},
+		candidateAddress1: discoveredResult(),
 	}}
 
 	reconciler := newReconciler(fakeClient, discoverer)
@@ -272,7 +292,7 @@ func TestReconcileRechecksUnclaimedDiscoveredInstance(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, testRecheckInterval, result.RequeueAfter)
-	assert.Equal(t, []string{"10.0.0.1"}, discoverer.calls,
+	assert.Equal(t, []string{candidateAddress1}, discoverer.calls,
 		"an unclaimed instance must be re-probed even if already Discovered")
 
 	var got v1alpha2.Instance
@@ -291,9 +311,9 @@ func TestReconcileFlipsDiscoveredFalseWhenUnclaimedNodeGoesOffline(t *testing.T)
 
 	obj := &v1alpha2.Instance{
 		ObjectMeta: metav1.ObjectMeta{Name: nodeGName},
-		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{"10.0.0.1"}},
+		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{candidateAddress1}},
 		Status: v1alpha2.InstanceStatus{
-			Talos: v1alpha2.InstanceTalosStatus{Version: "v1.9.0"},
+			Talos: v1alpha2.InstanceTalosStatus{Version: talosVersionFixture},
 			Conditions: []metav1.Condition{
 				{Type: instance.DiscoveredConditionType, Status: metav1.ConditionTrue, Reason: reasonDiscoveredFixture},
 			},
@@ -302,7 +322,7 @@ func TestReconcileFlipsDiscoveredFalseWhenUnclaimedNodeGoesOffline(t *testing.T)
 
 	fakeClient := newFakeClient(t, obj)
 	discoverer := &fakeDiscoverer{results: map[string]fakeResult{
-		"10.0.0.1": {err: errConnectionRefused},
+		candidateAddress1: {err: errConnectionRefused},
 	}}
 
 	reconciler := newReconciler(fakeClient, discoverer)
