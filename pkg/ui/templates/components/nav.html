@@ -28,10 +28,6 @@
            class="p-2 rounded-lg {{if eq .ActiveMenu "iam"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-shield"}}
         </a>
-        <a href="/app/settings"
-           class="p-2 rounded-lg {{if eq .ActiveMenu "settings"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
-            {{template "icon-settings"}}
-        </a>
         {{if .AuthEnabled}}
         <a href="/app/logout" hx-boost="false"
            class="p-2 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800/50 transition-colors">
@@ -77,11 +73,6 @@
            class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "iam"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-shield"}}
             IAM
-        </a>
-        <a href="/app/settings"
-           class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "settings"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
-            {{template "icon-settings"}}
-            Settings
         </a>
         {{if .AuthEnabled}}
         <a href="/app/logout" hx-boost="false"
