@@ -118,11 +118,20 @@ jobs:
 
       # mkdocs-material emits some root-relative links (e.g. /reference/).
       # --root-dir tells lychee those resolve against the built site itself,
-      # since docs.kontinuum.sh serves it at the domain root.
+      # since docs.kontinuum.sh serves it at the domain root. mkdocs' own
+      # site_url also makes it emit some links as fully-qualified
+      # https://docs.kontinuum.sh/... URLs (e.g. sitemap.xml, canonical
+      # link tags) — --root-dir doesn't catch those (it only rewrites
+      # root-relative paths), so --remap sends them to this same local
+      # build instead of the live site, which a PR adding a brand-new page
+      # would otherwise 404 against until merged and deployed.
       - name: Check for broken links
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
-          args: --no-progress --exclude-loopback --root-dir ${{ github.workspace }}/site site
+          args: >-
+            --no-progress --exclude-loopback --root-dir ${{ github.workspace }}/site
+            --remap "https://docs.kontinuum.sh file://${{ github.workspace }}/site"
+            site
           token: ${{ secrets.GITHUB_TOKEN }}
           fail: true
 
