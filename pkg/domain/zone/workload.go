@@ -14,7 +14,7 @@ import (
 
 // downstreamNamespace is the namespace this package installs everything
 // into on a zone's own downstream cluster — matches
-// v1alpha2.DefaultSecretNamespace's own value ("kontinuum-system"), which
+// v1alpha2.KontinuumSystemNamespace's own value ("kontinuum-system"), which
 // this package reuses directly rather than redeclaring the same string.
 const downstreamNamespace = "kontinuum-system"
 

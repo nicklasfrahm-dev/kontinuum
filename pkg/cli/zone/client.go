@@ -3,6 +3,7 @@ package zone
 import (
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -39,6 +40,13 @@ func buildHubClient(kubeconfigPath, contextOverride string) (client.Client, erro
 	err = v1alpha2.AddToScheme(scheme)
 	if err != nil {
 		return nil, fmt.Errorf("failed to register kontinuum.sh/v1alpha2 scheme: %w", err)
+	}
+
+	// corev1 is needed too — zonedomain.Add's own ensureNamespace creates a
+	// plain corev1.Namespace as part of the fan-out.
+	err = corev1.AddToScheme(scheme)
+	if err != nil {
+		return nil, fmt.Errorf("failed to register core/v1 scheme: %w", err)
 	}
 
 	hubClient, err := client.New(restCfg, client.Options{Scheme: scheme})

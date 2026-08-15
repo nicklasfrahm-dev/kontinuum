@@ -22,11 +22,11 @@ import (
 const testHeartbeatInterval = 10 * time.Millisecond
 
 // testServerKey() is "test-server"'s own NamespacedName — every Heartbeat
-// fixture in this file registers as v1alpha2.DefaultSecretNamespace (see
+// fixture in this file registers as v1alpha2.KontinuumSystemNamespace (see
 // Heartbeat.Start's own doc), so every Get/Request below needs both, not
 // just Name.
 func testServerKey() types.NamespacedName {
-	return types.NamespacedName{Name: "test-server", Namespace: v1alpha2.DefaultSecretNamespace}
+	return types.NamespacedName{Name: "test-server", Namespace: v1alpha2.KontinuumSystemNamespace}
 }
 
 // testSecretData is a placeholder value for Heartbeat.SecretData in tests —
@@ -101,7 +101,7 @@ func TestHeartbeatRegistersAndUpdatesStatus(t *testing.T) {
 	assert.Equal(t, "v1.2.3", server.Status.Version)
 	assert.Equal(t, v1alpha2.KontinuumSecretReference{
 		Name:      "kontinuum-test-server",
-		Namespace: v1alpha2.DefaultSecretNamespace,
+		Namespace: v1alpha2.KontinuumSystemNamespace,
 	}, server.Status.SecretRef)
 	assertConfigSecret(t, fakeClient, server.Status.SecretRef, heartbeat.SecretData)
 	assert.Equal(t, testConfig, server.Status.Config)
@@ -122,7 +122,7 @@ func assertHeartbeatAdvancesThenDeregisters(
 
 	var server v1alpha2.Kontinuum
 
-	key := types.NamespacedName{Name: name, Namespace: v1alpha2.DefaultSecretNamespace}
+	key := types.NamespacedName{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace}
 
 	require.Eventually(t, func() bool {
 		err := fakeClient.Get(context.Background(), key, &server)
@@ -151,7 +151,7 @@ func TestHeartbeatStartAdoptsPreexistingRegistration(t *testing.T) {
 	// graceful deregistration lost the race with the new process starting,
 	// or the TTL reconciler hasn't expired it yet.
 	fakeClient := newFakeClient(t, &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-server", Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-server", Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec:       v1alpha2.KontinuumSpec{Region: "eu", Zone: "eu-1a"},
 		Status:     v1alpha2.KontinuumStatus{Role: v1alpha2.RoleWorker},
 	})
@@ -269,7 +269,7 @@ func TestHeartbeatReconcileNoOpsWhenServerExists(t *testing.T) {
 	t.Parallel()
 
 	fakeClient := newFakeClient(t, &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-server", Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-server", Namespace: v1alpha2.KontinuumSystemNamespace},
 		Status:     v1alpha2.KontinuumStatus{Role: v1alpha2.RoleWorker},
 	})
 
@@ -290,7 +290,7 @@ func TestHeartbeatDeregisterIsIdempotent(t *testing.T) {
 	t.Parallel()
 
 	fakeClient := newFakeClient(t, &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-server", Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-server", Namespace: v1alpha2.KontinuumSystemNamespace},
 	})
 
 	heartbeat := &registry.Heartbeat{
@@ -319,7 +319,7 @@ func TestHeartbeatDeregisterPreventsReconcileFromReregistering(t *testing.T) {
 	t.Parallel()
 
 	fakeClient := newFakeClient(t, &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-server", Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-server", Namespace: v1alpha2.KontinuumSystemNamespace},
 	})
 
 	heartbeat := &registry.Heartbeat{

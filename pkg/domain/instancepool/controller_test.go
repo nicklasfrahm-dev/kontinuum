@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -99,6 +100,14 @@ func TestReconcileClaimsUpToReplicas(t *testing.T) {
 	cond := findCondition(got.Status.Conditions, instancepool.InsufficientCapacityConditionType)
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+
+	// Ready mirrors InsufficientCapacity's content but with inverted
+	// polarity (True = good) — see instancepool.ReadyConditionType's own
+	// doc for why this exists (kstatus/kubectl-tree's generic-CRD fallback
+	// only recognizes a condition literally Typed "Ready").
+	readyCond := findCondition(got.Status.Conditions, instancepool.ReadyConditionType)
+	require.NotNil(t, readyCond)
+	assert.Equal(t, metav1.ConditionTrue, readyCond.Status)
 }
 
 func TestReconcileReportsInsufficientCapacity(t *testing.T) {
@@ -126,6 +135,10 @@ func TestReconcileReportsInsufficientCapacity(t *testing.T) {
 	cond := findCondition(got.Status.Conditions, instancepool.InsufficientCapacityConditionType)
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+
+	readyCond := findCondition(got.Status.Conditions, instancepool.ReadyConditionType)
+	require.NotNil(t, readyCond)
+	assert.Equal(t, metav1.ConditionFalse, readyCond.Status, "insufficient capacity means not ready")
 }
 
 // TestReconcileClaimingRequiresDiscovery covers the fix for a real
@@ -312,6 +325,88 @@ func TestReconcileNoDoubleClaimUnderRace(t *testing.T) {
 	require.NoError(t, fakeClient.List(context.Background(), &poolBList,
 		client.MatchingLabels{v1alpha2.LabelClaimedBy: "race-pool-b"}))
 	assert.Equal(t, 1, len(poolAList.Items)+len(poolBList.Items), "exactly one pool must win the single candidate")
+}
+
+func TestReconcileAddsFinalizerOnNormalReconcile(t *testing.T) {
+	t.Parallel()
+
+	pool := &v1alpha2.InstancePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-finalizer"},
+		Spec:       v1alpha2.InstancePoolSpec{Selector: poolSelector(), Replicas: 1},
+	}
+
+	fakeClient := newFakeClient(t, pool)
+	reconciler := newReconciler(fakeClient)
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "pool-finalizer"},
+	})
+	require.NoError(t, err)
+
+	var got v1alpha2.InstancePool
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "pool-finalizer"}, &got))
+	assert.Contains(t, got.Finalizers, instancepool.InstancePoolFinalizer)
+}
+
+// TestReconcileTeardownReleasesClaimedInstancesBeforeRemovingFinalizer
+// covers the fix for a real gap: without InstancePoolFinalizer, deleting an
+// InstancePool left its claimed Instances with a stale
+// kontinuum.sh/claimed-by label pointing at a pool that no longer existed,
+// never released back for another pool to claim.
+func TestReconcileTeardownReleasesClaimedInstancesBeforeRemovingFinalizer(t *testing.T) {
+	t.Parallel()
+
+	pool := &v1alpha2.InstancePool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-teardown", Finalizers: []string{instancepool.InstancePoolFinalizer}},
+		Spec:       v1alpha2.InstancePoolSpec{Selector: poolSelector(), Replicas: 1},
+	}
+	claimedInstance := candidateInstance("node-a", true)
+	claimedInstance.Labels[v1alpha2.LabelClaimedBy] = "pool-teardown"
+
+	fakeClient := newFakeClient(t, pool, claimedInstance)
+	reconciler := newReconciler(fakeClient)
+
+	// Delete — the fake client rejects Create with a DeletionTimestamp
+	// directly, so Create-then-Delete is how this reaches "finalizer
+	// present, DeletionTimestamp set", the same state a real apiserver
+	// leaves an InstancePool in once it's deleted (or GC-cascaded — see
+	// pkg/domain/zone/add.go's own owner-reference note) while it still
+	// carries the finalizer added on its first normal reconcile.
+	var toDelete v1alpha2.InstancePool
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "pool-teardown"}, &toDelete))
+	require.NoError(t, fakeClient.Delete(context.Background(), &toDelete))
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "pool-teardown"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, testRetryInterval, result.RequeueAfter, "must requeue to confirm the release actually landed")
+
+	var releasedInstance v1alpha2.Instance
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "node-a"}, &releasedInstance))
+	assert.NotContains(t, releasedInstance.Labels, v1alpha2.LabelClaimedBy,
+		"instance must be released, not left claimed")
+
+	// The pool itself is still around — the next reconcile, not finalizer
+	// removal in this same pass, is what confirms zero remain claimed.
+	var stillPresent v1alpha2.InstancePool
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "pool-teardown"}, &stillPresent))
+	assert.Contains(t, stillPresent.Finalizers, instancepool.InstancePoolFinalizer)
+
+	result, err = reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "pool-teardown"},
+	})
+	require.NoError(t, err)
+	assert.Zero(t, result)
+
+	var gone v1alpha2.InstancePool
+
+	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "pool-teardown"}, &gone)
+	assert.True(t, apierrors.IsNotFound(err), "instance pool must be fully deleted once the finalizer is removed")
 }
 
 func findCondition(conditions []metav1.Condition, condType string) *metav1.Condition {

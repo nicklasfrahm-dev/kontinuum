@@ -67,23 +67,23 @@ func TestZoneJoinCRDsApplyAndRoundTrip(t *testing.T) {
 	}
 
 	zone := &v1alpha2.Zone{
-		ObjectMeta: metav1.ObjectMeta{Name: "eu-1a", Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "eu-1a", Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec:       v1alpha2.ZoneSpec{Region: "eu", Zone: "eu-1a", Domain: "example.com"},
 	}
 	require.NoError(t, client.Create(ctx, zone))
 
 	inst := &v1alpha2.Instance{
-		ObjectMeta: metav1.ObjectMeta{Name: "node-1", Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "node-1", Namespace: v1alpha2.KontinuumSystemNamespace},
 	}
 	require.NoError(t, client.Create(ctx, inst))
 
 	pool := &v1alpha2.InstancePool{
-		ObjectMeta: metav1.ObjectMeta{Name: "worker-pool-a", Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "worker-pool-a", Namespace: v1alpha2.KontinuumSystemNamespace},
 	}
 	require.NoError(t, client.Create(ctx, pool))
 
 	cluster := &v1alpha2.TalosCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "eu-1a", Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "eu-1a", Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec: v1alpha2.TalosClusterSpec{
 			ControlPlane: v1alpha2.TalosClusterMemberSpec{
 				PoolRef: v1alpha2.InstancePoolReference{Name: "cp-pool"},

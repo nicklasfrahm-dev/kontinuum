@@ -22,23 +22,40 @@ import (
 func resolveMembers(
 	ctx context.Context, kubeClient client.Client, namespace string, poolRef v1alpha2.InstancePoolReference,
 ) ([]v1alpha2.Instance, error) {
-	var list v1alpha2.InstanceList
-
-	err := kubeClient.List(ctx, &list,
-		client.InNamespace(namespace), client.MatchingLabels{v1alpha2.LabelClaimedBy: poolRef.Name})
+	claimed, err := listClaimedByPool(ctx, kubeClient, namespace, poolRef.Name)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list instances claimed by pool %q: %w", poolRef.Name, err)
+		return nil, err
 	}
 
-	members := make([]v1alpha2.Instance, 0, len(list.Items))
+	members := make([]v1alpha2.Instance, 0, len(claimed))
 
-	for _, inst := range list.Items {
+	for _, inst := range claimed {
 		if meta.IsStatusConditionTrue(inst.Status.Conditions, instance.DiscoveredConditionType) {
 			members = append(members, inst)
 		}
 	}
 
 	return members, nil
+}
+
+// listClaimedByPool lists every Instance claimed by poolName within
+// namespace — the same label query resolveMembers itself narrows further
+// (to Discovered members only) above, and teardown.go's own
+// listClaimedMembers reuses unfiltered: an unreachable/undiscovered member
+// still needs releasing (or deleting) during teardown even though it
+// can't be reset.
+func listClaimedByPool(
+	ctx context.Context, kubeClient client.Client, namespace, poolName string,
+) ([]v1alpha2.Instance, error) {
+	var list v1alpha2.InstanceList
+
+	err := kubeClient.List(ctx, &list,
+		client.InNamespace(namespace), client.MatchingLabels{v1alpha2.LabelClaimedBy: poolName})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list instances claimed by pool %q: %w", poolName, err)
+	}
+
+	return list.Items, nil
 }
 
 // dialAddress returns the address used to reach inst in maintenance mode

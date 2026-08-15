@@ -142,18 +142,18 @@ type AddonStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Cluster
 // +kubebuilder:selectablefield:JSONPath=".spec.talosClusterRef.name"
 // +kubebuilder:printcolumn:name="Cluster",type="string",JSONPath=".spec.talosClusterRef.name"
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].status"
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].reason"
 
 // Addon represents one addon belonging to a TalosCluster, installed and
-// health-probed by pkg/domain/addon's own AddonReconciler — an
-// independent, owned resource: TalosCluster's own reconciler only seeds
-// the two built-ins (see pkg/domain/addon's EnsureBuiltinSeeds) and
-// aggregates Ready across whatever Addons reference it, built-in or
-// fully custom alike.
+// health-probed by pkg/domain/addon's own AddonReconciler — namespaced
+// alongside, and owned by, its TalosCluster (see
+// pkg/domain/addon.EnsureBuiltinSeeds), so it's garbage-collected the
+// moment that cluster is deleted. TalosCluster's own reconciler only
+// seeds the two built-ins and aggregates Ready across whatever Addons
+// reference it, built-in or fully custom alike.
 type Addon struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata"`

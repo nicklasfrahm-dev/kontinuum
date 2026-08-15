@@ -15,15 +15,16 @@ const defaultWaitTimeout = 15 * time.Minute
 
 // AddFlags is "zone add"'s parsed flag set.
 type AddFlags struct {
-	Region            string
-	Zone              string
-	TalosAddress      string
-	TalosVersion      string
-	KubernetesVersion string
-	Kubeconfig        string
-	Context           string
-	Wait              bool
-	Timeout           time.Duration
+	Region                      string
+	Zone                        string
+	TalosAddress                string
+	TalosVersion                string
+	KubernetesVersion           string
+	Kubeconfig                  string
+	Context                     string
+	Wait                        bool
+	Timeout                     time.Duration
+	UnregisterInstancesOnDelete bool
 }
 
 // NewAddCmd builds the "zone add" command.
@@ -57,6 +58,8 @@ func NewAddCmd() *cobra.Command {
 		"Block until the zone reports Installed, printing live status")
 	cmd.Flags().DurationVar(&flags.Timeout, "timeout", defaultWaitTimeout,
 		"How long --wait waits before giving up")
+	cmd.Flags().BoolVar(&flags.UnregisterInstancesOnDelete, "unregister-instances-on-delete", false,
+		"Delete this zone's instances from inventory when it's removed, instead of just resetting and releasing them")
 
 	for _, name := range []string{"region", "zone", "talos-address"} {
 		_ = cmd.MarkFlagRequired(name)
@@ -84,11 +87,12 @@ func RunZoneAdd(cmd *cobra.Command, flags AddFlags, buildClient hubClientBuilder
 	}
 
 	createdZone, err := zonedomain.Add(cmd.Context(), hubClient, zonedomain.AddOptions{
-		Region:            flags.Region,
-		Zone:              flags.Zone,
-		TalosAddress:      flags.TalosAddress,
-		TalosVersion:      flags.TalosVersion,
-		KubernetesVersion: flags.KubernetesVersion,
+		Region:                      flags.Region,
+		Zone:                        flags.Zone,
+		TalosAddress:                flags.TalosAddress,
+		TalosVersion:                flags.TalosVersion,
+		KubernetesVersion:           flags.KubernetesVersion,
+		UnregisterInstancesOnDelete: flags.UnregisterInstancesOnDelete,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to add zone: %w", err)

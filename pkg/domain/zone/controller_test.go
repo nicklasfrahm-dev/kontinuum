@@ -35,10 +35,10 @@ const (
 )
 
 // testZoneKey() is testZoneName's own ObjectKey — every zone-add fixture in
-// this file lives in v1alpha2.DefaultSecretNamespace (see BuildAddObjects'
+// this file lives in v1alpha2.KontinuumSystemNamespace (see BuildAddObjects'
 // own doc), so every Get below needs both, not just Name.
 func testZoneKey() client.ObjectKey {
-	return client.ObjectKey{Name: testZoneName, Namespace: v1alpha2.DefaultSecretNamespace}
+	return client.ObjectKey{Name: testZoneName, Namespace: v1alpha2.KontinuumSystemNamespace}
 }
 
 // testStorage is a fake connection string, not a real credential.
@@ -95,14 +95,14 @@ func newDownstreamFakeClient(t *testing.T) client.Client {
 
 func testZoneObject() *v1alpha2.Zone {
 	return &v1alpha2.Zone{
-		ObjectMeta: metav1.ObjectMeta{Name: testZoneName, Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: testZoneName, Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec:       v1alpha2.ZoneSpec{Region: testRegion, Zone: testZone, Domain: testDomain},
 	}
 }
 
 func readyTalosCluster() *v1alpha2.TalosCluster {
 	return &v1alpha2.TalosCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: testZoneName, Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: testZoneName, Namespace: v1alpha2.KontinuumSystemNamespace},
 		Status: v1alpha2.TalosClusterStatus{
 			Conditions: []metav1.Condition{
 				{Type: taloscluster.ReadyConditionType, Status: metav1.ConditionTrue, Reason: "AddonsInstalled"},
@@ -123,7 +123,7 @@ func registeredKontinuum(name, storage string) (*v1alpha2.Kontinuum, *corev1.Sec
 	secretName := "kontinuum-" + name
 
 	kontinuum := &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace},
 		Status: v1alpha2.KontinuumStatus{
 			SecretRef: v1alpha2.KontinuumSecretReference{Name: secretName, Namespace: "kontinuum-system"},
 		},
@@ -151,7 +151,7 @@ func newReconciler(hubClient client.Client, downstreamBuilder zone.DownstreamCli
 
 func reconcileRequest() ctrl.Request {
 	return ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: testZoneName, Namespace: v1alpha2.DefaultSecretNamespace},
+		NamespacedName: types.NamespacedName{Name: testZoneName, Namespace: v1alpha2.KontinuumSystemNamespace},
 	}
 }
 
@@ -178,7 +178,7 @@ func TestReconcileWaitsForTalosClusterReady(t *testing.T) {
 	t.Parallel()
 
 	notReadyCluster := &v1alpha2.TalosCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: testZoneName, Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: testZoneName, Namespace: v1alpha2.KontinuumSystemNamespace},
 	}
 	hubClient := newHubFakeClient(t, testZoneObject(), notReadyCluster)
 	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{})
@@ -194,6 +194,13 @@ func TestReconcileWaitsForTalosClusterReady(t *testing.T) {
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, "WaitingForTalosCluster", cond.Reason)
+
+	// A blocked ClusterReady propagates to the aggregate Ready condition too
+	// — see zone.ReadyConditionType's own doc.
+	readyCond := meta.FindStatusCondition(got.Status.Conditions, zone.ReadyConditionType)
+	require.NotNil(t, readyCond)
+	assert.Equal(t, metav1.ConditionFalse, readyCond.Status)
+	assert.Equal(t, "WaitingForTalosCluster", readyCond.Reason)
 }
 
 func TestReconcileReportsNoStorageSecretFound(t *testing.T) {
@@ -235,6 +242,14 @@ func TestReconcileInstallsDownstreamObjectsAndWaitsForCertificate(t *testing.T) 
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, "WaitingForCertificate", cond.Reason)
+
+	// Installed always mirrors onto Ready, regardless of its own status —
+	// confirms the False branch, not just the True happy path (see
+	// TestReconcileFlipsInstalledOnceCertificateReady).
+	readyCond := meta.FindStatusCondition(got.Status.Conditions, zone.ReadyConditionType)
+	require.NotNil(t, readyCond)
+	assert.Equal(t, metav1.ConditionFalse, readyCond.Status)
+	assert.Equal(t, "WaitingForCertificate", readyCond.Reason)
 
 	var ns corev1.Namespace
 	assert.NoError(t, downstream.Get(t.Context(), client.ObjectKey{Name: "kontinuum-system"}, &ns))
@@ -321,6 +336,14 @@ func TestReconcileFlipsInstalledOnceCertificateReady(t *testing.T) {
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionTrue, cond.Status)
 	assert.Equal(t, "Installed", cond.Reason)
+
+	// The aggregate Ready condition (see zone.ReadyConditionType's own doc)
+	// only ever flips true here, once Installed itself does — this is the
+	// condition `kubectl tree`/kstatus tooling actually reads.
+	readyCond := meta.FindStatusCondition(got.Status.Conditions, zone.ReadyConditionType)
+	require.NotNil(t, readyCond)
+	assert.Equal(t, metav1.ConditionTrue, readyCond.Status)
+	assert.Equal(t, "Installed", readyCond.Reason)
 }
 
 func TestReconcileIgnoresMissingZone(t *testing.T) {

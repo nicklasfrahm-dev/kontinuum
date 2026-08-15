@@ -287,7 +287,7 @@ func setupE2ECluster(
 	workerIP := startTalosContainer(ctx, t)
 
 	cluster := &v1alpha2.TalosCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "e2e-cluster", Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "e2e-cluster", Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec: v1alpha2.TalosClusterSpec{
 			ControlPlane: v1alpha2.TalosClusterMemberSpec{
 				PoolRef: v1alpha2.InstancePoolReference{Name: "cp-pool"},
@@ -299,10 +299,10 @@ func setupE2ECluster(
 	}
 
 	cpInstance := claimedDiscoveredInstance("cp-node", "cp-pool", controlPlaneIP)
-	cpInstance.Namespace = v1alpha2.DefaultSecretNamespace
+	cpInstance.Namespace = v1alpha2.KontinuumSystemNamespace
 
 	workerInstance := claimedDiscoveredInstance("worker-node", "worker-pool", workerIP)
-	workerInstance.Namespace = v1alpha2.DefaultSecretNamespace
+	workerInstance.Namespace = v1alpha2.KontinuumSystemNamespace
 
 	fakeClient := newFakeClient(t, cluster, cpInstance, workerInstance)
 
@@ -331,7 +331,7 @@ func setupE2ECluster(
 	}
 
 	req := ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "e2e-cluster", Namespace: v1alpha2.DefaultSecretNamespace},
+		NamespacedName: types.NamespacedName{Name: "e2e-cluster", Namespace: v1alpha2.KontinuumSystemNamespace},
 	}
 
 	return fakeClient, talosReconciler, addonReconciler, req

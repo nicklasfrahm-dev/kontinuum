@@ -13,7 +13,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
-	"github.com/nicklasfrahm/kontinuum/pkg/domain/taloscluster"
 )
 
 // reconcileTeardown runs a Zone's deletion sequence — see issue #49's own
@@ -24,17 +23,37 @@ import (
 // pkg/domain/zone/add.go's identical note about hub-side owner refs); a
 // finalizer, driven from here, is the only mechanism that runs at all.
 //
-// Order matters: the downstream cluster must be torn down (or safely
-// skipped — see teardownDownstream) before taloscluster.ResetControlPlane
-// wipes its seed node, since a reset node can no longer serve the
-// kubeconfig-based teardown step afterward. Either step failing (e.g. the
-// downstream cluster is genuinely unreachable — hardware pulled, network
-// gone) sets TeardownConditionType False with a retry, up to
-// r.TeardownTimeout since zoneObj's own DeletionTimestamp — past that,
-// reconcileTeardown gives up and removes the finalizer anyway, rather than
-// blocking the Zone's deletion forever (issue #49's own explicit
-// requirement). See docs/workflows/zone-remove.md for the operator escape
-// hatch that forces this sooner, and for what "giving up" leaves behind.
+// The downstream cluster must be torn down (or safely skipped — see
+// teardownDownstream) before the TalosCluster is deleted, since a Zone
+// whose downstream is unreachable needs that same kubeconfig-based
+// teardown step retried, and a deleted TalosCluster's own Secret (holding
+// it) is on borrowed time once GC gets to it.
+//
+// This no longer issues the Talos Reset itself. Deleting the TalosCluster
+// here sets its own DeletionTimestamp, which taloscluster.Reconciler checks
+// before touching any member (see TalosClusterFinalizer's own doc) — that
+// alone is why it's deleted explicitly rather than left for GC: without it,
+// taloscluster.Reconciler is a self-healing reconciler with no way to know
+// a member is being intentionally decommissioned, and would keep trying to
+// re-apply configuration to it (observed for real: a node reset via
+// hack/reset-hetzner-node.sh came back up in maintenance mode and got
+// reconfigured back into the cluster within about a minute, because
+// nothing had told the still-live TalosCluster reconciler to stop). The
+// actual reset now happens per-Instance, via
+// taloscluster.InstanceResetReconciler's own finalizer, once GC (see
+// pkg/cli/serve.go's WithGarbageCollector) cascades each Instance's
+// deletion from here — the same mechanism that resets a worker being
+// scaled down or an Instance released from a pool, not just a full Zone
+// teardown.
+//
+// Either step failing (e.g. the downstream cluster is genuinely
+// unreachable — hardware pulled, network gone) sets TeardownConditionType
+// False with a retry, up to r.TeardownTimeout since zoneObj's own
+// DeletionTimestamp — past that, reconcileTeardown gives up and removes the
+// finalizer anyway, rather than blocking the Zone's deletion forever
+// (issue #49's own explicit requirement). See docs/workflows/zone-remove.md
+// for the operator escape hatch that forces this sooner, and for what
+// "giving up" leaves behind.
 func (r *Reconciler) reconcileTeardown(ctx context.Context, zoneObj *v1alpha2.Zone) (ctrl.Result, error) {
 	if !controllerutil.ContainsFinalizer(zoneObj, ZoneFinalizer) {
 		return ctrl.Result{}, nil
@@ -54,7 +73,8 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, zoneObj *v1alpha2.Zo
 	err := r.Client.Get(ctx, client.ObjectKey{Name: zoneObj.Name, Namespace: zoneObj.Namespace}, &cluster)
 	if apierrors.IsNotFound(err) {
 		// No TalosCluster ever existed, or it's already gone — nothing left
-		// to tear down downstream or reset.
+		// to tear down downstream, and nothing left for
+		// InstanceResetReconciler to have not already handled.
 		return r.removeFinalizer(ctx, zoneObj)
 	}
 
@@ -70,11 +90,15 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, zoneObj *v1alpha2.Zo
 			r.teardownRetryMessage(zoneObj, err))
 	}
 
-	err = taloscluster.ResetControlPlane(ctx, r.Client, r.Bootstrapper, &cluster)
-	if err != nil {
-		r.Logger.Warn("talos reset not yet complete", "zone", zoneObj.Name, "error", err)
+	// See reconcileTeardown's own doc for why this is deleted explicitly,
+	// here, rather than left for GC. Retrying a Delete on an object already
+	// mid-deletion (or already gone) is a safe no-op either way.
+	err = r.Client.Delete(ctx, &cluster)
+	if err != nil && !apierrors.IsNotFound(err) {
+		r.Logger.Warn("failed to delete talos cluster", "zone", zoneObj.Name, "error", err)
 
-		return r.setTeardownCondition(ctx, zoneObj, reasonTalosResetFailed, r.teardownRetryMessage(zoneObj, err))
+		return r.setTeardownCondition(ctx, zoneObj, reasonTalosClusterDeleteFailed,
+			r.teardownRetryMessage(zoneObj, err))
 	}
 
 	return r.removeFinalizer(ctx, zoneObj)

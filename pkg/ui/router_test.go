@@ -417,6 +417,33 @@ func TestRegisterRoutesServesVendoredStaticAssets(t *testing.T) {
 	}
 }
 
+// TestRegisterRoutesRedirectsUnmatchedAppPathToParent covers the catch-all
+// "/app/" route notFoundFallback wraps in RegisterRoutes: a URL that never
+// matched any registered pattern at all (a typo, a stale deep link into
+// something that never existed) gets the same walk-up-to-parent treatment
+// as an object lookup's own 404 — not a bare "404 page not found" with
+// nowhere obvious to go from here.
+func TestRegisterRoutesRedirectsUnmatchedAppPathToParent(t *testing.T) {
+	t.Parallel()
+
+	assertGetRedirectsTo(t,
+		"/app/kontinuum.sh/namespaces/kontinuum-system/bogus/path",
+		"/app/kontinuum.sh/namespaces/kontinuum-system/bogus")
+}
+
+// TestRegisterRoutesRedirectsBareAppSlashUpToAppRoot covers the catch-all
+// "/app/" route's own boundary: hit with no further path segments at all
+// (as opposed to TestRegisterRoutesRedirectsUnmatchedAppPathToParent's
+// deeper bogus path), its parent is "/app" itself — GET /app always
+// succeeds (see appRoot's own unconditional redirect to
+// defaultInstancesPath), so this is where the walk-up chain ends rather
+// than looping.
+func TestRegisterRoutesRedirectsBareAppSlashUpToAppRoot(t *testing.T) {
+	t.Parallel()
+
+	assertGetRedirectsTo(t, "/app/", "/app")
+}
+
 func TestHandleMachinesShowsLogoutLinkOnlyWhenAuthEnabled(t *testing.T) {
 	t.Parallel()
 
@@ -461,7 +488,7 @@ func kontinuumWithConfig(cfg v1alpha2.KontinuumConfigStatus) v1alpha2.Kontinuum 
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Status: v1alpha2.KontinuumStatus{
 			Role:      v1alpha2.RoleWorker,
-			SecretRef: v1alpha2.KontinuumSecretReference{Name: name, Namespace: v1alpha2.DefaultSecretNamespace},
+			SecretRef: v1alpha2.KontinuumSecretReference{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace},
 			Config:    cfg,
 		},
 	}
@@ -543,31 +570,12 @@ func TestHandleKontinuumDetailHidesOIDCDetailsWhenInstanceOIDCDisabled(t *testin
 	assert.NotContains(t, string(body), testOIDCIssuerURL)
 }
 
-func TestHandleKontinuumDetailReturnsNotFoundForUnknownInstance(t *testing.T) {
+func TestHandleKontinuumDetailRedirectsToRegistryForUnknownInstance(t *testing.T) {
 	t.Parallel()
 
-	factory := func(context.Context) (ui.NamespaceLister, error) {
-		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
-	}
-
-	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
-		return stubKontinuumLister{}, nil
-	}
-
-	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
-		config.Config{}, false, nil)
-
-	mux := http.NewServeMux()
-	router.RegisterRoutes(mux, nil, nil)
-
-	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/missing"))
-
-	resp := recorder.Result()
-
-	defer func() { _ = resp.Body.Close() }()
-
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assertGetRedirectsTo(t,
+		"/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/missing",
+		"/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums")
 }
 
 func TestHandleKontinuumDetailReturnsServerErrorWhenFactoryFails(t *testing.T) {
@@ -619,7 +627,7 @@ func TestHandleKontinuumDetailShowsConfigSecretDataReveal(t *testing.T) {
 
 	item := kontinuumWithConfig(v1alpha2.KontinuumConfigStatus{})
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "worker-1", Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "worker-1", Namespace: v1alpha2.KontinuumSystemNamespace},
 		Data:       map[string][]byte{"password": []byte("s3cr3t")},
 	}
 
@@ -1300,6 +1308,52 @@ func TestHandleRegistryRendersZones(t *testing.T) {
 	assert.Contains(t, string(body), "bg-green-900/40", "a True condition renders a green badge")
 }
 
+// TestHandleRegistryRendersDeletingForZoneWithDeletionTimestamp covers a
+// Zone mid-teardown: its own last-transitioned condition (e.g.
+// "Installed=True") is left over from before deletion started and would
+// otherwise read as "everything's fine" — the row must show "Deleting"
+// instead, not that stale condition.
+func TestHandleRegistryRendersDeletingForZoneWithDeletionTimestamp(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	scheme := apiruntime.NewScheme()
+	require.NoError(t, v1alpha2.AddToScheme(scheme))
+
+	deletingZone := zoneWithCondition("eu-eu-1a", "eu", "eu-1a", metav1.ConditionTrue, "Installed",
+		"kontinuum-server installed")
+	now := metav1.Now()
+	deletingZone.DeletionTimestamp = &now
+	deletingZone.Finalizers = []string{"kontinuum.sh/zone-teardown"}
+
+	zoneClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(deletingZone).Build()
+	zonesFactory := func(context.Context) (client.Client, error) { return zoneClient, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "Deleting")
+	assert.NotContains(t, string(body), "Installed=True")
+}
+
 func TestHandleRegistryReturnsBadGatewayWhenZoneListFails(t *testing.T) {
 	t.Parallel()
 
@@ -1536,6 +1590,26 @@ func (forbiddenZoneClient) List(context.Context, client.ObjectList, ...client.Li
 		errTestForbidden)
 }
 
+// Delete is overridden for handleDeleteZone's own forbidden test — the only
+// call that handler makes through client.Client.
+func (forbiddenZoneClient) Delete(context.Context, client.Object, ...client.DeleteOption) error {
+	return apierrors.NewForbidden(schema.GroupResource{Group: v1alpha2.GroupName, Resource: "zones"}, "",
+		errTestForbidden)
+}
+
+// errorZoneClient is a client.Client test double whose Delete always
+// returns err — used to exercise handleDeleteZone's own bad-gateway path on
+// a non-Forbidden, non-NotFound failure.
+type errorZoneClient struct {
+	client.Client
+
+	err error
+}
+
+func (e errorZoneClient) Delete(context.Context, client.Object, ...client.DeleteOption) error {
+	return e.err
+}
+
 func newTestZoneAddRequest(t *testing.T, form url.Values) *http.Request {
 	t.Helper()
 
@@ -1612,12 +1686,94 @@ func TestHandleZoneAddCreatesZoneAndReturnsSuccessFragment(t *testing.T) {
 	// The form itself is gone from a success response — nothing left to
 	// resubmit.
 	assert.NotContains(t, string(body), `name="talos-address"`)
+	// The toast marker's kubectl command is split into its own attribute
+	// (see zone_add_modal.html) so showToast can render it as a
+	// click-to-copy chip rather than plain text — not folded into one
+	// combined message string.
+	assert.Contains(t, string(body), `data-toast-command="kubectl get zone `+testTalosClusterName+`"`)
+	assert.Contains(t, string(body), `data-toast-prefix="Created zone `+testTalosClusterName+`.`)
 
 	var got v1alpha2.Zone
 
-	zoneKey := client.ObjectKey{Name: testTalosClusterName, Namespace: v1alpha2.DefaultSecretNamespace}
+	zoneKey := client.ObjectKey{Name: testTalosClusterName, Namespace: v1alpha2.KontinuumSystemNamespace}
 	require.NoError(t, zoneClient.Get(context.Background(), zoneKey, &got))
 	assert.Equal(t, "example.com", got.Spec.Domain)
+}
+
+// TestHandleZoneAddThreadsUnregisterInstancesCheckboxToClusterSpec covers
+// the "Unregister instances on decommissioning" checkbox's own path all
+// the way onto the created TalosCluster's spec.teardown.unregisterInstances
+// — the field TalosClusterFinalizer's own teardown actually reads.
+func TestHandleZoneAddThreadsUnregisterInstancesCheckboxToClusterSpec(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	zoneClient := newTestZoneClient(t, registeredKontinuumWithDomain("hub", "example.com"))
+	zonesFactory := func(context.Context) (client.Client, error) { return zoneClient, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	form := url.Values{
+		"region": {"eu"}, "zone": {"eu-1a"}, "talos-address": {"10.0.0.5"},
+		"unregister-instances": {"on"},
+	}
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestZoneAddRequest(t, form))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var got v1alpha2.TalosCluster
+
+	clusterKey := client.ObjectKey{Name: testTalosClusterName, Namespace: v1alpha2.KontinuumSystemNamespace}
+	require.NoError(t, zoneClient.Get(context.Background(), clusterKey, &got))
+	assert.True(t, got.Spec.Teardown.UnregisterInstances)
+}
+
+// TestHandleZoneAddPreservesUnregisterInstancesCheckboxOnValidationError
+// covers the same "don't make the user retype everything" guarantee
+// TestHandleZoneAddRerendersFormOnValidationError already covers for the
+// text fields, extended to the checkbox: a validation failure re-renders
+// the form with it still checked, not silently reset to unticked.
+func TestHandleZoneAddPreservesUnregisterInstancesCheckboxOnValidationError(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	zonesFactory := func(context.Context) (client.Client, error) { return newTestZoneClient(t), nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	// talos-address deliberately omitted — Add's own validation rejects it.
+	form := url.Values{"region": {"eu"}, "zone": {"eu-1a"}, "unregister-instances": {"on"}}
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestZoneAddRequest(t, form))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Regexp(t, `name="unregister-instances"[^>]*checked`, string(body))
 }
 
 func TestHandleZoneAddRerendersFormOnValidationError(t *testing.T) {
@@ -1712,6 +1868,136 @@ func TestHandleZoneAddInvalidatesSessionOnForbidden(t *testing.T) {
 	assert.NotEmpty(t, invalidatedWith)
 }
 
+func newTestZoneDeleteRequest(t *testing.T, namespace, name string) *http.Request {
+	t.Helper()
+
+	return newTestDeleteRequest(t, "/app/kontinuum.sh/namespaces/"+namespace+"/zones/"+name)
+}
+
+func TestHandleDeleteZoneRemovesZoneAndRerendersRegistry(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	zoneClient := newTestZoneClient(t, &v1alpha2.Zone{
+		ObjectMeta: metav1.ObjectMeta{Name: "eu-1a", Namespace: v1alpha2.KontinuumSystemNamespace},
+	})
+	zonesFactory := func(context.Context) (client.Client, error) { return zoneClient, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestZoneDeleteRequest(t, "kontinuum-system", "eu-1a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "No zones found")
+
+	var got v1alpha2.Zone
+
+	zoneKey := client.ObjectKey{Name: "eu-1a", Namespace: v1alpha2.KontinuumSystemNamespace}
+	assert.True(t, apierrors.IsNotFound(zoneClient.Get(context.Background(), zoneKey, &got)))
+}
+
+func TestHandleDeleteZoneReturnsBadGatewayOnFailure(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+	zonesFactory := func(context.Context) (client.Client, error) { return errorZoneClient{err: errFactory}, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestZoneDeleteRequest(t, "kontinuum-system", "eu-1a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
+}
+
+func TestHandleDeleteZoneInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+	zonesFactory := func(context.Context) (client.Client, error) { return forbiddenZoneClient{}, nil }
+
+	var invalidatedWith string
+
+	invalidateSession := func(writer http.ResponseWriter, _ *http.Request, message string) {
+		invalidatedWith = message
+
+		writer.WriteHeader(http.StatusFound)
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-version",
+		config.Config{}, false, invalidateSession)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestZoneDeleteRequest(t, "kontinuum-system", "eu-1a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusFound, resp.StatusCode)
+	assert.NotEmpty(t, invalidatedWith)
+}
+
+func TestRegistryPageEmbedsLeaveZoneButtonAndModal(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	zoneClient := newTestZoneClient(t, &v1alpha2.Zone{
+		ObjectMeta: metav1.ObjectMeta{Name: "eu-1a", Namespace: v1alpha2.KontinuumSystemNamespace},
+	})
+	zonesFactory := func(context.Context) (client.Client, error) { return zoneClient, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `onclick="openZoneLeaveModal('eu-1a', 'kontinuum-system')"`)
+	assert.Contains(t, string(body), `id="zone-leave-modal"`)
+	assert.Contains(t, string(body), `id="zone-leave-modal-confirm" disabled`)
+}
+
 // discoveredInstance builds a v1alpha2.Instance with the Discovered
 // condition set true, name and talosVersion as given — the shape
 // TestHandleMachinesRendersInstances/TestHandleMachineDetail* both need.
@@ -1769,6 +2055,70 @@ func TestHandleMachinesRendersInstances(t *testing.T) {
 	assert.Contains(t, string(body), "control-plane")
 	assert.Contains(t, string(body), "node-b")
 	assert.Contains(t, string(body), "Unclaimed")
+}
+
+// deletingInstanceMux builds a router+mux serving a single Instance named
+// node-a with its own DeletionTimestamp set (as if InstanceResetFinalizer
+// were still resetting it back to maintenance mode) but its stale
+// Discovered=True condition from before deletion started left untouched —
+// shared by the list/detail "Deleting" tests below, the same
+// one-fixture-two-routes shape as newTalosClusterKubeconfigMux.
+func deletingInstanceMux(t *testing.T) *http.ServeMux {
+	t.Helper()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+
+	deleting := discoveredInstance("node-a", "v1.9.0")
+	now := metav1.Now()
+	deleting.DeletionTimestamp = &now
+	deleting.Finalizers = []string{"kontinuum.sh/talos-reset"}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{instances: []v1alpha2.Instance{deleting}}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	return mux
+}
+
+// assertRendersDeletingNotDiscovered asserts body renders the amber
+// "Deleting" badge instead of the green "Discovered" one — shared by the
+// Instance list/detail "Deleting" tests below.
+func assertRendersDeletingNotDiscovered(t *testing.T, body string) {
+	t.Helper()
+
+	assert.Contains(t, body, "bg-amber-900/40", "Deleting must render as the amber badge")
+	assert.Contains(t, body, ">Deleting<")
+	assert.NotContains(t, body, "text-green-300\">Discovered<",
+		"the green Discovered badge must not render once deletion has started")
+}
+
+// TestHandleMachinesRendersDeletingForInstanceWithDeletionTimestamp covers
+// an Instance mid-reset (InstanceResetFinalizer still resetting it back to
+// maintenance mode): its own Discovered=True condition is left over from
+// before deletion started — the row must show "Deleting" instead of
+// "Discovered".
+func TestHandleMachinesRendersDeletingForInstanceWithDeletionTimestamp(t *testing.T) {
+	t.Parallel()
+
+	mux := deletingInstanceMux(t)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances"))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assertRendersDeletingNotDiscovered(t, string(body))
 }
 
 func TestHandleMachinesShowsEmptyState(t *testing.T) {
@@ -1870,28 +2220,33 @@ func TestHandleMachineDetailRendersInstance(t *testing.T) {
 	assert.Contains(t, string(body), "Discovered via 10.0.0.5")
 }
 
-func TestHandleMachineDetailReturnsNotFoundForUnknownInstance(t *testing.T) {
+// TestHandleMachineDetailRendersDeletingForInstanceWithDeletionTimestamp
+// covers the same "Deleting" override as the list-page test above, on the
+// detail page's own title-bar badge.
+func TestHandleMachineDetailRendersDeletingForInstanceWithDeletionTimestamp(t *testing.T) {
 	t.Parallel()
 
-	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
-	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
-		return stubKontinuumLister{}, nil
-	}
-
-	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
-		config.Config{}, false, nil)
-
-	mux := http.NewServeMux()
-	router.RegisterRoutes(mux, nil, nil)
+	mux := deletingInstanceMux(t)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances/does-not-exist"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances/node-a"))
 
 	resp := recorder.Result()
 
-	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
 
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assertRendersDeletingNotDiscovered(t, string(body))
+}
+
+func TestHandleMachineDetailRedirectsToListForUnknownInstance(t *testing.T) {
+	t.Parallel()
+
+	assertGetRedirectsTo(t,
+		"/app/kontinuum.sh/namespaces/kontinuum-system/instances/does-not-exist",
+		"/app/kontinuum.sh/namespaces/kontinuum-system/instances")
 }
 
 func TestHandleMachineDetailReturnsServerErrorWhenFactoryFails(t *testing.T) {
@@ -1931,12 +2286,116 @@ func TestHandleMachineDetailInvalidatesSessionOnForbidden(t *testing.T) {
 	assertForbiddenInvalidatesSession(t, request, kontinuumFactory)
 }
 
+// assertGetRedirectsTo issues a GET to path against a router with an empty
+// KontinuumClient (so every object lookup 404s) and asserts the response is
+// a plain (non-htmx) redirect to wantLocation — shared by every
+// notFoundFallback test below that otherwise only differs in which path it
+// starts from and where that's expected to land.
+func assertGetRedirectsTo(t *testing.T, path, wantLocation string) {
+	t.Helper()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, path))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+	assert.Equal(t, wantLocation, resp.Header.Get("Location"))
+}
+
+// assertDeleteRedirectsToList issues a DELETE to path against a router whose
+// KontinuumClient always succeeds, and asserts the response redirects the
+// browser to wantRedirect via Hx-Redirect — shared by
+// TestHandleDeleteMachineRemovesInstanceAndRedirectsToList and
+// TestHandleDeleteTalosClusterRemovesClusterAndRedirectsToList below, which
+// are otherwise identical apart from which object kind's delete route they
+// hit.
+func assertDeleteRedirectsToList(t *testing.T, path, wantRedirect string) {
+	t.Helper()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestDeleteRequest(t, path))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, wantRedirect, resp.Header.Get("Hx-Redirect"))
+}
+
+func TestHandleDeleteMachineRemovesInstanceAndRedirectsToList(t *testing.T) {
+	t.Parallel()
+
+	assertDeleteRedirectsToList(t,
+		"/app/kontinuum.sh/namespaces/kontinuum-system/instances/node-a",
+		"/app/kontinuum.sh/namespaces/kontinuum-system/instances")
+}
+
+func TestHandleDeleteMachineReturnsBadGatewayOnFailure(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{deleteErr: errFactory}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestDeleteRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances/node-a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
+}
+
+func TestHandleDeleteMachineInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: "instances"}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{deleteErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
+	}
+
+	assertForbiddenInvalidatesSession(t,
+		newTestDeleteRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances/node-a"), kontinuumFactory)
+}
+
 // talosClusterFixture builds a TalosCluster fixture named
 // testTalosClusterName, with a control-plane pool, one named worker pool,
 // and a Ready condition — shared by the clusters list/detail tests below.
 func talosClusterFixture(ready metav1.ConditionStatus) v1alpha2.TalosCluster {
 	return v1alpha2.TalosCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: testTalosClusterName, Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: testTalosClusterName, Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec: v1alpha2.TalosClusterSpec{
 			Talos:      v1alpha2.TalosSpec{Version: "v1.13.0"},
 			Kubernetes: v1alpha2.KubernetesSpec{Version: "v1.32.0"},
@@ -1955,7 +2414,7 @@ func talosClusterFixture(ready metav1.ConditionStatus) v1alpha2.TalosCluster {
 				},
 			},
 			SecretRef: v1alpha2.SecretReference{
-				Name: "taloscluster-" + testTalosClusterName, Namespace: v1alpha2.DefaultSecretNamespace,
+				Name: "taloscluster-" + testTalosClusterName, Namespace: v1alpha2.KontinuumSystemNamespace,
 			},
 		},
 	}
@@ -1997,6 +2456,60 @@ func TestHandleTalosClustersRendersList(t *testing.T) {
 	assert.Contains(t, string(body), `href="/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"`)
 	assert.Contains(t, string(body), `href="/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters"`,
 		"the nav's own Clusters link")
+}
+
+// deletingTalosClusterMux builds a router+mux serving a single TalosCluster
+// named testTalosClusterName with its own DeletionTimestamp set (as if
+// TalosClusterFinalizer were still tearing it down) but its stale
+// Ready=True condition from before deletion started left untouched —
+// shared by the list/detail "Deleting" tests below, the same
+// one-fixture-two-routes shape as newTalosClusterKubeconfigMux.
+func deletingTalosClusterMux(t *testing.T) *http.ServeMux {
+	t.Helper()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	cluster := talosClusterFixture(metav1.ConditionTrue)
+	now := metav1.Now()
+	cluster.DeletionTimestamp = &now
+	cluster.Finalizers = []string{"kontinuum.sh/taloscluster-teardown"}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{talosClusters: []v1alpha2.TalosCluster{cluster}}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	return mux
+}
+
+// TestHandleTalosClustersRendersDeletingForClusterWithDeletionTimestamp
+// covers a TalosCluster mid-teardown: its own Ready condition is left over
+// from before deletion started and would otherwise read as "everything's
+// fine" — the row must show "Deleting" instead.
+func TestHandleTalosClustersRendersDeletingForClusterWithDeletionTimestamp(t *testing.T) {
+	t.Parallel()
+
+	mux := deletingTalosClusterMux(t)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "Deleting")
+	assert.NotContains(t, string(body), "Ready=True")
 }
 
 func TestHandleTalosClustersShowsEmptyState(t *testing.T) {
@@ -2083,7 +2596,7 @@ func newTalosClusterKubeconfigMux(t *testing.T) *http.ServeMux {
 		Status:     v1alpha2.InstancePoolStatus{ReadyReplicas: 1},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "taloscluster-eu-eu-1a", Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "taloscluster-eu-eu-1a", Namespace: v1alpha2.KontinuumSystemNamespace},
 		Data:       map[string][]byte{"kubeconfig": []byte("apiVersion: v1\nkind: Config\n")},
 	}
 
@@ -2205,27 +2718,35 @@ func TestHandleTalosClusterDetailShowsNoKubeconfigMessageWhenNotReady(t *testing
 	assert.NotContains(t, string(body), "eu/eu-1a", "no Zone shares this cluster's name")
 }
 
-func TestHandleTalosClusterDetailReturnsNotFoundForUnknownCluster(t *testing.T) {
+// TestHandleTalosClusterDetailRendersDeletingForClusterWithDeletionTimestamp
+// covers the same "Deleting" override as the list-page test above, on the
+// detail page's own title-bar badge.
+func TestHandleTalosClusterDetailRendersDeletingForClusterWithDeletionTimestamp(t *testing.T) {
 	t.Parallel()
 
-	factory := func(context.Context) (ui.NamespaceLister, error) {
-		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
-	}
-	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
-
-	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
-
-	mux := http.NewServeMux()
-	router.RegisterRoutes(mux, nil, nil)
+	mux := deletingTalosClusterMux(t)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/missing"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
 
 	resp := recorder.Result()
 
 	defer func() { _ = resp.Body.Close() }()
 
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "Deleting")
+	assert.NotContains(t, string(body), "Ready=True")
+}
+
+func TestHandleTalosClusterDetailRedirectsToListForUnknownCluster(t *testing.T) {
+	t.Parallel()
+
+	assertGetRedirectsTo(t,
+		"/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/missing",
+		"/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters")
 }
 
 func TestHandleTalosClusterDetailInvalidatesSessionOnForbidden(t *testing.T) {
@@ -2250,7 +2771,7 @@ func TestHandleTalosClusterKubeconfigDownloadServesFileWithHeaders(t *testing.T)
 
 	cluster := talosClusterFixture(metav1.ConditionTrue)
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "taloscluster-eu-eu-1a", Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "taloscluster-eu-eu-1a", Namespace: v1alpha2.KontinuumSystemNamespace},
 		Data:       map[string][]byte{"kubeconfig": []byte("apiVersion: v1\nkind: Config\n")},
 	}
 
@@ -2279,7 +2800,7 @@ func TestHandleTalosClusterKubeconfigDownloadServesFileWithHeaders(t *testing.T)
 	assert.Equal(t, "apiVersion: v1\nkind: Config\n", string(body))
 }
 
-func TestHandleTalosClusterKubeconfigDownloadReturnsNotFoundWhenNotReady(t *testing.T) {
+func TestHandleTalosClusterKubeconfigDownloadRedirectsToClusterWhenNotReady(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -2306,31 +2827,23 @@ func TestHandleTalosClusterKubeconfigDownloadReturnsNotFoundWhenNotReady(t *test
 
 	defer func() { _ = resp.Body.Close() }()
 
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, http.StatusFound, resp.StatusCode)
+	assert.Equal(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a",
+		resp.Header.Get("Location"), "no kubeconfig yet, but the cluster itself exists — back to its own detail page")
 }
 
-func TestHandleTalosClusterKubeconfigDownloadReturnsNotFoundForUnknownCluster(t *testing.T) {
+// TestHandleTalosClusterKubeconfigDownloadRedirectsOneHopUpForUnknownCluster
+// covers notFoundFallback's own one-redirect-per-request contract: this
+// request's immediate parent is the (also missing) cluster's own detail
+// page, not the clusters list two levels up — the list only gets reached
+// once a browser follows this redirect and hits that detail page's own
+// identical fallback in turn (see TestHandleTalosClusterDetailRedirectsToListForUnknownCluster).
+func TestHandleTalosClusterKubeconfigDownloadRedirectsOneHopUpForUnknownCluster(t *testing.T) {
 	t.Parallel()
 
-	factory := func(context.Context) (ui.NamespaceLister, error) {
-		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
-	}
-	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
-
-	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
-
-	mux := http.NewServeMux()
-	router.RegisterRoutes(mux, nil, nil)
-
-	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder,
-		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/missing/kubeconfig"))
-
-	resp := recorder.Result()
-
-	defer func() { _ = resp.Body.Close() }()
-
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assertGetRedirectsTo(t,
+		"/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/missing/kubeconfig",
+		"/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/missing")
 }
 
 func TestHandleTalosClusterKubeconfigDownloadInvalidatesSessionOnForbidden(t *testing.T) {
@@ -2344,5 +2857,52 @@ func TestHandleTalosClusterKubeconfigDownloadInvalidatesSessionOnForbidden(t *te
 
 	assertForbiddenInvalidatesSession(t,
 		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a/kubeconfig"),
+		kontinuumFactory)
+}
+
+func TestHandleDeleteTalosClusterRemovesClusterAndRedirectsToList(t *testing.T) {
+	t.Parallel()
+
+	assertDeleteRedirectsToList(t,
+		"/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a",
+		"/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters")
+}
+
+func TestHandleDeleteTalosClusterReturnsBadGatewayOnFailure(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{deleteErr: errFactory}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder,
+		newTestDeleteRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
+}
+
+func TestHandleDeleteTalosClusterInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: talosClustersResource}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{deleteErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
+	}
+
+	assertForbiddenInvalidatesSession(t,
+		newTestDeleteRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"),
 		kontinuumFactory)
 }

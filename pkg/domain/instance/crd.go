@@ -65,8 +65,9 @@ func definitions() []crd.Definition {
 // foundational kind rather than a downstream one.
 func EnsureCRDs(ctx context.Context, loopbackConfig *restclient.Config, logger *slog.Logger) error {
 	for _, def := range definitions() {
-		// A no-op for Addon, whose scope hasn't changed — see MigrateScope's
-		// own doc for exactly which transition it acts on.
+		// A no-op once every kind here is already Namespaced (the steady
+		// state after this deploys) — see MigrateScope's own doc for exactly
+		// which transition it acts on.
 		migrated, err := crd.MigrateScope(ctx, loopbackConfig, crdconfig.Files, def, logger)
 		if err != nil {
 			return fmt.Errorf("failed to migrate %s crd scope: %w", def.Name, err)
@@ -77,7 +78,7 @@ func EnsureCRDs(ctx context.Context, loopbackConfig *restclient.Config, logger *
 			return fmt.Errorf("failed to ensure %s crd: %w", def.Name, err)
 		}
 
-		err = crd.RestoreMigrated(ctx, loopbackConfig, migrated, v1alpha2.DefaultSecretNamespace, logger)
+		err = crd.RestoreMigrated(ctx, loopbackConfig, migrated, v1alpha2.KontinuumSystemNamespace, logger)
 		if err != nil {
 			return fmt.Errorf("failed to restore migrated %s objects: %w", def.Name, err)
 		}

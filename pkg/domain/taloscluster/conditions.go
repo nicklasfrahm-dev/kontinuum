@@ -83,3 +83,39 @@ func markMemberCondition(
 ) {
 	setMemberCondition(ctx, kubeClient, logger, member, conditionType, metav1.ConditionTrue, reason, message)
 }
+
+// clearMemberConditions removes every condition type this package's own
+// member reconciler ever sets (MemberConfiguredConditionType,
+// MemberJoinedConditionType, MemberReadyConditionType) from member's own
+// status.conditions and persists that, if any were actually present —
+// called by InstanceResetReconciler once an Instance goes back to
+// unclaimed. Unlike setMemberCondition/markMemberCondition above, which are
+// deliberately append-only while a member is still part of a cluster (see
+// MemberConfiguredConditionType's own doc), none of these still describe
+// anything real once the Instance is no longer claimed by any pool: the
+// node's prior config, if any, is specific to that claim episode, not a
+// property of the Instance itself, so leaving it behind would misreport an
+// unclaimed, freshly-rediscovered node as still configured for a cluster
+// it's no longer part of.
+func clearMemberConditions(
+	ctx context.Context, kubeClient client.Client, logger *slog.Logger, member *v1alpha2.Instance,
+) {
+	conditionTypes := []string{MemberConfiguredConditionType, MemberJoinedConditionType, MemberReadyConditionType}
+
+	changed := false
+
+	for _, conditionType := range conditionTypes {
+		if meta.RemoveStatusCondition(&member.Status.Conditions, conditionType) {
+			changed = true
+		}
+	}
+
+	if !changed {
+		return
+	}
+
+	err := kubeClient.Status().Update(ctx, member)
+	if err != nil {
+		logger.Warn("failed to clear stale member conditions", "instance", member.Name, "error", err)
+	}
+}

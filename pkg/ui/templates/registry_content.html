@@ -93,6 +93,7 @@
                     <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Condition</th>
                     <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Message</th>
                     <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Age</th>
+                    <th class="px-6 py-2 text-right text-xs font-medium text-neutral-500 uppercase tracking-wider">Actions</th>
                 </tr>
             </thead>
             <tbody>
@@ -101,7 +102,9 @@
                     <td class="px-6 py-2 text-sm text-neutral-400">{{if .Region}}{{.Region}}{{else}}-{{end}}</td>
                     <td class="px-6 py-2 text-sm font-medium text-white">{{.Name}}</td>
                     <td class="px-6 py-2">
-                        {{if .Condition}}
+                        {{if .Deleting}}
+                        <span class="inline-flex items-center gap-1.5 bg-amber-900/40 border border-amber-700 rounded-full px-2.5 py-1 text-xs font-medium text-amber-300">Deleting</span>
+                        {{else if .Condition}}
                         {{if .ConditionOK}}
                         <span class="inline-flex items-center gap-1.5 bg-green-900/40 border border-green-700 rounded-full px-2.5 py-1 text-xs font-medium text-green-300">{{.Condition}}</span>
                         {{else}}
@@ -113,6 +116,13 @@
                     </td>
                     <td class="px-6 py-2 text-sm text-neutral-400">{{if .Message}}{{.Message}}{{else}}-{{end}}</td>
                     <td class="px-6 py-2 text-sm text-neutral-400">{{.Age}}</td>
+                    <td class="px-6 py-2 text-right">
+                        <button type="button" onclick="openZoneLeaveModal('{{js .Name}}', '{{$.Namespace}}')"
+                                class="inline-flex items-center justify-center rounded-lg p-1.5 text-neutral-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                                aria-label="Decommission {{.Name}}">
+                            {{template "icon-trash"}}
+                        </button>
+                    </td>
                 </tr>
                 {{end}}
             </tbody>
@@ -132,6 +142,7 @@
      reveal panel back to masked mid-copy (the kubectl access card below),
      every time the instance list refreshes. -->
 {{template "zone-add-modal" .}}
+{{template "zone-leave-modal" .}}
 
 <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
     <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
@@ -191,6 +202,97 @@
     // the click lands on the dialog element itself (the backdrop area),
     // not when it bubbles up from a click inside the dialog's own content.
     document.getElementById('zone-add-modal').addEventListener('click', function (event) {
+        if (event.target === this) {
+            this.close();
+        }
+    });
+
+    // handleZoneAdd's success response swaps in a hidden
+    // [data-toast-prefix] marker rather than a message rendered inline
+    // (see zone_add_modal.html) — close the dialog and surface it as a
+    // toast (see layout.html's showToast) instead of leaving the dialog
+    // open around a static success banner.
+    document.getElementById('zone-add-modal-body').addEventListener('htmx:afterSwap', function (event) {
+        var marker = event.target.querySelector('[data-toast-prefix]');
+        if (!marker) {
+            return;
+        }
+
+        document.getElementById('zone-add-modal').close();
+        showToast(marker.getAttribute('data-toast-prefix'), marker.getAttribute('data-toast-command'),
+            marker.getAttribute('data-toast-suffix'));
+    });
+
+    // One shared "Decommission zone" dialog, retargeted per row rather than one
+    // dialog per zone — see zone_leave_modal.html's own doc for why
+    // confirmation requires typing the name back rather than a plain
+    // hx-confirm prompt.
+    var zoneLeaveModal = document.getElementById('zone-leave-modal');
+    var zoneLeaveModalInput = document.getElementById('zone-leave-modal-input');
+    var zoneLeaveModalConfirm = document.getElementById('zone-leave-modal-confirm');
+    var zoneLeaveModalExpectedName = '';
+
+    // Close the dialog once the hx-delete it issued actually succeeds —
+    // htmx's own swap already replaced #registry-content by the time this
+    // fires, so leaving the dialog open would just sit on top of the
+    // now-updated (zone gone, or showing teardown progress) page underneath
+    // for no reason. A failed request (network error, 4xx/5xx) leaves the
+    // dialog open so whatever went wrong stays visible.
+    zoneLeaveModalConfirm.addEventListener('htmx:afterRequest', function (event) {
+        if (event.detail.successful) {
+            zoneLeaveModal.close();
+        }
+    });
+
+    // Clicking either code chip (the teardown paragraph's name, or the
+    // "type X to confirm" name) copies the zone name — both always show
+    // zoneLeaveModalExpectedName, so one handler covers both regardless of
+    // which one was clicked. Each chip is itself a flex container (see
+    // zone_leave_modal.html) holding a [data-name-text] span and a
+    // pre-rendered, initially-hidden checkmark+"Copied" span; toggling which
+    // one is visible briefly replaces the chip's own displayed content
+    // rather than appending anything beside it.
+    document.querySelectorAll('#zone-leave-modal-name, #zone-leave-modal-confirm-name').forEach(function (code) {
+        var nameText = code.querySelector('[data-name-text]');
+        var copiedFeedback = code.querySelector('[data-copied-feedback]');
+
+        code.addEventListener('click', function () {
+            navigator.clipboard.writeText(zoneLeaveModalExpectedName).then(function () {
+                nameText.classList.add('hidden');
+                copiedFeedback.classList.remove('hidden');
+                copiedFeedback.classList.add('inline-flex');
+
+                setTimeout(function () {
+                    nameText.classList.remove('hidden');
+                    copiedFeedback.classList.add('hidden');
+                    copiedFeedback.classList.remove('inline-flex');
+                }, 1500);
+            });
+        });
+    });
+
+    function openZoneLeaveModal(name, namespace) {
+        zoneLeaveModalExpectedName = name;
+        document.querySelector('#zone-leave-modal-name [data-name-text]').textContent = name;
+        document.querySelector('#zone-leave-modal-confirm-name [data-name-text]').textContent = name;
+        zoneLeaveModalInput.value = '';
+        zoneLeaveModalConfirm.disabled = true;
+        zoneLeaveModalConfirm.setAttribute('hx-delete',
+            '/app/kontinuum.sh/namespaces/' + encodeURIComponent(namespace) + '/zones/' + encodeURIComponent(name));
+        // hx-delete is only bound to an element once, on htmx's initial
+        // scan — reassigning the attribute above doesn't itself rebind a
+        // dynamically-retargeted button, so re-process it here exactly as
+        // openZoneAddModal does for its own freshly-swapped content.
+        htmx.process(zoneLeaveModalConfirm);
+        zoneLeaveModalInput.focus();
+        zoneLeaveModal.showModal();
+    }
+
+    function updateZoneLeaveModalConfirm() {
+        zoneLeaveModalConfirm.disabled = zoneLeaveModalInput.value !== zoneLeaveModalExpectedName;
+    }
+
+    document.getElementById('zone-leave-modal').addEventListener('click', function (event) {
         if (event.target === this) {
             this.close();
         }

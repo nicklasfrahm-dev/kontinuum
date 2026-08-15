@@ -1,69 +1,29 @@
 package zone_test
 
 import (
-	"context"
-	"encoding/json"
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
 
 	certmanagerv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
-	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
-	talosconfig "github.com/siderolabs/talos/pkg/machinery/config"
-	talossecrets "github.com/siderolabs/talos/pkg/machinery/config/generate/secrets"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
-	"github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/zone"
 )
 
 // testTeardownTimeout is generous enough that no test below except
 // TestReconcileTeardownGivesUpAfterTimeout ever hits it.
 const testTeardownTimeout = time.Hour
-
-// testControlPlaneAddress is the sole control-plane member's dial address
-// in TestReconcileTeardownDeletesDownstreamAndResetsSeedNode.
-const testControlPlaneAddress = "10.0.0.5"
-
-// fakeBootstrapper is taloscluster.ClusterBootstrapper's test double for
-// this package's own teardown tests — only Reset is ever exercised through
-// zone.Reconciler, but every interface method must still be implemented.
-type fakeBootstrapper struct {
-	resetCalls []string
-	resetErr   error
-}
-
-func (*fakeBootstrapper) ApplyConfiguration(context.Context, string, []byte) error { return nil }
-
-func (*fakeBootstrapper) Bootstrap(context.Context, string, *clientconfig.Config) error { return nil }
-
-func (*fakeBootstrapper) HealthCheck(
-	context.Context, string, *clientconfig.Config, []string, time.Duration,
-) error {
-	return nil
-}
-
-func (*fakeBootstrapper) Kubeconfig(context.Context, string, *clientconfig.Config) ([]byte, error) {
-	return []byte("fake-kubeconfig"), nil
-}
-
-func (*fakeBootstrapper) Version(context.Context, string, string, *clientconfig.Config) (string, error) {
-	return "", nil
-}
-
-func (f *fakeBootstrapper) Reset(_ context.Context, _, node string, _ *clientconfig.Config) error {
-	f.resetCalls = append(f.resetCalls, node)
-
-	return f.resetErr
-}
 
 // deletingZoneObject returns testZoneObject with ZoneFinalizer already set —
 // the fake client rejects a Create carrying a DeletionTimestamp directly, so
@@ -79,78 +39,52 @@ func deletingZoneObject() *v1alpha2.Zone {
 	return zoneObj
 }
 
-// talosSecretsBundleData marshals a real Talos secrets bundle the same way
-// pkg/domain/taloscluster's own ensureSecretsBundle does, for the version
-// generateConfigs/resolveVersions resolves to when TalosClusterSpec.Talos is
-// left unset ("v1.13.0", taloscluster's own pinned default) — needed so
-// taloscluster.ResetControlPlane's loadSecretsBundle can actually
-// unmarshal a fixture's stored bundle, not because this test package
-// depends on that specific version staying pinned forever.
-func talosSecretsBundleData(t *testing.T) []byte {
-	t.Helper()
+// TestIgnoreNotFoundOrNoMatch covers every input zone.IgnoreNotFoundOrNoMatch
+// branches on — see that function's own doc for why a missing Kind
+// (observed for real: a Zone deleted before its downstream cluster ever
+// got Cilium/cert-manager/the Gateway API CRDs actually installed, despite
+// their own Addon objects claiming Healthy) is tolerated the same way a
+// plain NotFound already was, rather than retried until Zone's own
+// TeardownTimeout gives up regardless.
+func TestIgnoreNotFoundOrNoMatch(t *testing.T) {
+	t.Parallel()
 
-	contract, err := talosconfig.ParseContractFromVersion("v1.13.0")
-	require.NoError(t, err)
+	notFoundResource := schema.GroupResource{Group: "gateway.networking.k8s.io", Resource: "httproutes"}
+	notFound := apierrors.NewNotFound(notFoundResource, "kontinuum")
+	noResourceMatch := &meta.NoResourceMatchError{PartialResource: schema.GroupVersionResource{
+		Group: "gateway.networking.k8s.io", Version: "v1",
+	}}
+	noKindMatch := &meta.NoKindMatchError{GroupKind: schema.GroupKind{Group: "cert-manager.io", Kind: "ClusterIssuer"}}
+	wrapped := fmt.Errorf("unable to retrieve the complete list of server APIs: %w", noResourceMatch)
 
-	bundle, err := talossecrets.NewBundle(talossecrets.NewClock(), contract)
-	require.NoError(t, err)
-
-	data, err := json.Marshal(bundle)
-	require.NoError(t, err)
-
-	return data
+	assert.NoError(t, zone.IgnoreNotFoundOrNoMatch(nil))
+	assert.NoError(t, zone.IgnoreNotFoundOrNoMatch(notFound))
+	assert.NoError(t, zone.IgnoreNotFoundOrNoMatch(noResourceMatch))
+	assert.NoError(t, zone.IgnoreNotFoundOrNoMatch(noKindMatch))
+	assert.NoError(t, zone.IgnoreNotFoundOrNoMatch(wrapped),
+		"a NoMatchError wrapped by controller-runtime's own discovery error must still be recognized through it")
+	assert.ErrorIs(t, zone.IgnoreNotFoundOrNoMatch(assert.AnError), assert.AnError,
+		"a genuine, unrelated failure must still propagate and retry")
 }
 
-// bootstrappedClusterSecret extends kubeconfigSecret with a real secrets
-// bundle under the "secrets-bundle" key — matching the same Secret
-// pkg/domain/taloscluster/secrets.go stores both under, at
-// TalosCluster.status.secretRef — so taloscluster.ResetControlPlane can
-// load a talosCfg from it exactly as it would in production.
-func bootstrappedClusterSecret(t *testing.T) *corev1.Secret {
-	t.Helper()
-
-	secret := kubeconfigSecret()
-	secret.Data["secrets-bundle"] = talosSecretsBundleData(t)
-
-	return secret
-}
-
-// controlPlaneInstance is a discovered Instance claimed by poolName — the
-// only kind of member taloscluster.ResetControlPlane's own resolveMembers
-// ever resets (see that function's doc).
-func controlPlaneInstance(poolName, addr string) *v1alpha2.Instance {
-	return &v1alpha2.Instance{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "cp-node-1", Namespace: v1alpha2.DefaultSecretNamespace,
-			Labels: map[string]string{v1alpha2.LabelClaimedBy: poolName},
-		},
-		Spec: v1alpha2.InstanceSpec{Interfaces: []string{addr}},
-		Status: v1alpha2.InstanceStatus{
-			Conditions: []metav1.Condition{
-				{Type: instance.DiscoveredConditionType, Status: metav1.ConditionTrue, Reason: "Discovered"},
-			},
-		},
-	}
-}
-
-// TestReconcileTeardownDeletesDownstreamAndResetsSeedNode covers the full
+// TestReconcileTeardownDeletesDownstreamAndTalosCluster covers the full
 // happy path end to end: an install pass creates every downstream object,
 // then a delete tears every one of them back down (including the
 // cluster-scoped ClusterIssuer, which a namespace-cascade alone would never
-// reach), resets the control-plane seed node, and finally removes the
-// finalizer — letting the Zone actually delete.
-func TestReconcileTeardownDeletesDownstreamAndResetsSeedNode(t *testing.T) {
+// reach), deletes the TalosCluster, and finally removes the finalizer —
+// letting the Zone actually delete. The actual Talos Reset is no longer
+// this package's concern — see reconcileTeardown's own doc — so it isn't
+// exercised here; taloscluster.InstanceResetReconciler's own tests cover
+// it.
+func TestReconcileTeardownDeletesDownstreamAndTalosCluster(t *testing.T) {
 	t.Parallel()
 
 	kontinuum, kontinuumSecret := registeredKontinuum("hub", testStorage)
 	cluster := readyTalosCluster()
-	cluster.Spec.ControlPlane.PoolRef = v1alpha2.InstancePoolReference{Name: "cp-pool"}
-	cpInstance := controlPlaneInstance("cp-pool", testControlPlaneAddress)
-	secret := bootstrappedClusterSecret(t)
+	secret := kubeconfigSecret()
 
-	hubClient := newHubFakeClient(t, testZoneObject(), cluster, secret, cpInstance, kontinuum, kontinuumSecret)
+	hubClient := newHubFakeClient(t, testZoneObject(), cluster, secret, kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)
-	bootstrapper := &fakeBootstrapper{}
 
 	reconciler := &zone.Reconciler{
 		Client:                  hubClient,
@@ -159,7 +93,6 @@ func TestReconcileTeardownDeletesDownstreamAndResetsSeedNode(t *testing.T) {
 		ACMEServer:              "https://acme-v02.api.letsencrypt.org/directory",
 		Image:                   testImage,
 		RetryInterval:           testRetryInterval,
-		Bootstrapper:            bootstrapper,
 		TeardownTimeout:         testTeardownTimeout,
 		Logger:                  slog.Default(),
 	}
@@ -193,19 +126,25 @@ func TestReconcileTeardownDeletesDownstreamAndResetsSeedNode(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(err),
 		"the cluster-scoped ClusterIssuer must be deleted explicitly, not just cascaded via the namespace")
 
-	assert.Equal(t, []string{testControlPlaneAddress}, bootstrapper.resetCalls)
+	// The TalosCluster is deleted explicitly here — see reconcileTeardown's
+	// own doc for why (taloscluster's reconciler would otherwise keep
+	// actively managing members with no idea the Zone owning them is being
+	// torn down).
+	err = hubClient.Get(t.Context(), client.ObjectKey{Name: testZoneName, Namespace: v1alpha2.KontinuumSystemNamespace},
+		&v1alpha2.TalosCluster{})
+	assert.True(t, apierrors.IsNotFound(err), "talos cluster must be deleted as part of teardown")
 }
 
 // TestReconcileTeardownSkipsWhenNeverBootstrapped covers a Zone deleted
-// before its TalosCluster ever got far enough to persist a kubeconfig or
-// secrets bundle: both the downstream teardown and the Talos Reset step
-// have nothing to act on, so teardown succeeds immediately.
+// before its TalosCluster ever got far enough to persist a kubeconfig:
+// downstream teardown has nothing to act on, so teardown succeeds
+// immediately.
 func TestReconcileTeardownSkipsWhenNeverBootstrapped(t *testing.T) {
 	t.Parallel()
 
 	zoneObj := deletingZoneObject()
 	cluster := &v1alpha2.TalosCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: testZoneName, Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: testZoneName, Namespace: v1alpha2.KontinuumSystemNamespace},
 	}
 
 	hubClient := newHubFakeClient(t, zoneObj, cluster)
@@ -214,7 +153,6 @@ func TestReconcileTeardownSkipsWhenNeverBootstrapped(t *testing.T) {
 	reconciler := &zone.Reconciler{
 		Client:                  hubClient,
 		DownstreamClientBuilder: fakeDownstreamClientBuilder{},
-		Bootstrapper:            &fakeBootstrapper{},
 		RetryInterval:           testRetryInterval,
 		TeardownTimeout:         testTeardownTimeout,
 		Logger:                  slog.Default(),
@@ -244,7 +182,6 @@ func TestReconcileTeardownRemovesFinalizerWhenTalosClusterAlreadyGone(t *testing
 	reconciler := &zone.Reconciler{
 		Client:                  hubClient,
 		DownstreamClientBuilder: fakeDownstreamClientBuilder{},
-		Bootstrapper:            &fakeBootstrapper{},
 		RetryInterval:           testRetryInterval,
 		TeardownTimeout:         testTeardownTimeout,
 		Logger:                  slog.Default(),
@@ -277,7 +214,6 @@ func TestReconcileTeardownRetriesWhenDownstreamUnreachable(t *testing.T) {
 	reconciler := &zone.Reconciler{
 		Client:                  hubClient,
 		DownstreamClientBuilder: fakeDownstreamClientBuilder{err: assert.AnError},
-		Bootstrapper:            &fakeBootstrapper{},
 		RetryInterval:           testRetryInterval,
 		TeardownTimeout:         testTeardownTimeout,
 		Logger:                  slog.Default(),
@@ -313,7 +249,6 @@ func TestReconcileTeardownGivesUpAfterTimeout(t *testing.T) {
 	reconciler := &zone.Reconciler{
 		Client:                  hubClient,
 		DownstreamClientBuilder: fakeDownstreamClientBuilder{err: assert.AnError},
-		Bootstrapper:            &fakeBootstrapper{},
 		RetryInterval:           testRetryInterval,
 		TeardownTimeout:         time.Nanosecond,
 		Logger:                  slog.Default(),

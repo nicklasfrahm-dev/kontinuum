@@ -12,7 +12,7 @@ spec:
     listKind: AddonList
     plural: addons
     singular: addon
-  scope: Cluster
+  scope: Namespaced
   versions:
   - additionalPrinterColumns:
     - jsonPath: .spec.talosClusterRef.name
@@ -29,11 +29,12 @@ spec:
       openAPIV3Schema:
         description: |-
           Addon represents one addon belonging to a TalosCluster, installed and
-          health-probed by pkg/domain/addon's own AddonReconciler — an
-          independent, owned resource: TalosCluster's own reconciler only seeds
-          the two built-ins (see pkg/domain/addon's EnsureBuiltinSeeds) and
-          aggregates Ready across whatever Addons reference it, built-in or
-          fully custom alike.
+          health-probed by pkg/domain/addon's own AddonReconciler — namespaced
+          alongside, and owned by, its TalosCluster (see
+          pkg/domain/addon.EnsureBuiltinSeeds), so it's garbage-collected the
+          moment that cluster is deleted. TalosCluster's own reconciler only
+          seeds the two built-ins and aggregates Ready across whatever Addons
+          reference it, built-in or fully custom alike.
         properties:
           apiVersion:
             description: |-

@@ -324,7 +324,7 @@ spec:
                   namespace:
                     description: |-
                       Namespace is the Secret's namespace. Defaults to
-                      DefaultSecretNamespace.
+                      KontinuumSystemNamespace.
                     type: string
                 type: object
               version:

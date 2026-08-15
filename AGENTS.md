@@ -10,6 +10,10 @@
 - If the Makefile is modified, the README.md make targets section must be updated with the output of `make help`.
 - All enums must be PascalCase, with abbreviations capitalized, following Kubernetes conventions (e.g. `ClusterIP`).
 
+## UI
+
+- Never use `alert()`, `confirm()`, or `prompt()` (including htmx's `hx-confirm`, which shows the browser's native `confirm()`). All dialogs must be native `<dialog>` modals styled to match the rest of the app (see `pkg/ui/templates/components/zone_leave_modal.html` for the pattern).
+
 ## Documentation
 
 - All features must be documented in the `docs/` MkDocs site (see `mkdocs.yml`), not only in code comments.

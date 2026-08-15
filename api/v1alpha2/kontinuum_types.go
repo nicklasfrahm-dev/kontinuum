@@ -11,14 +11,15 @@ const (
 	// RoleWorker identifies a Kontinuum as managing a single region and zone.
 	RoleWorker = "Worker"
 
-	// DefaultSecretNamespace is where status.secretRef.namespace points by
-	// default — created automatically if it doesn't already exist, since
-	// Kontinuum is cluster-scoped and has no namespace of its own to fall
-	// back to. This is a namespace name, not a credential — gosec's G101
-	// flags it purely because "Secret" appears in the identifier.
+	// KontinuumSystemNamespace is the one shared namespace every hub-side
+	// object lives in today — Zone, Instance, InstancePool, TalosCluster,
+	// Addon, and where a Kontinuum's own status.secretRef.namespace points
+	// by default, created automatically if it doesn't already exist. This
+	// is a namespace name, not a credential — gosec's G101 flags it purely
+	// because "Secret" appears in the identifier.
 	//
 	//nolint:gosec // false positive: a namespace name, not a credential
-	DefaultSecretNamespace = "kontinuum-system"
+	KontinuumSystemNamespace = "kontinuum-system"
 )
 
 // This marker is the CRD's actual, authoritative region/zone invariant —
@@ -212,7 +213,7 @@ type KontinuumSecretReference struct {
 	// +optional
 	Name string `json:"name"`
 	// Namespace is the Secret's namespace. Defaults to
-	// DefaultSecretNamespace.
+	// KontinuumSystemNamespace.
 	// +optional
 	Namespace string `json:"namespace"`
 }

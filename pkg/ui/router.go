@@ -12,6 +12,8 @@ import (
 	"html/template"
 	"maps"
 	"net/http"
+	"net/url"
+	"path"
 	"sort"
 	"strings"
 	"time"
@@ -104,10 +106,10 @@ const (
 )
 
 // defaultTenantNamespace is where GET /app and /app/home land a caller who
-// hasn't picked a tenant yet — v1alpha2.DefaultSecretNamespace
+// hasn't picked a tenant yet — v1alpha2.KontinuumSystemNamespace
 // ("kontinuum-system"), the one namespace guaranteed to exist and be worth
 // looking at on every install (see pkg/domain/zone.Add's own doc).
-const defaultTenantNamespace = v1alpha2.DefaultSecretNamespace
+const defaultTenantNamespace = v1alpha2.KontinuumSystemNamespace
 
 // defaultInstancesPath is defaultTenantNamespace's own instances list URL —
 // shared by handleAppRoot/handleHome's redirects and nav.html's own
@@ -168,12 +170,15 @@ func mustParsePage(content ...string) *template.Template {
 		"templates/components/icon_chevrons_updown.html",
 		"templates/components/icon_registry.html",
 		"templates/components/icon_server.html",
-		"templates/components/icon_cluster.html",
 		"templates/components/icon_kubernetes.html",
 		"templates/components/icon_shield.html",
 		"templates/components/icon_logout.html",
 		"templates/components/icon_book_open_text.html",
 		"templates/components/icon_external_link.html",
+		// icon_check.html is used by layout.html's own toast (see
+		// showToast) — every page needs it, not just the pages that also
+		// happen to use it for their own copy-confirmation/checkmark UI.
+		"templates/components/icon_check.html",
 	}
 
 	files := make([]string, 0, len(shared)+len(content))
@@ -218,7 +223,8 @@ func NewRouter(
 	pages := map[string]*template.Template{
 		pageRegistry: mustParsePage("templates/registry_content.html",
 			"templates/components/icon_trash.html", "templates/components/icon_globe.html",
-			"templates/components/zone_add_modal.html", "templates/components/icon_terminal.html",
+			"templates/components/zone_add_modal.html", "templates/components/zone_leave_modal.html",
+			"templates/components/icon_terminal.html",
 			"templates/components/copy_snippet.html", "templates/components/icon_copy.html",
 			"templates/components/icon_check.html", "templates/components/icon_download.html",
 			"templates/components/icon_eye.html", "templates/components/icon_eye_off.html",
@@ -226,20 +232,21 @@ func NewRouter(
 		pageKontinuum: mustParsePage("templates/kontinuum_content.html",
 			"templates/components/icon_chevron_left.html", "templates/components/icon_eye.html",
 			"templates/components/icon_eye_off.html", "templates/components/icon_copy.html",
-			"templates/components/icon_check.html", "templates/components/icon_key.html",
+			"templates/components/icon_key.html",
 			"templates/components/icon_info.html", "templates/components/icon_download.html",
 			"templates/components/reveal_panel.html", "templates/components/reveal_panel_script.html"),
 		pageInstances: mustParsePage("templates/instances_content.html"),
 		pageInstanceDetail: mustParsePage("templates/instance_detail_content.html",
 			"templates/components/icon_chevron_left.html", "templates/components/icon_info.html",
-			"templates/components/icon_ethernet_port.html", "templates/components/icon_list_checks.html"),
+			"templates/components/icon_ethernet_port.html", "templates/components/icon_list_checks.html",
+			"templates/components/icon_trash.html"),
 		pageTalosClusters: mustParsePage("templates/talosclusters_content.html"),
 		pageTalosCluster: mustParsePage("templates/taloscluster_content.html",
 			"templates/components/icon_chevron_left.html", "templates/components/icon_info.html",
 			"templates/components/icon_list_checks.html",
 			"templates/components/icon_key.html", "templates/components/icon_download.html",
 			"templates/components/icon_eye.html", "templates/components/icon_eye_off.html",
-			"templates/components/icon_copy.html", "templates/components/icon_check.html",
+			"templates/components/icon_copy.html", "templates/components/icon_trash.html",
 			"templates/components/reveal_panel.html", "templates/components/reveal_panel_script.html",
 			"templates/components/copy_snippet.html"),
 		pageIAM: mustParsePage("templates/iam_content.html",
@@ -287,24 +294,128 @@ func (r *Router) RegisterRoutes(
 		protect = func(next http.HandlerFunc) http.HandlerFunc { return next }
 	}
 
+	// wrap composes protect with notFoundFallback (see that function's own
+	// doc) — every /app page route below goes through both, so a stale link
+	// to a since-deleted object walks up to its nearest still-valid parent
+	// instead of dead-ending on a bare 404.
+	wrap := func(next http.HandlerFunc) http.HandlerFunc { return protect(notFoundFallback(next)) }
+
 	mux.Handle("GET "+vendorURLPrefix, vendorHandler())
 	mux.HandleFunc("GET /{$}", handleRoot)
 	mux.HandleFunc("GET /app", appRoot)
-	mux.HandleFunc("GET /app/home", protect(handleAppHome))
-	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/kontinuums", protect(r.renderRegistry))
-	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/kontinuums/{name}", protect(r.handleKontinuumDetail))
+	mux.HandleFunc("GET /app/home", wrap(handleAppHome))
+	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/kontinuums", wrap(r.renderRegistry))
+	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/kontinuums/{name}", wrap(r.handleKontinuumDetail))
 	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/kontinuums/{name}/secret",
-		protect(r.handleKontinuumSecretDownload))
-	mux.HandleFunc("DELETE /app/kontinuum.sh/namespaces/{ns}/kontinuums/{name}", protect(r.handleDeleteInstance))
-	mux.HandleFunc("POST /app/zones/add", protect(r.handleZoneAdd))
-	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/instances", protect(r.handleInstances))
-	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/instances/{name}", protect(r.handleInstanceDetail))
-	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/talosclusters", protect(r.handleTalosClusters))
-	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/talosclusters/{name}", protect(r.handleTalosClusterDetail))
+		wrap(r.handleKontinuumSecretDownload))
+	mux.HandleFunc("DELETE /app/kontinuum.sh/namespaces/{ns}/kontinuums/{name}", wrap(r.handleDeleteInstance))
+	mux.HandleFunc("POST /app/zones/add", wrap(r.handleZoneAdd))
+	mux.HandleFunc("DELETE /app/kontinuum.sh/namespaces/{ns}/zones/{name}", wrap(r.handleDeleteZone))
+	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/instances", wrap(r.handleInstances))
+	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/instances/{name}", wrap(r.handleInstanceDetail))
+	mux.HandleFunc("DELETE /app/kontinuum.sh/namespaces/{ns}/instances/{name}", wrap(r.handleDeleteInstanceObject))
+	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/talosclusters", wrap(r.handleTalosClusters))
+	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/talosclusters/{name}", wrap(r.handleTalosClusterDetail))
+	mux.HandleFunc("DELETE /app/kontinuum.sh/namespaces/{ns}/talosclusters/{name}", wrap(r.handleDeleteTalosCluster))
 	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/talosclusters/{name}/kubeconfig",
-		protect(r.handleTalosClusterKubeconfigDownload))
-	mux.HandleFunc("GET /app/iam", protect(r.handleIAM))
-	mux.HandleFunc("GET /app/registry/kubeconfig", protect(r.handleRegistryKubeconfigDownload))
+		wrap(r.handleTalosClusterKubeconfigDownload))
+	mux.HandleFunc("GET /app/iam", wrap(r.handleIAM))
+	mux.HandleFunc("GET /app/registry/kubeconfig", wrap(r.handleRegistryKubeconfigDownload))
+
+	// Catch-all for any /app/... path that doesn't match one of the more
+	// specific patterns above (ServeMux always prefers the most specific
+	// match, so this never shadows them) — a mistyped or otherwise
+	// unroutable URL gets the same walk-up-to-parent treatment as a
+	// genuinely deleted object, via notFoundFallback below, rather than a
+	// bare 404 with nowhere obvious to go from here.
+	mux.HandleFunc("/app/", wrap(func(writer http.ResponseWriter, request *http.Request) {
+		http.NotFound(writer, request)
+	}))
+}
+
+// notFoundInterceptor is a http.ResponseWriter that withholds a 404 from
+// reaching the real client — see notFoundFallback's own doc for why.
+// Anything else (a real 200, an error page, a redirect) passes straight
+// through untouched.
+type notFoundInterceptor struct {
+	http.ResponseWriter
+
+	notFound bool
+}
+
+func (interceptor *notFoundInterceptor) WriteHeader(statusCode int) {
+	if statusCode == http.StatusNotFound {
+		interceptor.notFound = true
+
+		return
+	}
+
+	interceptor.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (interceptor *notFoundInterceptor) Write(body []byte) (int, error) {
+	if interceptor.notFound {
+		// http.NotFound's own plain-text body — discarded; notFoundFallback
+		// sends a redirect instead once next has finished running.
+		return len(body), nil
+	}
+
+	written, err := interceptor.ResponseWriter.Write(body)
+	if err != nil {
+		return written, fmt.Errorf("failed to write response: %w", err)
+	}
+
+	return written, nil
+}
+
+// notFoundFallback wraps next so that whenever it responds 404 — however
+// that happens: an object lookup's own apierrors.IsNotFound branch, or the
+// catch-all route's unconditional http.NotFound in RegisterRoutes above —
+// the caller is redirected to request's own parent path (the URL with its
+// final segment removed) instead of the bare "404 page not found" a
+// deleted object's own stale link (bookmarked, or linked to from
+// elsewhere) would otherwise dead-end on. If that parent itself doesn't
+// resolve to anything either — e.g. a TalosCluster's kubeconfig download
+// 404s because the cluster itself is gone, so its own detail page 404s
+// too — that parent's own handler runs through this exact same wrapping
+// and redirects up again, so a stale link naturally walks all the way up
+// to the nearest ancestor that still exists — a list page, which never
+// 404s on its own, at the very least, or /app itself (see appRoot's own
+// unconditional redirect) — purely through the browser following each
+// redirect in turn, no server-side loop needed. Only "/" has no parent
+// left to walk up to, so that's the one case this still answers with a
+// real 404.
+func notFoundFallback(next http.HandlerFunc) http.HandlerFunc {
+	return func(writer http.ResponseWriter, request *http.Request) {
+		interceptor := &notFoundInterceptor{ResponseWriter: writer}
+		next(interceptor, request)
+
+		if !interceptor.notFound {
+			return
+		}
+
+		parent := path.Dir(request.URL.Path)
+		if !isWithinApp(parent) || parent == request.URL.Path {
+			http.NotFound(writer, request)
+
+			return
+		}
+
+		target := url.URL{Path: parent}
+		http.Redirect(writer, request, target.String(), http.StatusFound)
+	}
+}
+
+// isWithinApp reports whether target is safe for notFoundFallback to send a
+// caller to: root-relative (so it can never carry a scheme or host of its
+// own) and still under /app. request.URL.Path — the only input path.Dir
+// ever derives target from — is already a parsed path with no scheme or
+// host of its own to begin with, so this is never expected to actually
+// reject anything in practice; it exists to make that invariant checked
+// rather than merely assumed, since target does end up as the target of an
+// http.Redirect.
+func isWithinApp(target string) bool {
+	return strings.HasPrefix(target, "/app") && !strings.HasPrefix(target, "//")
 }
 
 func handleRoot(writer http.ResponseWriter, request *http.Request) {
@@ -367,6 +478,12 @@ type zoneRow struct {
 	// "Type=Status" string back apart.
 	ConditionOK bool
 	Message     string
+	// Deleting is whether this Zone's own DeletionTimestamp is set — the
+	// template shows this instead of Condition/Message, since a condition
+	// like "ClusterReady=True" left over from before deletion started reads
+	// as "everything's fine" when it's actually mid-teardown (see
+	// ZoneFinalizer's own doc for that window).
+	Deleting bool
 }
 
 // handleDeleteInstance deletes the Kontinuum object named by the {name}
@@ -411,6 +528,52 @@ func (r *Router) handleDeleteInstance(writer http.ResponseWriter, request *http.
 	select {
 	case <-time.After(deleteDebounce):
 	case <-request.Context().Done():
+	}
+
+	r.renderRegistry(writer, request)
+}
+
+// handleDeleteZone deletes the Zone object named by the {name} path value,
+// then re-renders the registry page — the same shape as handleDeleteInstance
+// above. {ns} is not Zone's own scope (Zone is cluster-scoped) but
+// renderRegistry's own Kontinuum-instances table needs it, so the "leave
+// zone" button carries the page's current namespace through the URL purely
+// to thread it back into the re-render, same as every other route on this
+// page.
+//
+// Deleting here only sets Zone's deletionTimestamp — pkg/domain/zone's own
+// finalizer (see ZoneFinalizer) drives the actual downstream teardown and
+// seed-node reset asynchronously, then removes the finalizer once done, so
+// the row keeps showing (with its Teardown condition surfacing progress)
+// until that completes rather than disappearing immediately.
+func (r *Router) handleDeleteZone(writer http.ResponseWriter, request *http.Request) {
+	zones, err := r.zonesFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	// Unlike Kontinuum, Zone always lives in the fixed
+	// v1alpha2.KontinuumSystemNamespace (see pkg/domain/zone.Add) regardless of
+	// which tenant namespace the registry page currently shows — {ns} in
+	// this route is only along for renderRegistry's own re-render below, not
+	// Zone's actual namespace.
+	target := &v1alpha2.Zone{
+		ObjectMeta: metav1.ObjectMeta{Name: request.PathValue("name"), Namespace: v1alpha2.KontinuumSystemNamespace},
+	}
+
+	err = zones.Delete(request.Context(), target)
+	if err != nil && !apierrors.IsNotFound(err) {
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return
+		}
+
+		http.Error(writer, "failed to delete zone: "+err.Error(), http.StatusBadGateway)
+
+		return
 	}
 
 	r.renderRegistry(writer, request)
@@ -526,7 +689,10 @@ func (r *Router) listZoneRows(writer http.ResponseWriter, request *http.Request)
 	rows := make([]zoneRow, 0, len(list.Items))
 
 	for _, item := range list.Items {
-		row := zoneRow{Name: item.Name, Region: item.Spec.Region, Age: formatAge(item.CreationTimestamp.Time)}
+		row := zoneRow{
+			Name: item.Name, Region: item.Spec.Region, Age: formatAge(item.CreationTimestamp.Time),
+			Deleting: !item.DeletionTimestamp.IsZero(),
+		}
 
 		if cond := latestCondition(item.Status.Conditions); cond != nil {
 			row.Condition = cond.Type + "=" + string(cond.Status)
@@ -569,23 +735,25 @@ const maxZoneAddFormBytes = 1 << 16
 // renderRegistry), and again by handleZoneAdd on every submission.
 func (r *Router) zoneAddFormData(fields zoneAddFields, createdZone, formErr string) map[string]any {
 	return map[string]any{
-		"Region":            fields.region,
-		"Zone":              fields.zone,
-		"TalosAddress":      fields.talosAddress,
-		"TalosVersion":      fields.talosVersion,
-		"KubernetesVersion": fields.kubernetesVersion,
-		"CreatedZone":       createdZone,
-		"Error":             formErr,
+		"Region":              fields.region,
+		"Zone":                fields.zone,
+		"TalosAddress":        fields.talosAddress,
+		"TalosVersion":        fields.talosVersion,
+		"KubernetesVersion":   fields.kubernetesVersion,
+		"UnregisterInstances": fields.unregisterInstances,
+		"CreatedZone":         createdZone,
+		"Error":               formErr,
 	}
 }
 
 // zoneAddFields is "Add zone"'s parsed form fields.
 type zoneAddFields struct {
-	region            string
-	zone              string
-	talosAddress      string
-	talosVersion      string
-	kubernetesVersion string
+	region              string
+	zone                string
+	talosAddress        string
+	talosVersion        string
+	kubernetesVersion   string
+	unregisterInstances bool
 }
 
 // renderZoneAddModalBody renders just the "zone-add-modal-body" fragment
@@ -632,6 +800,10 @@ func (r *Router) handleZoneAdd(writer http.ResponseWriter, request *http.Request
 		talosAddress:      request.PostFormValue("talos-address"),
 		talosVersion:      request.PostFormValue("talos-version"),
 		kubernetesVersion: request.PostFormValue("kubernetes-version"),
+		// An unchecked checkbox omits its own key from the submitted form
+		// entirely (rather than submitting "false") — PostFormValue returns
+		// "" either way, same as any other never-submitted field.
+		unregisterInstances: request.PostFormValue("unregister-instances") == "on",
 	}
 
 	zones, err := r.zonesFor(request.Context())
@@ -642,11 +814,12 @@ func (r *Router) handleZoneAdd(writer http.ResponseWriter, request *http.Request
 	}
 
 	createdZone, err := zonedomain.Add(request.Context(), zones, zonedomain.AddOptions{
-		Region:            fields.region,
-		Zone:              fields.zone,
-		TalosAddress:      fields.talosAddress,
-		TalosVersion:      fields.talosVersion,
-		KubernetesVersion: fields.kubernetesVersion,
+		Region:                      fields.region,
+		Zone:                        fields.zone,
+		TalosAddress:                fields.talosAddress,
+		TalosVersion:                fields.talosVersion,
+		KubernetesVersion:           fields.kubernetesVersion,
+		UnregisterInstancesOnDelete: fields.unregisterInstances,
 	})
 	if err != nil {
 		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
@@ -980,6 +1153,11 @@ type instanceRow struct {
 	Reason       string
 	ClaimedBy    string
 	Age          string
+	// Deleting is whether this Instance's own DeletionTimestamp is set —
+	// see zoneRow.Deleting's own doc for why the template shows this
+	// instead of a stale Discovered/Reason value while
+	// InstanceResetFinalizer is still resetting it.
+	Deleting bool
 }
 
 // instanceRowFrom builds one instances-list row from item.
@@ -990,6 +1168,7 @@ func instanceRowFrom(item v1alpha2.Instance) instanceRow {
 		TalosVersion: item.Status.Talos.Version,
 		ClaimedBy:    item.Labels[v1alpha2.LabelClaimedBy],
 		Age:          formatAge(item.CreationTimestamp.Time),
+		Deleting:     !item.DeletionTimestamp.IsZero(),
 	}
 
 	if cond := meta.FindStatusCondition(item.Status.Conditions, instancedomain.DiscoveredConditionType); cond != nil {
@@ -1164,7 +1343,70 @@ func instanceDetailData(item v1alpha2.Instance, version string, authEnabled bool
 		"ClaimedBy":       item.Labels[v1alpha2.LabelClaimedBy],
 		"Interfaces":      interfaces,
 		"Conditions":      conditions,
+		"Deleting":        !item.DeletionTimestamp.IsZero(),
 	}
+}
+
+// handleDeleteInstanceObject is DELETE
+// /app/kontinuum.sh/namespaces/{ns}/instances/{name}'s handler — it deletes
+// the Instance CRD object named by the {name} path value and sends the
+// browser back to the instances list via HX-Redirect. Not to be confused
+// with handleDeleteInstance above, which deletes a Kontinuum — see
+// pageInstances' own doc for why the two stay separate despite the
+// similar-sounding name.
+//
+// If this Instance is claimed by a pool some TalosCluster references,
+// deleting it here sets its own deletionTimestamp, which
+// taloscluster.InstanceResetReconciler's own finalizer (see
+// taloscluster.InstanceResetFinalizer) picks up to reset its node back to
+// Talos maintenance mode before the object is actually allowed to go away
+// — so the object may keep existing, still visible on the instances list,
+// for a while after this call returns. An unclaimed Instance (nothing to
+// reset) is removed immediately.
+func (r *Router) handleDeleteInstanceObject(writer http.ResponseWriter, request *http.Request) {
+	kontinuums, err := r.kontinuumsFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	namespace := request.PathValue("ns")
+
+	target := &v1alpha2.Instance{
+		ObjectMeta: metav1.ObjectMeta{Name: request.PathValue("name"), Namespace: namespace},
+	}
+
+	r.deleteAndRedirect(writer, request, kontinuums, target,
+		"instance", "/app/kontinuum.sh/namespaces/"+namespace+"/instances")
+}
+
+// deleteAndRedirect deletes target through kontinuums and, on success (or if
+// it was already gone), sends the browser to redirectPath via the
+// Hx-Redirect response header — the shared body behind
+// handleDeleteInstanceObject and handleDeleteTalosCluster below, which
+// differ only in which object kind they delete and where they redirect
+// to afterwards. kind names target's own kind in the bad-gateway error
+// message (e.g. "instance", "taloscluster").
+func (r *Router) deleteAndRedirect(
+	writer http.ResponseWriter, request *http.Request,
+	kontinuums KontinuumClient, target client.Object, kind, redirectPath string,
+) {
+	err := kontinuums.Delete(request.Context(), target)
+	if err != nil && !apierrors.IsNotFound(err) {
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return
+		}
+
+		http.Error(writer, "failed to delete "+kind+": "+err.Error(), http.StatusBadGateway)
+
+		return
+	}
+
+	writer.Header().Set("Hx-Redirect", redirectPath)
+	writer.WriteHeader(http.StatusOK)
 }
 
 // talosKubeconfigSecretKey is the key a TalosCluster's own kubeconfig is
@@ -1186,6 +1428,10 @@ type talosClusterRow struct {
 	Ready             string
 	ReadyOK           bool
 	Age               string
+	// Deleting is whether this TalosCluster's own DeletionTimestamp is set
+	// — see zoneRow.Deleting's own doc for why the template shows this
+	// instead of a stale Ready value during teardown.
+	Deleting bool
 }
 
 // handleTalosClusters is GET /app/talosclusters's handler — it lists every
@@ -1226,6 +1472,7 @@ func (r *Router) handleTalosClusters(writer http.ResponseWriter, request *http.R
 			TalosVersion:      item.Spec.Talos.Version,
 			KubernetesVersion: item.Spec.Kubernetes.Version,
 			Age:               formatAge(item.CreationTimestamp.Time),
+			Deleting:          !item.DeletionTimestamp.IsZero(),
 		}
 
 		if cond := conditionOfType(item.Status.Conditions, "Ready"); cond != nil {
@@ -1465,6 +1712,7 @@ func talosClusterDetailData(
 		"Age":                formatAge(cluster.CreationTimestamp.Time),
 		"Pools":              pools,
 		"Conditions":         conditions,
+		"Deleting":           !cluster.DeletionTimestamp.IsZero(),
 		"KubeconfigReady":    len(kubeconfig) > 0,
 		"KubeconfigRevealed": revealed,
 		"HasZone":            zone.Name != "",
@@ -1570,6 +1818,36 @@ func (r *Router) handleTalosClusterKubeconfigDownload(writer http.ResponseWriter
 	writer.Header().Set("Content-Disposition", `attachment; filename="`+cluster.Name+`-kubeconfig.yaml"`)
 	writer.WriteHeader(http.StatusOK)
 	_, _ = writer.Write(kubeconfig)
+}
+
+// handleDeleteTalosCluster is DELETE
+// /app/kontinuum.sh/namespaces/{ns}/talosclusters/{name}'s handler — it
+// deletes the TalosCluster object named by the {name} path value and sends
+// the browser back to the clusters list via HX-Redirect.
+//
+// Deleting here only sets TalosCluster's own deletionTimestamp — Reconciler's
+// own finalizer (see TalosClusterFinalizer) stops touching the cluster's
+// members and removes itself immediately, with no wait of its own: unlike
+// Zone's teardown, this alone does not release or reset anything still
+// claimed by the cluster's own control-plane/worker pools (see
+// TalosClusterFinalizer's own doc, and zone.reconcileTeardown, which relies
+// on Zone's own ownership of those Instances to cascade that separately).
+func (r *Router) handleDeleteTalosCluster(writer http.ResponseWriter, request *http.Request) {
+	kontinuums, err := r.kontinuumsFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	namespace := request.PathValue("ns")
+
+	target := &v1alpha2.TalosCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: request.PathValue("name"), Namespace: namespace},
+	}
+
+	r.deleteAndRedirect(writer, request, kontinuums, target,
+		"taloscluster", "/app/kontinuum.sh/namespaces/"+namespace+"/talosclusters")
 }
 
 // handleRegistryKubeconfigDownload is GET /app/registry/kubeconfig's

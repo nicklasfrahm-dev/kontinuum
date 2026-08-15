@@ -43,7 +43,17 @@ Fans out a new zone's hub-side objects and, once its `TalosCluster` is bootstrap
    This is the same shared naming convention `Addon` objects already assume
    (`<cluster>-<releaseName>` — see `pkg/domain/addon/resources.go`), and
    it's what lets the `zone` controller find "its" `TalosCluster` by name
-   alone, with no extra reference field.
+   alone, with no extra reference field. Ownership is a strict chain, not
+   four siblings all owned by `Zone`: `Zone` owns `TalosCluster`,
+   `TalosCluster` owns `InstancePool`, and `Instance` is owned by nobody —
+   see [Remove zone](zone-remove.md) for why, and for what
+   `--unregister-instances-on-delete` (unset by default, also settable from
+   the UI's own "Add zone" form) controls on the created `TalosCluster`'s
+   own `spec.teardown.unregisterInstances`. `TalosCluster` also owns every
+   `Addon` seeded or created for it (namespaced alongside it, like
+   `InstancePool`) — so deleting a `TalosCluster` cleans up its addons for
+   free via native garbage collection, with no separate teardown step
+   needed.
 2. **Cluster bootstrap** (`pkg/domain/instance`, `pkg/domain/instancepool`,
    `pkg/domain/taloscluster`) — four cooperating controllers turn the seed
    `Instance` into a running, Cilium- and cert-manager-equipped Talos

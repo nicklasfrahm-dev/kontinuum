@@ -52,6 +52,19 @@ type TalosClusterWorkerSpec struct {
 	PoolRef InstancePoolReference `json:"poolRef"`
 }
 
+// TeardownSpec configures what happens to this cluster's own claimed
+// members once the cluster itself is deleted — see TalosClusterFinalizer's
+// own doc for the reset-then-maybe-unregister sequence this drives.
+type TeardownSpec struct {
+	// UnregisterInstances, when true, deletes each of this cluster's
+	// claimed Instances — after resetting them back to Talos maintenance
+	// mode — instead of merely releasing them back to the free pool.
+	// Defaults to false: instances stay in inventory, reset but claimable
+	// again by a future cluster, unless explicitly opted out of.
+	// +optional
+	UnregisterInstances bool `json:"unregisterInstances,omitempty"`
+}
+
 // TalosClusterSpec describes the control-plane and worker pools that make
 // up one zone's Talos-managed Kubernetes cluster — see issue #24's
 // architecture decisions 1/5 (one cluster per zone) and 3/5 (control
@@ -77,6 +90,11 @@ type TalosClusterSpec struct {
 	// +optional
 	// +kubebuilder:validation:MaxItems=32
 	Workers []TalosClusterWorkerSpec `json:"workers,omitempty"`
+	// Teardown configures what happens to this cluster's own claimed
+	// members once the cluster itself is deleted — see TeardownSpec's own
+	// doc.
+	// +optional
+	Teardown TeardownSpec `json:"teardown,omitempty"`
 }
 
 // TalosClusterStatus reports this cluster's bootstrap progress.

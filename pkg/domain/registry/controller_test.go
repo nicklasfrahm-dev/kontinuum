@@ -23,14 +23,14 @@ var errTestHostnameUnavailable = errors.New("hostname unavailable")
 
 // otherInstanceKey() and selfInstanceKey() are "other-instance"/"self-instance"'s
 // own NamespacedName — every Kontinuum fixture in this file registers as
-// v1alpha2.DefaultSecretNamespace (see Heartbeat.Start's own doc), so every
+// v1alpha2.KontinuumSystemNamespace (see Heartbeat.Start's own doc), so every
 // Get/Request below needs both, not just Name.
 func otherInstanceKey() types.NamespacedName {
-	return types.NamespacedName{Name: "other-instance", Namespace: v1alpha2.DefaultSecretNamespace}
+	return types.NamespacedName{Name: "other-instance", Namespace: v1alpha2.KontinuumSystemNamespace}
 }
 
 func selfInstanceKey() types.NamespacedName {
-	return types.NamespacedName{Name: "self-instance", Namespace: v1alpha2.DefaultSecretNamespace}
+	return types.NamespacedName{Name: "self-instance", Namespace: v1alpha2.KontinuumSystemNamespace}
 }
 
 func TestNewControllerDefaultsIntervals(t *testing.T) {
@@ -113,7 +113,7 @@ func TestCombinedReconcilerDeletesStaleOtherInstanceWithoutTouchingHeartbeat(t *
 	t.Parallel()
 
 	fakeClient := newFakeClient(t, &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: "other-instance", Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "other-instance", Namespace: v1alpha2.KontinuumSystemNamespace},
 		Status: v1alpha2.KontinuumStatus{
 			Role:              v1alpha2.RoleWorker,
 			LastHeartbeatTime: metav1.NewTime(time.Now().Add(-time.Hour)),
@@ -182,7 +182,7 @@ func TestCombinedReconcilerPreservesTTLRequeueForOwnFreshInstance(t *testing.T) 
 	t.Parallel()
 
 	fakeClient := newFakeClient(t, &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: "self-instance", Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "self-instance", Namespace: v1alpha2.KontinuumSystemNamespace},
 		Status:     v1alpha2.KontinuumStatus{Role: v1alpha2.RoleControlPlane, LastHeartbeatTime: metav1.Now()},
 	})
 

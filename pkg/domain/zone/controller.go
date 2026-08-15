@@ -36,6 +36,18 @@ const (
 	// reconcile pass that would otherwise have set it, per issue #49's own
 	// "only removes the finalizer once both steps complete" scope.
 	TeardownConditionType = "Teardown"
+	// ReadyConditionType aggregates ClusterReady and Installed into the one
+	// Type kstatus/kubectl-tree tooling recognizes generically — a CRD with
+	// no Kind-specific handling (like Zone) only ever renders a populated
+	// READY/REASON/STATUS column in `kubectl tree` if status.conditions
+	// carries an entry literally Typed "Ready" (mirrors TalosCluster's own
+	// ReadyConditionType). Set false alongside ClusterReady whenever that's
+	// false (see setClusterReadyCondition) — a true ClusterReady doesn't by
+	// itself mean the Zone is ready, only that reconcileInstall is about to
+	// run — and always mirrored from Installed otherwise (see
+	// setInstalledCondition), which is this reconciler's true terminal
+	// gate.
+	ReadyConditionType = "Ready"
 
 	reasonTalosClusterNotFound   = "TalosClusterNotFound"
 	reasonWaitingForTalosCluster = "WaitingForTalosCluster"
@@ -46,10 +58,10 @@ const (
 	reasonWaitingForCertificate  = "WaitingForCertificate"
 	reasonInstalled              = "Installed"
 
-	// reasonDownstreamTeardownFailed and reasonTalosResetFailed are
+	// reasonDownstreamTeardownFailed and reasonTalosClusterDeleteFailed are
 	// teardown.go's own retryable-failure reasons — see reconcileTeardown.
 	reasonDownstreamTeardownFailed = "DownstreamTeardownFailed"
-	reasonTalosResetFailed         = "TalosResetFailed"
+	reasonTalosClusterDeleteFailed = "TalosClusterDeleteFailed"
 
 	defaultRetryInterval = 15 * time.Second
 	// defaultTeardownTimeout bounds how long a Zone's finalizer keeps
@@ -92,16 +104,10 @@ type Config struct {
 	// RetryInterval is how long Reconcile waits before retrying a step that
 	// hasn't converged yet. Defaults to fifteen seconds when zero.
 	RetryInterval time.Duration
-	// Bootstrapper resets a deleted zone's seed node back to Talos
-	// maintenance mode via taloscluster.ResetControlPlane — see
-	// teardown.go. Defaults to taloscluster.NewTalosBootstrapper(cfg.Logger)
-	// when nil, the same production implementation
-	// pkg/domain/taloscluster's own Controller defaults to.
-	Bootstrapper taloscluster.ClusterBootstrapper
 	// TeardownTimeout bounds how long a Zone being deleted keeps retrying
-	// downstream teardown/Talos Reset before giving up and removing its
-	// finalizer anyway — see teardown.go's own doc. Defaults to fifteen
-	// minutes when zero.
+	// downstream teardown before giving up and removing its finalizer
+	// anyway — see teardown.go's own doc. Defaults to fifteen minutes when
+	// zero.
 	TeardownTimeout time.Duration
 }
 
@@ -120,10 +126,6 @@ func NewController(cfg Config) *Controller {
 
 	if cfg.RetryInterval == 0 {
 		cfg.RetryInterval = defaultRetryInterval
-	}
-
-	if cfg.Bootstrapper == nil {
-		cfg.Bootstrapper = taloscluster.NewTalosBootstrapper(cfg.Logger)
 	}
 
 	if cfg.TeardownTimeout == 0 {
@@ -145,7 +147,6 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		ACMEServer:              c.Config.ACMEServer,
 		Image:                   c.Config.Image,
 		RetryInterval:           c.Config.RetryInterval,
-		Bootstrapper:            c.Config.Bootstrapper,
 		TeardownTimeout:         c.Config.TeardownTimeout,
 		Logger:                  c.Config.Logger,
 	}
@@ -182,7 +183,6 @@ type Reconciler struct {
 	ACMEServer              string
 	Image                   string
 	RetryInterval           time.Duration
-	Bootstrapper            taloscluster.ClusterBootstrapper
 	TeardownTimeout         time.Duration
 	Logger                  *slog.Logger
 }
@@ -329,15 +329,29 @@ func (r *Reconciler) setClusterReadyCondition(
 		Type: ClusterReadyConditionType, Status: status, Reason: reason, Message: message,
 	})
 
+	// Only the blocking (False) case propagates to Ready here — see
+	// ReadyConditionType's own doc for why a True ClusterReady doesn't.
+	if status == metav1.ConditionFalse {
+		meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
+			Type: ReadyConditionType, Status: status, Reason: reason, Message: message,
+		})
+	}
+
 	return r.persistStatus(ctx, zoneObj, status)
 }
 
-// setInstalledCondition sets InstalledConditionType and persists zoneObj's status.
+// setInstalledCondition sets InstalledConditionType, mirrors it onto
+// ReadyConditionType (see that constant's own doc — Installed is this
+// reconciler's true terminal gate), and persists zoneObj's status.
 func (r *Reconciler) setInstalledCondition(
 	ctx context.Context, zoneObj *v1alpha2.Zone, status metav1.ConditionStatus, reason, message string,
 ) (ctrl.Result, error) {
 	meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
 		Type: InstalledConditionType, Status: status, Reason: reason, Message: message,
+	})
+
+	meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
+		Type: ReadyConditionType, Status: status, Reason: reason, Message: message,
 	})
 
 	return r.persistStatus(ctx, zoneObj, status)

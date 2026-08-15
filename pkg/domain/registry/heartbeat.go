@@ -116,7 +116,7 @@ func (h *Heartbeat) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resul
 // nothing left over to special-case here.
 func (h *Heartbeat) Start(ctx context.Context) error {
 	server := &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: h.Name, Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: h.Name, Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec:       h.Spec,
 	}
 
@@ -164,7 +164,7 @@ func (h *Heartbeat) Deregister(ctx context.Context) error {
 	h.shuttingDown.Store(true)
 
 	server := &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: h.Name, Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: h.Name, Namespace: v1alpha2.KontinuumSystemNamespace},
 	}
 
 	err := h.Client.Delete(ctx, server)
@@ -239,12 +239,12 @@ func ensureNamespace(ctx context.Context, kubeClient client.Client, namespace st
 }
 
 // secretRef is where ensureSecret upserts h.SecretData: a Secret named
-// after this instance, in v1alpha2.DefaultSecretNamespace — the same
+// after this instance, in v1alpha2.KontinuumSystemNamespace — the same
 // namespace this instance's own Kontinuum object lives in (see Start).
 func (h *Heartbeat) secretRef() v1alpha2.KontinuumSecretReference {
 	return v1alpha2.KontinuumSecretReference{
 		Name:      secretName(h.Name),
-		Namespace: v1alpha2.DefaultSecretNamespace,
+		Namespace: v1alpha2.KontinuumSystemNamespace,
 	}
 }
 
@@ -316,7 +316,7 @@ func (h *Heartbeat) ensureSecret(
 // whatever the other path already recreated instead.
 func (h *Heartbeat) reregister(ctx context.Context, server *v1alpha2.Kontinuum) {
 	*server = v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: h.Name, Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: h.Name, Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec:       h.Spec,
 	}
 

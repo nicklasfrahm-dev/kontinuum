@@ -1,0 +1,49 @@
+{{/*
+    zone-leave-modal is the registry page's own "Decommission zone" confirmation
+    dialog — a single shared <dialog>, retargeted per row by
+    openZoneLeaveModal(name) (see registry_content.html's own script block)
+    rather than one dialog per row, so the DOM stays proportional to the
+    zones table regardless of row count. Deletion is destructive (tears down
+    the downstream cluster and resets its seed node — see
+    pkg/domain/zone/teardown.go), so confirmation requires typing the zone's
+    exact name, mirroring GitHub's own repo-deletion confirmation, rather
+    than a single dismissable prompt a user could reflexively click through.
+*/}}
+{{define "zone-leave-modal"}}
+<dialog id="zone-leave-modal" class="bg-neutral-900 border border-neutral-800 rounded-xl p-0 w-full max-w-lg text-neutral-100 backdrop:bg-black/60">
+    <div class="px-6 py-3 border-b border-neutral-800 flex items-center justify-between gap-2">
+        <h2 class="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+            <span class="text-red-400 [&>svg]:h-4 [&>svg]:w-4">{{template "icon-trash"}}</span>
+            Decommission zone
+        </h2>
+        <button type="button" onclick="this.closest('dialog').close()"
+                class="text-neutral-500 hover:text-white transition-colors text-lg leading-none" aria-label="Close">
+            &times;
+        </button>
+    </div>
+    <div class="p-6 space-y-4">
+        <p class="text-sm text-neutral-400">
+            This tears down everything installed on
+            <code id="zone-leave-modal-name" class="inline-flex items-center gap-1 align-middle font-mono text-white bg-neutral-700 border border-neutral-600 rounded px-1.5 py-1 cursor-pointer hover:bg-neutral-600 transition-colors" title="Click to copy"><span data-name-text></span><span data-copied-feedback class="hidden items-center gap-1 text-emerald-400"><span class="[&>svg]:h-3 [&>svg]:w-3">{{template "icon-check"}}</span>Copied</span></code>'s
+            downstream cluster and resets its seed node back to maintenance mode. This cannot be undone.
+        </p>
+        <label class="block">
+            <span class="text-xs uppercase tracking-wider text-neutral-500">
+                Type
+                <code id="zone-leave-modal-confirm-name" class="normal-case inline-flex items-center gap-1 align-middle font-mono text-white bg-neutral-700 border border-neutral-600 rounded px-1.5 py-1 cursor-pointer hover:bg-neutral-600 transition-colors" title="Click to copy"><span data-name-text></span><span data-copied-feedback class="hidden items-center gap-1 text-emerald-400"><span class="[&>svg]:h-3 [&>svg]:w-3">{{template "icon-check"}}</span>Copied</span></code>
+                to confirm
+            </span>
+            <input type="text" id="zone-leave-modal-input" autocomplete="off" spellcheck="false"
+                   oninput="updateZoneLeaveModalConfirm()"
+                   class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 focus:outline-none focus:border-accent">
+        </label>
+        <div class="flex justify-end pt-2">
+            <button type="button" id="zone-leave-modal-confirm" disabled
+                    hx-target="#registry-content" hx-select="#registry-content" hx-swap="outerHTML"
+                    class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 enabled:hover:bg-red-500/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+                Decommission zone
+            </button>
+        </div>
+    </div>
+</dialog>
+{{end}}

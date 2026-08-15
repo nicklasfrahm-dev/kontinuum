@@ -14,8 +14,9 @@ import (
 
 // addonResourceName derives an Addon CR's own name from its owning
 // cluster and release name — mirrors taloscluster's own secretNamePrefix
-// convention (Addon is cluster-scoped like TalosCluster itself, so two
-// clusters' same-named addons would otherwise collide).
+// convention. Every TalosCluster still lives in the one shared
+// v1alpha2.KontinuumSystemNamespace today, so two clusters' same-named
+// addons would otherwise collide even though Addon itself is namespaced.
 func addonResourceName(clusterName, releaseName string) string {
 	return clusterName + "-" + releaseName
 }
@@ -62,7 +63,10 @@ func EnsureBuiltinSeeds(ctx context.Context, kubeClient client.Client, cluster *
 func ensureBuiltinAddonSeed(
 	ctx context.Context, kubeClient client.Client, cluster *v1alpha2.TalosCluster, releaseName string,
 ) error {
-	seed := &v1alpha2.Addon{ObjectMeta: metav1.ObjectMeta{Name: addonResourceName(cluster.Name, releaseName)}}
+	seed := &v1alpha2.Addon{ObjectMeta: metav1.ObjectMeta{
+		Name:      addonResourceName(cluster.Name, releaseName),
+		Namespace: cluster.Namespace,
+	}}
 
 	err := kubeClient.Get(ctx, client.ObjectKeyFromObject(seed), seed)
 	if err == nil {
@@ -95,21 +99,15 @@ func ensureBuiltinAddonSeed(
 		},
 	}
 
-	// Kubernetes itself refuses an owner reference from a namespaced owner
-	// onto a cluster-scoped object ("cluster-scoped resource must not have
-	// a namespace-scoped owner") — and cluster is namespaced (see issue
-	// #63's architecture) while Addon stays cluster-scoped (see
-	// addonResourceName's own doc), so native GC-based cleanup can only be
-	// wired up once Addon itself moves to namespaced scope too. Until
-	// then, skip it rather than fail seeding entirely: TalosClusterRef.Name
-	// (see ListForCluster) is already how every reconciler finds an addon's
-	// owning cluster, so nothing here actually depends on the owner
-	// reference besides GC.
-	if cluster.Namespace == "" {
-		err = controllerutil.SetControllerReference(cluster, seed, kubeClient.Scheme())
-		if err != nil {
-			return fmt.Errorf("failed to set owner reference on addon %q: %w", seed.Name, err)
-		}
+	// Addon is namespaced alongside its owning TalosCluster (see
+	// addonResourceName's own doc), so a real owner reference is always
+	// valid here — this is what makes every Addon a TalosCluster ever
+	// seeded actually get garbage-collected the moment that cluster is
+	// deleted, instead of surviving as an orphan a same-named cluster
+	// recreated later could silently inherit stale Ready status from.
+	err = controllerutil.SetControllerReference(cluster, seed, kubeClient.Scheme())
+	if err != nil {
+		return fmt.Errorf("failed to set owner reference on addon %q: %w", seed.Name, err)
 	}
 
 	err = kubeClient.Create(ctx, seed)
@@ -120,19 +118,24 @@ func ensureBuiltinAddonSeed(
 	return nil
 }
 
-// ListForCluster returns every Addon referencing clusterName — the only
-// way to discover a TalosCluster's own addons now that TalosCluster.spec
-// carries no addon list of its own. Lists every Addon and filters
-// client-side rather than through a cache field index: Controller.
-// SetupWithManager runs before the server's own listener is bound (see its
-// own doc), and registering a field index there would force an immediate
-// discovery call against that not-yet-listening server. Addon counts per
-// cluster are small, so the extra client-side pass costs nothing that
-// matters.
-func ListForCluster(ctx context.Context, kubeClient client.Client, clusterName string) (v1alpha2.AddonList, error) {
+// ListForCluster returns every Addon in namespace referencing clusterName —
+// the only way to discover a TalosCluster's own addons now that
+// TalosCluster.spec carries no addon list of its own. Lists every Addon in
+// namespace and filters client-side by TalosClusterRef.Name rather than
+// through a cache field index: Controller.SetupWithManager runs before the
+// server's own listener is bound (see its own doc), and registering a
+// field index there would force an immediate discovery call against that
+// not-yet-listening server. The namespace scope alone isn't a sufficient
+// filter — every TalosCluster still lives in the one shared
+// v1alpha2.KontinuumSystemNamespace today, so more than one cluster's
+// addons can share it — but it keeps each List cheap regardless, and Addon
+// counts per cluster are small either way.
+func ListForCluster(
+	ctx context.Context, kubeClient client.Client, namespace, clusterName string,
+) (v1alpha2.AddonList, error) {
 	var all v1alpha2.AddonList
 
-	err := kubeClient.List(ctx, &all)
+	err := kubeClient.List(ctx, &all, client.InNamespace(namespace))
 	if err != nil {
 		return v1alpha2.AddonList{}, fmt.Errorf("failed to list addons for %q: %w", clusterName, err)
 	}
