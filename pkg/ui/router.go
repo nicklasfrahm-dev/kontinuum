@@ -103,6 +103,7 @@ const (
 	pageTalosClusters  = "talosclusters"
 	pageTalosCluster   = "taloscluster"
 	pageIAM            = "iam"
+	pageConnect        = "connect"
 )
 
 // Template data-map keys every page's own render() call shares — layout.html
@@ -188,6 +189,7 @@ func mustParsePage(content ...string) *template.Template {
 		"templates/components/icon_server.html",
 		"templates/components/icon_kubernetes.html",
 		"templates/components/icon_shield.html",
+		"templates/components/icon_unplug.html",
 		"templates/components/icon_logout.html",
 		"templates/components/icon_book_open_text.html",
 		"templates/components/icon_external_link.html",
@@ -239,12 +241,7 @@ func NewRouter(
 	pages := map[string]*template.Template{
 		pageRegistry: mustParsePage("templates/registry_content.html",
 			"templates/components/icon_trash.html", "templates/components/icon_globe.html",
-			"templates/components/zone_add_modal.html", "templates/components/zone_leave_modal.html",
-			"templates/components/icon_terminal.html",
-			"templates/components/copy_snippet.html", "templates/components/icon_copy.html",
-			"templates/components/icon_check.html", "templates/components/icon_download.html",
-			"templates/components/icon_eye.html", "templates/components/icon_eye_off.html",
-			"templates/components/reveal_panel.html", "templates/components/reveal_panel_script.html"),
+			"templates/components/zone_add_modal.html", "templates/components/zone_leave_modal.html"),
 		pageKontinuum: mustParsePage("templates/kontinuum_content.html",
 			"templates/components/icon_chevron_left.html", "templates/components/icon_eye.html",
 			"templates/components/icon_eye_off.html", "templates/components/icon_copy.html",
@@ -267,6 +264,12 @@ func NewRouter(
 			"templates/components/copy_snippet.html"),
 		pageIAM: mustParsePage("templates/iam_content.html",
 			"templates/components/icon_key.html", "templates/components/icon_info.html"),
+		pageConnect: mustParsePage("templates/connect_content.html",
+			"templates/components/icon_terminal.html",
+			"templates/components/copy_snippet.html", "templates/components/icon_copy.html",
+			"templates/components/icon_download.html",
+			"templates/components/icon_eye.html", "templates/components/icon_eye_off.html",
+			"templates/components/reveal_panel.html", "templates/components/reveal_panel_script.html"),
 	}
 
 	return &Router{
@@ -336,6 +339,7 @@ func (r *Router) RegisterRoutes(
 	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/talosclusters/{name}/kubeconfig",
 		wrap(r.handleTalosClusterKubeconfigDownload))
 	mux.HandleFunc("GET /app/iam", wrap(r.handleIAM))
+	mux.HandleFunc("GET /app/connect", wrap(r.handleConnect))
 	mux.HandleFunc("GET /app/registry/kubeconfig", wrap(r.handleRegistryKubeconfigDownload))
 
 	// Catch-all for any /app/... path that doesn't match one of the more
@@ -685,7 +689,7 @@ func (r *Router) listZoneRows(writer http.ResponseWriter, request *http.Request)
 
 	var list v1alpha2.ZoneList
 
-	err = zones.List(request.Context(), &list)
+	err = zones.List(request.Context(), &list, client.InNamespace(request.PathValue("ns")))
 	if err != nil {
 		// Forbidden means the signed-in identity is authenticated but not
 		// authorized — the session itself isn't the problem, but there's
@@ -1106,6 +1110,22 @@ func (r *Router) handleIAM(writer http.ResponseWriter, request *http.Request) {
 		dataKeyVersion:     r.version,
 		dataKeyAuthEnabled: r.authEnabled,
 		"Bindings":         bindings,
+	})
+}
+
+// handleConnect is GET /app/connect's handler — it renders the kubectl
+// access card that used to live on the registry page (see issue #89: it's
+// not registry-specific data, and this page is where API keys/federated
+// identity credentials will land too). AuthEnabled drives the same
+// OIDC-vs-no-auth branching handleRegistryKubeconfigDownload's own doc
+// describes, so the served kubeconfig always matches what this page says
+// about it.
+func (r *Router) handleConnect(writer http.ResponseWriter, request *http.Request) {
+	r.render(writer, request, pageConnect, map[string]any{
+		dataKeyTitle:       "Connect",
+		dataKeyActiveMenu:  "connect",
+		dataKeyVersion:     r.version,
+		dataKeyAuthEnabled: r.authEnabled,
 	})
 }
 

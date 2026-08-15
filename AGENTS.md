@@ -27,6 +27,10 @@
 - Type MUST be `feat` or `fix`.
 - Scope is preferred to be a package name (e.g. `cli`, `config`, `logging`).
 
+## Pull requests
+
+- PR titles must follow the same [Conventional Commits](https://www.conventionalcommits.org/) rules as commit messages: type MUST be `feat` or `fix`, scope is required, and the description must be in imperative mood.
+
 ## Logging
 
 - Log messages must start with an uppercase letter.

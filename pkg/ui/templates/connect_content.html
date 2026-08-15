@@ -1,0 +1,50 @@
+{{define "content"}}
+<div>
+    <div class="mb-6 flex items-center gap-4">
+        <div class="text-accent [&>svg]:h-10 [&>svg]:w-10">
+            {{template "icon-unplug"}}
+        </div>
+        <div>
+            <h1 class="text-xl font-bold text-white">Connect</h1>
+            <p class="mt-1 text-sm text-neutral-500">Ways to access this kontinuum deployment.</p>
+        </div>
+    </div>
+
+    <div class="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+        <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
+            {{template "icon-terminal"}}
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider">kubectl access</h2>
+        </div>
+        <div class="p-6">
+            <p class="text-sm text-neutral-500 mb-4">
+                Get access to the API server via
+                <a href="https://kubernetes.io/docs/reference/kubectl/" class="text-accent hover:underline">kubectl</a>
+                or
+                <a href="https://k9scli.io/" class="text-accent hover:underline">k9s</a>.
+                {{if .AuthEnabled}}
+                Authentication is done via
+                <a href="https://github.com/int128/kubelogin" class="text-accent hover:underline">oidc-login</a>.
+                {{else}}
+                No authentication is required.
+                {{end}}
+            </p>
+            <p class="text-sm text-neutral-500 mb-2">
+                Merge the kubeconfig below into your existing one with the kontinuum CLI:
+            </p>
+            {{template "copy-snippet" (dict "ID" "connect-kubeconfig-import" "Command" "kontinuum config import")}}
+            <!--
+                The kubeconfig itself branches on whether OIDC is configured
+                (see handleRegistryKubeconfigDownload's own doc) — kontinuum's
+                default is no authentication at all, not "no access," so
+                there's always a working kubeconfig to reveal here, not just
+                when OIDC happens to be enabled. reveal-panel-script fetches
+                it on demand rather than this page embedding it directly.
+            -->
+            {{template "reveal-panel" (dict "ID" "connect-kubeconfig" "Label" "KUBECONFIG" "DownloadURL" "/app/registry/kubeconfig")}}
+        </div>
+    </div>
+</div>
+
+{{template "copy-snippet-script" (dict "ID" "connect-kubeconfig-import")}}
+{{template "reveal-panel-script" (dict "ID" "connect-kubeconfig" "URL" "/app/registry/kubeconfig")}}
+{{end}}

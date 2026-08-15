@@ -19,7 +19,7 @@
 
     <div class="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
         <div class="px-6 py-3 border-b border-neutral-800">
-            <h2 class="text-sm font-bold text-white uppercase tracking-wider">Kontinuum Instances <span class="text-neutral-500">{{len .Instances}}</span></h2>
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider">Kontinuum Nodes <span class="text-neutral-500">{{len .Instances}}</span></h2>
         </div>
 
         {{if .Instances}}
@@ -138,48 +138,10 @@
 
 <!-- Deliberately outside #registry-content: that div's own 15s poll
      (hx-swap="outerHTML" above) would otherwise wipe out an open dialog or
-     form the user is mid-typing (the "Add zone" modal), or collapse an open
-     reveal panel back to masked mid-copy (the kubectl access card below),
-     every time the instance list refreshes. -->
+     form the user is mid-typing (the "Add zone" modal), every time the
+     instance list refreshes. -->
 {{template "zone-add-modal" .}}
 {{template "zone-leave-modal" .}}
-
-<div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
-    <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
-        {{template "icon-terminal"}}
-        <h2 class="text-sm font-bold text-white uppercase tracking-wider">kubectl access</h2>
-    </div>
-    <div class="p-6">
-        <p class="text-sm text-neutral-500 mb-4">
-            Get access to the API server via
-            <a href="https://kubernetes.io/docs/reference/kubectl/" class="text-accent hover:underline">kubectl</a>
-            or
-            <a href="https://k9scli.io/" class="text-accent hover:underline">k9s</a>.
-            {{if .AuthEnabled}}
-            Authentication is done via
-            <a href="https://github.com/int128/kubelogin" class="text-accent hover:underline">oidc-login</a>.
-            {{else}}
-            No authentication is required.
-            {{end}}
-        </p>
-        <p class="text-sm text-neutral-500 mb-2">
-            Merge the kubeconfig below into your existing one with the kontinuum CLI:
-        </p>
-        {{template "copy-snippet" (dict "ID" "registry-kubeconfig-import" "Command" "kontinuum config import")}}
-        <!--
-            The kubeconfig itself branches on whether OIDC is configured
-            (see handleRegistryKubeconfigDownload's own doc) — kontinuum's
-            default is no authentication at all, not "no access," so
-            there's always a working kubeconfig to reveal here, not just
-            when OIDC happens to be enabled. reveal-panel-script fetches
-            it on demand rather than this page embedding it directly.
-        -->
-        {{template "reveal-panel" (dict "ID" "registry-kubeconfig" "Label" "KUBECONFIG" "DownloadURL" "/app/registry/kubeconfig")}}
-    </div>
-</div>
-
-{{template "copy-snippet-script" (dict "ID" "registry-kubeconfig-import")}}
-{{template "reveal-panel-script" (dict "ID" "registry-kubeconfig" "URL" "/app/registry/kubeconfig")}}
 
 <script>
     // Captured once, before any submission can mutate #zone-add-modal-body
