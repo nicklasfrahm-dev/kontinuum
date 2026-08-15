@@ -262,23 +262,30 @@ func buildServer(
 		return nil, nil, err
 	}
 
-	// Deliberately not passing libkapi.WithGarbageCollector here, despite
-	// several domain controllers already setting owner references that
-	// assume something cascades on them (see pkg/domain/zone/add.go,
-	// pkg/domain/addon/resources.go, pkg/domain/taloscluster/secrets.go):
-	// enabling it took the whole controller manager down, repeatedly
-	// failing "conversion webhook for kontinuum.sh/v1alpha2, Kind=Kontinuum
-	// ... connection refused" — its own discovery/informer machinery
-	// appears to hit Kontinuum's v1alpha1/v1alpha2 conversion webhook
-	// (registered by registry.Controller.SetupWithManager) in a way this
-	// hasn't been root-caused yet. Revisit once that's understood; until
-	// then, owner references are correct metadata (kubectl tree already
-	// reads them) that nothing acts on.
+	// WithGarbageCollector is now safe to enable: several domain controllers
+	// already set owner references that assume something cascades on them
+	// (see pkg/domain/zone/add.go, pkg/domain/addon/resources.go,
+	// pkg/domain/taloscluster/secrets.go), but enabling this used to take
+	// the whole controller manager down, repeatedly failing "conversion
+	// webhook for kontinuum.sh/v1alpha2, Kind=Kontinuum ... connection
+	// refused" — the garbage collector's own discovery/informer machinery
+	// raced Kontinuum's v1alpha1/v1alpha2 conversion webhook
+	// (registry.Controller.SetupWithManager) during startup, since
+	// controller-runtime's Manager only guarantees webhook servers start
+	// before other runnables in launch order, not in actual readiness. Fixed
+	// upstream in kommodity-io/kommodity@63ccf39c ("wait for webhook server
+	// readiness before starting garbage collector",
+	// pkg/libkapi/garbagecollector.go), pinned here via go.mod (v0.162.1+) —
+	// verified locally: the GC now waits for the webhook server to actually
+	// be dialable before starting its own informers, and cascade deletion
+	// (Zone -> owned Instance/InstancePool/TalosCluster) works end to end
+	// with no more startup race.
 	opts := slices.Concat([]libkapi.Option{
 		libkapi.WithAddr(cfg.Server.Addr),
 		libkapi.WithStorage(cfg.Server.Storage),
 		libkapi.WithLogger(logger),
 		libkapi.WithServerFactory(customHandlers(uiRouter, oidcHandler)),
+		libkapi.WithGarbageCollector(libkapi.GarbageCollectorConfig{}),
 	}, authOpts, registryOpts, instanceOptions(logger), instancePoolOptions(logger), talosClusterOptions(logger),
 		addonOptions(logger), zoneOptions(cfg, logger), adminRBACOptions(cfg, logger))
 
@@ -384,14 +391,20 @@ func instancePoolOptions(logger *slog.Logger) []libkapi.Option {
 }
 
 // talosClusterOptions builds the libkapi options that wire the
-// TalosCluster bootstrap/addons reconciler (see pkg/domain/taloscluster)
-// onto the Server. No WithPostStartHook is needed —
-// talosclusters.kontinuum.sh's CRD is already ensured by instanceOptions'
-// own ensureCRDs call.
+// TalosCluster bootstrap/addons reconciler and the Instance-reset
+// reconciler (see pkg/domain/taloscluster) onto the Server. The latter is a
+// second, separate Controller watching Instance rather than TalosCluster —
+// see InstanceResetController's own doc for why it lives in this same
+// package and is wired in alongside its sibling here, not as its own
+// top-level *Options function. No WithPostStartHook is needed —
+// talosclusters.kontinuum.sh's and instances.kontinuum.sh's CRDs are
+// already ensured by instanceOptions' own ensureCRDs call.
 func talosClusterOptions(logger *slog.Logger) []libkapi.Option {
 	controller := taloscluster.NewController(taloscluster.Config{Logger: logger.With("component", "taloscluster")})
+	instanceResetController := taloscluster.NewInstanceResetController(
+		taloscluster.InstanceResetConfig{Logger: logger.With("component", "taloscluster-instance-reset")})
 
-	return []libkapi.Option{libkapi.WithController(controller)}
+	return []libkapi.Option{libkapi.WithController(controller), libkapi.WithController(instanceResetController)}
 }
 
 // addonOptions builds the libkapi options that wire the Addon install/

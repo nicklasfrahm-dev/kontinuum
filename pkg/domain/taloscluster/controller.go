@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/addon"
@@ -50,6 +51,26 @@ const (
 	// Reconciler sets — must match addon package's own
 	// addonReadyConditionType constant.
 	addonReadyConditionType = "Ready"
+
+	// TalosClusterFinalizer stops this reconciler from touching a
+	// TalosCluster's members the instant deletion is requested — added to
+	// every TalosCluster on normal reconcile, checked first thing in
+	// Reconcile — and is also what drives the actual per-member reset and
+	// release/unregister sequence on the way out (see teardown.go's own
+	// reconcileTeardown). Without stopping first, this reconciler has no
+	// way to know a member is being intentionally decommissioned and,
+	// being a self-healing reconciler, races to re-apply configuration and
+	// re-bootstrap the very member teardown just reset — observed for
+	// real: a node reset via hack/reset-hetzner-node.sh came back up in
+	// maintenance mode, and this reconciler reconfigured it back into the
+	// cluster within about a minute, before the object was ever deleted.
+	// zone.reconcileTeardown deletes the TalosCluster (setting this
+	// DeletionTimestamp) before its own downstream cleanup finishes
+	// unwinding, so by the time this finalizer's own reset runs, the
+	// normal Reconcile path above has already stopped touching it. Works
+	// identically whether TalosCluster is deleted via its owning Zone or
+	// directly — this finalizer doesn't know or care which.
+	TalosClusterFinalizer = "kontinuum.sh/taloscluster-teardown"
 
 	reasonWaitingForInstances = "WaitingForInstances"
 	reasonBootstrapping       = "Bootstrapping"
@@ -75,6 +96,13 @@ const (
 	// not hammering every control-plane node with a full
 	// etcd/kubelet/static-pod/CoreDNS/kube-proxy check on a tight loop.
 	defaultHealthCheckInterval = 5 * time.Minute
+	// defaultTeardownTimeout bounds how long a TalosCluster being deleted
+	// keeps retrying resets of its own still-claimed members before giving
+	// up and removing the finalizer anyway — mirrors zone.Config's own
+	// TeardownTimeout and InstanceResetConfig's own ResetTimeout, and the
+	// same "not a finalizer that blocks deletion forever" rationale (see
+	// teardown.go's own reconcileTeardown).
+	defaultTeardownTimeout = 15 * time.Minute
 )
 
 // Config configures a Controller.
@@ -95,6 +123,11 @@ type Config struct {
 	// recheckControlPlaneHealth's own doc. Defaults to five minutes when
 	// zero.
 	HealthCheckInterval time.Duration
+	// TeardownTimeout bounds how long a TalosCluster being deleted keeps
+	// retrying resets of its own still-claimed members — see
+	// teardown.go's own reconcileTeardown. Defaults to fifteen minutes
+	// when zero.
+	TeardownTimeout time.Duration
 }
 
 // Controller wires the TalosCluster bootstrap reconciler onto a
@@ -122,6 +155,10 @@ func NewController(cfg Config) *Controller {
 		cfg.HealthCheckInterval = defaultHealthCheckInterval
 	}
 
+	if cfg.TeardownTimeout == 0 {
+		cfg.TeardownTimeout = defaultTeardownTimeout
+	}
+
 	return &Controller{Config: cfg}
 }
 
@@ -139,6 +176,7 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		HealthCheckTimeout:  c.Config.HealthCheckTimeout,
 		RetryInterval:       c.Config.RetryInterval,
 		HealthCheckInterval: c.Config.HealthCheckInterval,
+		TeardownTimeout:     c.Config.TeardownTimeout,
 		Logger:              c.Config.Logger,
 	}
 
@@ -161,6 +199,7 @@ type Reconciler struct {
 	HealthCheckTimeout  time.Duration
 	RetryInterval       time.Duration
 	HealthCheckInterval time.Duration
+	TeardownTimeout     time.Duration
 	Logger              *slog.Logger
 }
 
@@ -180,6 +219,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to get talos cluster %q: %w", req.Name, err)
+	}
+
+	if !cluster.DeletionTimestamp.IsZero() {
+		return r.reconcileTeardown(ctx, &cluster)
+	}
+
+	if controllerutil.AddFinalizer(&cluster, TalosClusterFinalizer) {
+		err = r.Client.Update(ctx, &cluster)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to add finalizer to talos cluster %q: %w", cluster.Name, err)
+		}
 	}
 
 	bundle, err := ensureSecretsBundle(ctx, r.Client, &cluster)
@@ -202,6 +252,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	return r.recheckControlPlaneHealth(ctx, &cluster, bundle)
 }
+
+// reconcileTeardown's real implementation lives in teardown.go — every
+// step above (ApplyConfiguration, Bootstrap, health checks) is skipped the
+// instant DeletionTimestamp is set, since Reconcile checks that before any
+// of them run, so teardown.go is the only thing left touching cluster from
+// here on.
 
 // reconcileControlPlane resolves the control-plane pool's members,
 // generates and applies their machine config, bootstraps etcd, and waits
@@ -466,7 +522,7 @@ func (r *Reconciler) reconcileAddons(ctx context.Context, cluster *v1alpha2.Talo
 		return ctrl.Result{}, fmt.Errorf("failed to seed built-in addons for %q: %w", cluster.Name, err)
 	}
 
-	addons, err := addon.ListForCluster(ctx, r.Client, cluster.Name)
+	addons, err := addon.ListForCluster(ctx, r.Client, cluster.Namespace, cluster.Name)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to list addons for %q: %w", cluster.Name, err)
 	}

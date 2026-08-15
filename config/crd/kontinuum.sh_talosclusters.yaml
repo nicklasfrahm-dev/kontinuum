@@ -102,6 +102,21 @@ spec:
                     maxLength: 32
                     type: string
                 type: object
+              teardown:
+                description: |-
+                  Teardown configures what happens to this cluster's own claimed
+                  members once the cluster itself is deleted — see TeardownSpec's own
+                  doc.
+                properties:
+                  unregisterInstances:
+                    description: |-
+                      UnregisterInstances, when true, deletes each of this cluster's
+                      claimed Instances — after resetting them back to Talos maintenance
+                      mode — instead of merely releasing them back to the free pool.
+                      Defaults to false: instances stay in inventory, reset but claimable
+                      again by a future cluster, unless explicitly opted out of.
+                    type: boolean
+                type: object
               workers:
                 description: |-
                   Workers lists this cluster's worker pools. The controller bootstraps

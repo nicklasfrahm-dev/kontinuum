@@ -112,7 +112,7 @@ func EnsureCRD(ctx context.Context, loopbackConfig *restclient.Config, caBundle 
 		return fmt.Errorf("failed to ensure %s crd: %w", crdName(), err)
 	}
 
-	err = crd.RestoreMigrated(ctx, loopbackConfig, migrated, v1alpha2.DefaultSecretNamespace, logger)
+	err = crd.RestoreMigrated(ctx, loopbackConfig, migrated, v1alpha2.KontinuumSystemNamespace, logger)
 	if err != nil {
 		return fmt.Errorf("failed to restore migrated %s objects: %w", crdName(), err)
 	}

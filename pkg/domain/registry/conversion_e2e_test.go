@@ -85,7 +85,7 @@ func createLegacyRegistration(ctx context.Context, t *testing.T, kontinuums ctrl
 	t.Helper()
 
 	legacy := &v1alpha1.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: e2eLegacyInstanceName, Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: e2eLegacyInstanceName, Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec:       v1alpha1.KontinuumSpec{Role: v1alpha1.RoleWorker, Region: e2eRegion, Zone: e2eZone},
 	}
 

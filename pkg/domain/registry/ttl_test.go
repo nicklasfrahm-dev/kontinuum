@@ -21,7 +21,11 @@ import (
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/registry"
 )
 
-const testStaleThreshold = 5 * time.Minute
+const (
+	testStaleThreshold = 5 * time.Minute
+	staleServerName    = "stale-server"
+	freshServerName    = "fresh-server"
+)
 
 func TestStale(t *testing.T) {
 	t.Parallel()
@@ -71,7 +75,7 @@ func TestTTLReconcilerDeletesStaleServer(t *testing.T) {
 	t.Parallel()
 
 	server := &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: "stale-server"},
+		ObjectMeta: metav1.ObjectMeta{Name: staleServerName},
 		Status: v1alpha2.KontinuumStatus{
 			Role:              v1alpha2.RoleControlPlane,
 			LastHeartbeatTime: metav1.NewTime(time.Now().Add(-10 * time.Minute)),
@@ -87,12 +91,12 @@ func TestTTLReconcilerDeletesStaleServer(t *testing.T) {
 	}
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "stale-server"},
+		NamespacedName: types.NamespacedName{Name: staleServerName},
 	})
 	require.NoError(t, err)
 	assert.Zero(t, result)
 
-	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "stale-server"}, &v1alpha2.Kontinuum{})
+	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: staleServerName}, &v1alpha2.Kontinuum{})
 	assert.True(t, apierrors.IsNotFound(err))
 }
 
@@ -100,7 +104,7 @@ func TestTTLReconcilerRequeuesFreshServer(t *testing.T) {
 	t.Parallel()
 
 	server := &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: "fresh-server"},
+		ObjectMeta: metav1.ObjectMeta{Name: freshServerName},
 		Status: v1alpha2.KontinuumStatus{
 			Role:              v1alpha2.RoleControlPlane,
 			LastHeartbeatTime: metav1.NewTime(time.Now().Add(-time.Minute)),
@@ -116,12 +120,12 @@ func TestTTLReconcilerRequeuesFreshServer(t *testing.T) {
 	}
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "fresh-server"},
+		NamespacedName: types.NamespacedName{Name: freshServerName},
 	})
 	require.NoError(t, err)
 	assert.Positive(t, result.RequeueAfter)
 
-	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "fresh-server"}, &v1alpha2.Kontinuum{})
+	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: freshServerName}, &v1alpha2.Kontinuum{})
 	assert.NoError(t, err)
 }
 

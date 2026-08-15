@@ -118,7 +118,7 @@ const (
 // install anything at all.
 func readyCluster() (*v1alpha2.TalosCluster, *corev1.Secret) {
 	cluster := &v1alpha2.TalosCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec: v1alpha2.TalosClusterSpec{
 			ControlPlane: v1alpha2.TalosClusterMemberSpec{
 				PoolRef: v1alpha2.InstancePoolReference{Name: controlPlanePoolName},
@@ -126,13 +126,13 @@ func readyCluster() (*v1alpha2.TalosCluster, *corev1.Secret) {
 		},
 		Status: v1alpha2.TalosClusterStatus{
 			SecretRef: v1alpha2.SecretReference{
-				Name: testClusterName + "-secrets", Namespace: v1alpha2.DefaultSecretNamespace,
+				Name: testClusterName + "-secrets", Namespace: v1alpha2.KontinuumSystemNamespace,
 			},
 		},
 	}
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: testClusterName + "-secrets", Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName + "-secrets", Namespace: v1alpha2.KontinuumSystemNamespace},
 		Data:       map[string][]byte{"kubeconfig": []byte("fake-kubeconfig")},
 	}
 
@@ -142,7 +142,7 @@ func readyCluster() (*v1alpha2.TalosCluster, *corev1.Secret) {
 func claimedDiscoveredInstance(name string) *v1alpha2.Instance {
 	return &v1alpha2.Instance{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: name, Namespace: v1alpha2.DefaultSecretNamespace,
+			Name: name, Namespace: v1alpha2.KontinuumSystemNamespace,
 			Labels: map[string]string{v1alpha2.LabelClaimedBy: controlPlanePoolName},
 		},
 		Spec: v1alpha2.InstanceSpec{Interfaces: []string{"10.0.0.1"}},
@@ -156,7 +156,7 @@ func claimedDiscoveredInstance(name string) *v1alpha2.Instance {
 
 func builtinAddon() *v1alpha2.Addon {
 	return &v1alpha2.Addon{
-		ObjectMeta: metav1.ObjectMeta{Name: testClusterName + "-cilium"},
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName + "-cilium", Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec: v1alpha2.AddonSpec{
 			TalosClusterRef: v1alpha2.TalosClusterReference{Name: testClusterName},
 			ReleaseName:     ciliumReleaseName,
@@ -178,7 +178,7 @@ func TestReconcileBuiltinAddonResolvesEmbeddedDefaults(t *testing.T) {
 	reconciler := newReconciler(fakeClient, installer, prober)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName},
+		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace},
 	})
 	require.NoError(t, err)
 	assert.Zero(t, result)
@@ -192,7 +192,8 @@ func TestReconcileBuiltinAddonResolvesEmbeddedDefaults(t *testing.T) {
 
 	var got v1alpha2.Addon
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: ciliumAddonResourceName}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(),
+		types.NamespacedName{Name: ciliumAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace}, &got))
 	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, "Ready"))
 }
 
@@ -207,7 +208,7 @@ func TestReconcileReleaseNameDefaultsToMetadataName(t *testing.T) {
 	cluster, secret := readyCluster()
 	cpInstance := claimedDiscoveredInstance("cp-node-1")
 	cilium := &v1alpha2.Addon{
-		ObjectMeta: metav1.ObjectMeta{Name: ciliumReleaseName},
+		ObjectMeta: metav1.ObjectMeta{Name: ciliumReleaseName, Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec:       v1alpha2.AddonSpec{TalosClusterRef: v1alpha2.TalosClusterReference{Name: testClusterName}},
 	}
 
@@ -218,7 +219,7 @@ func TestReconcileReleaseNameDefaultsToMetadataName(t *testing.T) {
 	reconciler := newReconciler(fakeClient, installer, prober)
 
 	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: ciliumReleaseName},
+		NamespacedName: types.NamespacedName{Name: ciliumReleaseName, Namespace: v1alpha2.KontinuumSystemNamespace},
 	})
 	require.NoError(t, err)
 
@@ -233,7 +234,7 @@ func TestReconcileCustomAddonWithChartInstalls(t *testing.T) {
 	cluster, secret := readyCluster()
 	cpInstance := claimedDiscoveredInstance("cp-node-1")
 	custom := &v1alpha2.Addon{
-		ObjectMeta: metav1.ObjectMeta{Name: customAddonResourceName},
+		ObjectMeta: metav1.ObjectMeta{Name: customAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec: v1alpha2.AddonSpec{
 			TalosClusterRef: v1alpha2.TalosClusterReference{Name: testClusterName},
 			ReleaseName:     customReleaseName,
@@ -249,7 +250,7 @@ func TestReconcileCustomAddonWithChartInstalls(t *testing.T) {
 	reconciler := newReconciler(fakeClient, installer, prober)
 
 	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: customAddonResourceName},
+		NamespacedName: types.NamespacedName{Name: customAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace},
 	})
 	require.NoError(t, err)
 
@@ -267,7 +268,7 @@ func TestReconcileCustomAddonWithoutChartFails(t *testing.T) {
 	cluster, secret := readyCluster()
 	cpInstance := claimedDiscoveredInstance("cp-node-1")
 	custom := &v1alpha2.Addon{
-		ObjectMeta: metav1.ObjectMeta{Name: customAddonResourceName},
+		ObjectMeta: metav1.ObjectMeta{Name: customAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec: v1alpha2.AddonSpec{
 			TalosClusterRef: v1alpha2.TalosClusterReference{Name: testClusterName},
 			ReleaseName:     customReleaseName,
@@ -281,7 +282,7 @@ func TestReconcileCustomAddonWithoutChartFails(t *testing.T) {
 	reconciler := newReconciler(fakeClient, installer, prober)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: customAddonResourceName},
+		NamespacedName: types.NamespacedName{Name: customAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, testRetryInterval, result.RequeueAfter)
@@ -289,7 +290,8 @@ func TestReconcileCustomAddonWithoutChartFails(t *testing.T) {
 
 	var got v1alpha2.Addon
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: customAddonResourceName}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(),
+		types.NamespacedName{Name: customAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace}, &got))
 
 	cond := meta.FindStatusCondition(got.Status.Conditions, "Ready")
 	require.NotNil(t, cond)
@@ -312,7 +314,7 @@ func TestReconcileDisabledAddonSkipsInstall(t *testing.T) {
 	reconciler := newReconciler(fakeClient, installer, prober)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName},
+		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace},
 	})
 	require.NoError(t, err)
 	assert.Zero(t, result)
@@ -334,7 +336,7 @@ func TestReconcileInstallFailureSetsReadyFalse(t *testing.T) {
 	reconciler := newReconciler(fakeClient, installer, prober)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName},
+		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, testRetryInterval, result.RequeueAfter)
@@ -342,7 +344,8 @@ func TestReconcileInstallFailureSetsReadyFalse(t *testing.T) {
 
 	var got v1alpha2.Addon
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: ciliumAddonResourceName}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(),
+		types.NamespacedName{Name: ciliumAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace}, &got))
 
 	cond := meta.FindStatusCondition(got.Status.Conditions, "Ready")
 	require.NotNil(t, cond)
@@ -366,14 +369,15 @@ func TestReconcileUnhealthyProbeSetsReadyFalse(t *testing.T) {
 	reconciler := newReconciler(fakeClient, installer, prober)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName},
+		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, testRetryInterval, result.RequeueAfter)
 
 	var got v1alpha2.Addon
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: ciliumAddonResourceName}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(),
+		types.NamespacedName{Name: ciliumAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace}, &got))
 
 	cond := meta.FindStatusCondition(got.Status.Conditions, "Ready")
 	require.NotNil(t, cond)
@@ -394,7 +398,7 @@ func TestReconcileMissingTalosClusterIsNoOp(t *testing.T) {
 	reconciler := newReconciler(fakeClient, installer, prober)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName},
+		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace},
 	})
 	require.NoError(t, err)
 	assert.Zero(t, result)
@@ -405,7 +409,7 @@ func TestReconcileKubeconfigNotStoredRequeuesWithoutError(t *testing.T) {
 	t.Parallel()
 
 	cluster := &v1alpha2.TalosCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName, Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec: v1alpha2.TalosClusterSpec{
 			ControlPlane: v1alpha2.TalosClusterMemberSpec{PoolRef: v1alpha2.InstancePoolReference{Name: controlPlanePoolName}},
 		},
@@ -419,7 +423,7 @@ func TestReconcileKubeconfigNotStoredRequeuesWithoutError(t *testing.T) {
 	reconciler := newReconciler(fakeClient, installer, prober)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName},
+		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, testRetryInterval, result.RequeueAfter)
@@ -447,7 +451,7 @@ func TestReconcileOperatorReplicasScaleWithControlPlaneCount(t *testing.T) {
 	reconciler := newReconciler(fakeClient, installer, prober)
 
 	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName},
+		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace},
 	})
 	require.NoError(t, err)
 
@@ -462,7 +466,9 @@ func TestReconcileOperatorReplicasScaleWithControlPlaneCount(t *testing.T) {
 // same minimal-seed shape as builtinAddon, just a different release.
 func gatewayAPICRDsAddon() *v1alpha2.Addon {
 	return &v1alpha2.Addon{
-		ObjectMeta: metav1.ObjectMeta{Name: testClusterName + "-gateway-api-crds"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testClusterName + "-gateway-api-crds", Namespace: v1alpha2.KontinuumSystemNamespace,
+		},
 		Spec: v1alpha2.AddonSpec{
 			TalosClusterRef: v1alpha2.TalosClusterReference{Name: testClusterName},
 			ReleaseName:     "gateway-api-crds",
@@ -490,7 +496,7 @@ func TestReconcileWaitsForEarlierPriorityWave(t *testing.T) {
 	reconciler := newReconciler(fakeClient, installer, prober)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName},
+		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, testRetryInterval, result.RequeueAfter)
@@ -518,7 +524,7 @@ func TestReconcileProceedsOnceEarlierWaveReady(t *testing.T) {
 	reconciler := newReconciler(fakeClient, installer, prober)
 
 	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName},
+		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace},
 	})
 	require.NoError(t, err)
 	assert.Len(t, installer.calls, 1)
@@ -534,7 +540,7 @@ func TestReconcileSamePriorityAddonsInstallInParallel(t *testing.T) {
 	cpInstance := claimedDiscoveredInstance("cp-node-1")
 	cilium := builtinAddon()
 	certManager := &v1alpha2.Addon{
-		ObjectMeta: metav1.ObjectMeta{Name: testClusterName + "-cert-manager"},
+		ObjectMeta: metav1.ObjectMeta{Name: testClusterName + "-cert-manager", Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec: v1alpha2.AddonSpec{
 			TalosClusterRef: v1alpha2.TalosClusterReference{Name: testClusterName},
 			ReleaseName:     "cert-manager",
@@ -548,7 +554,7 @@ func TestReconcileSamePriorityAddonsInstallInParallel(t *testing.T) {
 	reconciler := newReconciler(fakeClient, installer, prober)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName},
+		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace},
 	})
 	require.NoError(t, err)
 	assert.Zero(t, result)
@@ -567,7 +573,7 @@ func TestReconcileNoPodsIsVacuouslyHealthy(t *testing.T) {
 	cluster, secret := readyCluster()
 	cpInstance := claimedDiscoveredInstance("cp-node-1")
 	custom := &v1alpha2.Addon{
-		ObjectMeta: metav1.ObjectMeta{Name: customAddonResourceName},
+		ObjectMeta: metav1.ObjectMeta{Name: customAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec: v1alpha2.AddonSpec{
 			TalosClusterRef: v1alpha2.TalosClusterReference{Name: testClusterName},
 			ReleaseName:     customReleaseName,
@@ -583,13 +589,14 @@ func TestReconcileNoPodsIsVacuouslyHealthy(t *testing.T) {
 	reconciler := newReconciler(fakeClient, installer, prober)
 
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: customAddonResourceName},
+		NamespacedName: types.NamespacedName{Name: customAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace},
 	})
 	require.NoError(t, err)
 	assert.Zero(t, result)
 
 	var got v1alpha2.Addon
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: customAddonResourceName}, &got))
+	require.NoError(t, fakeClient.Get(context.Background(),
+		types.NamespacedName{Name: customAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace}, &got))
 	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, "Ready"))
 }

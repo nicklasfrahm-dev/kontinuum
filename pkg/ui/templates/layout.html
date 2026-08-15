@@ -142,5 +142,124 @@
             {{block "content" .}}{{end}}
         </div>
     </main>
+
+    <div id="toast-container" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 pointer-events-none"></div>
+    <!-- Pre-rendered once, server-side, and cloned per toast by showToast —
+         reuses the same icon-check component the rest of the app already
+         uses for success/copied confirmations, rather than hand-writing SVG
+         path data in JS. -->
+    <template id="toast-check-icon">
+        <span class="text-emerald-400 shrink-0 mt-0.5 [&>svg]:h-4 [&>svg]:w-4">{{template "icon-check"}}</span>
+    </template>
+    <!-- Cloned by buildCopyChip's own "Copied" feedback below — sized for an
+         inline chip rather than toast-check-icon's own toast-row sizing,
+         but otherwise the same icon-check component. -->
+    <template id="copy-chip-check-icon">
+        <span class="[&>svg]:h-3 [&>svg]:w-3">{{template "icon-check"}}</span>
+    </template>
+    <script>
+        // buildCopyChip(value) builds a click-to-copy <code> chip for value —
+        // the same markup, classes, and click-to-copy/"Copied" feedback
+        // behavior as zone_leave_modal.html's own name chips (see
+        // registry_content.html's identical click listener for those),
+        // just built in JS rather than server-rendered, since showToast's
+        // own message is assembled entirely client-side. Kept here (not
+        // page-specific) so any toast — not just the "Add zone" success one
+        // below — can embed a copyable command the same way.
+        function buildCopyChip(value) {
+            var chip = document.createElement('code');
+            chip.className = 'inline-flex items-center gap-1 align-middle font-mono text-white bg-neutral-700 ' +
+                'border border-neutral-600 rounded px-1.5 py-1 cursor-pointer hover:bg-neutral-600 transition-colors';
+            chip.title = 'Click to copy';
+
+            var nameText = document.createElement('span');
+            nameText.textContent = value;
+            chip.appendChild(nameText);
+
+            var copiedFeedback = document.createElement('span');
+            copiedFeedback.className = 'hidden items-center gap-1 text-emerald-400';
+            copiedFeedback.appendChild(document.getElementById('copy-chip-check-icon').content.cloneNode(true));
+            copiedFeedback.appendChild(document.createTextNode('Copied'));
+            chip.appendChild(copiedFeedback);
+
+            chip.addEventListener('click', function () {
+                navigator.clipboard.writeText(value).then(function () {
+                    nameText.classList.add('hidden');
+                    copiedFeedback.classList.remove('hidden');
+                    copiedFeedback.classList.add('inline-flex');
+
+                    window.setTimeout(function () {
+                        nameText.classList.remove('hidden');
+                        copiedFeedback.classList.add('hidden');
+                        copiedFeedback.classList.remove('inline-flex');
+                    }, 1500);
+                });
+            });
+
+            return chip;
+        }
+
+        // showToast(prefix, command, suffix) appends a dismissable toast to
+        // #toast-container and auto-removes it after toastDuration — global
+        // (defined here in layout.html, not a page-specific script block)
+        // so any page's own htmx-driven success handling can call it
+        // without needing its own container/markup. command is rendered as
+        // a click-to-copy chip (see buildCopyChip) between the plain-text
+        // prefix/suffix; pass an empty command for a plain-text-only toast.
+        // toastDuration is long enough to read a full sentence plus an
+        // inline command, not just a short label. Every toast today is a
+        // success confirmation (the checkmark is baked in, not
+        // conditional) — revisit if/when a non-success toast is ever
+        // needed.
+        var toastDuration = 8000;
+
+        function showToast(prefix, command, suffix) {
+            var container = document.getElementById('toast-container');
+            var toast = document.createElement('div');
+            toast.className = 'pointer-events-auto flex items-start gap-3 bg-neutral-900 border border-emerald-500/30 ' +
+                'rounded-xl px-4 py-3 text-sm text-neutral-100 shadow-lg max-w-sm opacity-0 translate-y-2 ' +
+                'transition-all duration-200';
+
+            var iconTemplate = document.getElementById('toast-check-icon');
+            toast.appendChild(iconTemplate.content.cloneNode(true));
+
+            var text = document.createElement('span');
+            text.className = 'flex-1';
+            text.appendChild(document.createTextNode(prefix));
+            if (command) {
+                text.appendChild(buildCopyChip(command));
+            }
+            if (suffix) {
+                text.appendChild(document.createTextNode(suffix));
+            }
+            toast.appendChild(text);
+
+            var dismiss = document.createElement('button');
+            dismiss.type = 'button';
+            dismiss.setAttribute('aria-label', 'Dismiss');
+            dismiss.className = 'shrink-0 text-neutral-500 hover:text-white transition-colors leading-none';
+            dismiss.textContent = '×';
+
+            var timeoutId = window.setTimeout(function () { removeToast(toast); }, toastDuration);
+            dismiss.addEventListener('click', function () {
+                window.clearTimeout(timeoutId);
+                removeToast(toast);
+            });
+
+            toast.appendChild(dismiss);
+            container.appendChild(toast);
+
+            // Force a reflow so the opacity/translate transition below
+            // actually animates from the classes set above, rather than
+            // starting already in its final state.
+            void toast.offsetWidth;
+            toast.classList.remove('opacity-0', 'translate-y-2');
+        }
+
+        function removeToast(toast) {
+            toast.classList.add('opacity-0');
+            window.setTimeout(function () { toast.remove(); }, 200);
+        }
+    </script>
 </body>
 </html>

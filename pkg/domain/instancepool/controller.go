@@ -20,6 +20,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
@@ -31,6 +32,24 @@ const (
 	// condition set when fewer than spec.replicas candidates could be
 	// claimed.
 	InsufficientCapacityConditionType = "InsufficientCapacity"
+	// ReadyConditionType mirrors InsufficientCapacity's own content but with
+	// conventional Ready polarity (True = good) rather than
+	// InsufficientCapacity's "problem" polarity (True = bad) — a CRD with no
+	// Kind-specific handling only renders a populated READY/REASON/STATUS
+	// column in `kubectl tree` if status.conditions carries an entry
+	// literally Typed "Ready" (kstatus/kubectl-tree's generic-CRD fallback;
+	// mirrors zone.ReadyConditionType's own reasoning). Set in updateStatus,
+	// this reconciler's only status writer.
+	ReadyConditionType = "Ready"
+
+	// InstancePoolFinalizer keeps a deleted InstancePool around until it
+	// has released every Instance it claimed, added to every InstancePool
+	// on normal reconcile — without it, deleting a pool (or losing it to
+	// GC cascade — see pkg/domain/zone/add.go's own owner-reference note)
+	// would leave its claimed Instances with a stale
+	// kontinuum.sh/claimed-by label pointing at a pool that no longer
+	// exists, never released back for another pool to claim.
+	InstancePoolFinalizer = "kontinuum.sh/instancepool-teardown"
 
 	reasonClaimed             = "Claimed"
 	reasonCandidatesExhausted = "CandidatesExhausted"
@@ -115,13 +134,22 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, fmt.Errorf("failed to get instance pool %q: %w", req.Name, err)
 	}
 
+	if !pool.DeletionTimestamp.IsZero() {
+		return r.reconcileTeardown(ctx, &pool)
+	}
+
+	err = r.ensureFinalizer(ctx, &pool)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	claimed, err := r.listClaimed(ctx, pool.Namespace, pool.Name)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
 	if len(claimed) > int(pool.Spec.Replicas) {
-		claimed, err = r.release(ctx, &pool, claimed)
+		claimed, err = r.release(ctx, &pool, claimed, int(pool.Spec.Replicas))
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -139,6 +167,59 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	return r.updateStatus(ctx, &pool, claimed, insufficient)
+}
+
+// ensureFinalizer adds InstancePoolFinalizer to pool and persists that, if
+// not already present.
+func (r *Reconciler) ensureFinalizer(ctx context.Context, pool *v1alpha2.InstancePool) error {
+	if !controllerutil.AddFinalizer(pool, InstancePoolFinalizer) {
+		return nil
+	}
+
+	err := r.Client.Update(ctx, pool)
+	if err != nil {
+		return fmt.Errorf("failed to add finalizer to instance pool %q: %w", pool.Name, err)
+	}
+
+	return nil
+}
+
+// reconcileTeardown releases every Instance still claimed by pool, then
+// removes InstancePoolFinalizer once none remain — see that constant's own
+// doc. Release is attempted (not just waited for) because nothing else
+// unclaims these Instances on a pool's behalf: unlike zone.reconcileTeardown
+// driving a real physical side effect (the Talos Reset), an InstancePool has
+// none of its own — release's only job here is to stop the label from
+// dangling once the pool itself is gone. A conflict releasing one Instance
+// (see release's own doc) just means this requeues and tries again, the
+// same as ordinary scale-down already tolerates.
+func (r *Reconciler) reconcileTeardown(ctx context.Context, pool *v1alpha2.InstancePool) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(pool, InstancePoolFinalizer) {
+		return ctrl.Result{}, nil
+	}
+
+	claimed, err := r.listClaimed(ctx, pool.Namespace, pool.Name)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if len(claimed) > 0 {
+		_, err = r.release(ctx, pool, claimed, 0)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		return ctrl.Result{RequeueAfter: r.RetryInterval}, nil
+	}
+
+	controllerutil.RemoveFinalizer(pool, InstancePoolFinalizer)
+
+	err = r.Client.Update(ctx, pool)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to remove finalizer from instance pool %q: %w", pool.Name, err)
+	}
+
+	return ctrl.Result{}, nil
 }
 
 // enqueueAllPools maps any Instance change to a reconcile request for every
@@ -178,17 +259,17 @@ func (r *Reconciler) listClaimed(ctx context.Context, namespace, poolName string
 	return list.Items, nil
 }
 
-// release unclaims the excess of claimed beyond pool.Spec.Replicas,
-// name-sorted for deterministic behavior, and returns the remaining
-// claimed set. A conflict releasing one Instance is logged and left for
-// the next reconcile, not fatal — the candidate stays (harmlessly)
-// over-claimed until then.
+// release unclaims the excess of claimed beyond target, name-sorted for
+// deterministic behavior, and returns the remaining claimed set. Reconcile
+// passes pool.Spec.Replicas as target for ordinary scale-down; reconcileTeardown
+// passes zero, releasing every claimed Instance ahead of the pool's own
+// deletion. A conflict releasing one Instance is logged and left for the
+// next reconcile, not fatal — the candidate stays (harmlessly) over-claimed
+// until then.
 func (r *Reconciler) release(
-	ctx context.Context, pool *v1alpha2.InstancePool, claimed []v1alpha2.Instance,
+	ctx context.Context, pool *v1alpha2.InstancePool, claimed []v1alpha2.Instance, target int,
 ) ([]v1alpha2.Instance, error) {
 	sort.Slice(claimed, func(i, j int) bool { return claimed[i].Name < claimed[j].Name })
-
-	target := int(pool.Spec.Replicas)
 
 	remaining := make([]v1alpha2.Instance, 0, target)
 
@@ -354,6 +435,18 @@ func (r *Reconciler) updateStatus(
 	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
 		Type:    InsufficientCapacityConditionType,
 		Status:  status,
+		Reason:  reason,
+		Message: message,
+	})
+
+	readyStatus := metav1.ConditionTrue
+	if insufficient {
+		readyStatus = metav1.ConditionFalse
+	}
+
+	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
+		Type:    ReadyConditionType,
+		Status:  readyStatus,
 		Reason:  reason,
 		Message: message,
 	})

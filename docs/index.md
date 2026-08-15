@@ -16,7 +16,8 @@ Under the hood, kontinuum is a real Kubernetes-style API server, built on [kommo
 - [**Running via Docker**](running-via-docker.md) — the fastest way to try kontinuum, no Go toolchain required.
 - [**Production deployment**](production-deployment.md) — putting TLS and authentication in front of kontinuum before you expose it.
 - [**Authentication**](authentication.md) — the OIDC/PKCE login flow, anonymous access, and how to turn each on.
-- [**Cluster provisioning**](workflows/cluster-provisioning.md) — how kontinuum turns bare-metal machines into a running Talos Kubernetes cluster.
+- [**Add zone**](workflows/zone-add.md) — how kontinuum turns bare-metal machines into a running Talos Kubernetes cluster and installs itself onto it.
+- [**Remove zone**](workflows/zone-remove.md) — tearing a zone's downstream footprint back down and resetting its seed node.
 - [**Contribution guidelines**](contributing.md) — conventions for contributing to kontinuum.
 - [**Local setup**](local-setup.md) — build kontinuum from source and run the hot-reload dev environment.
 - [**API reference**](reference.md) — the CRDs and configuration variables that make up kontinuum's API, and the generated field reference.

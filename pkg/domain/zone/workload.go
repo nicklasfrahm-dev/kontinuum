@@ -14,7 +14,7 @@ import (
 
 // downstreamNamespace is the namespace this package installs everything
 // into on a zone's own downstream cluster — matches
-// v1alpha2.DefaultSecretNamespace's own value ("kontinuum-system"), which
+// v1alpha2.KontinuumSystemNamespace's own value ("kontinuum-system"), which
 // this package reuses directly rather than redeclaring the same string.
 const downstreamNamespace = "kontinuum-system"
 
@@ -261,6 +261,71 @@ func ensureDeployment(ctx context.Context, downstream client.Client, namespace, 
 
 	if err != nil {
 		return fmt.Errorf("failed to create %q deployment: %w", deploymentName, err)
+	}
+
+	return nil
+}
+
+// deleteDeployment deletes the Deployment ensureDeployment upserts,
+// tolerating NotFound — see teardown.go's own doc for why every deleteX
+// helper is idempotent the same way its ensureX counterpart already is.
+func deleteDeployment(ctx context.Context, downstream client.Client, namespace string) error {
+	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: deploymentName, Namespace: namespace}}
+
+	err := client.IgnoreNotFound(downstream.Delete(ctx, deployment))
+	if err != nil {
+		return fmt.Errorf("failed to delete %q deployment: %w", deploymentName, err)
+	}
+
+	return nil
+}
+
+// deleteService deletes the Service ensureService upserts, tolerating
+// NotFound.
+func deleteService(ctx context.Context, downstream client.Client, namespace string) error {
+	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: serviceName, Namespace: namespace}}
+
+	err := client.IgnoreNotFound(downstream.Delete(ctx, service))
+	if err != nil {
+		return fmt.Errorf("failed to delete %q service: %w", serviceName, err)
+	}
+
+	return nil
+}
+
+// deleteConfigMap deletes the ConfigMap ensureConfigMap upserts, tolerating
+// NotFound.
+func deleteConfigMap(ctx context.Context, downstream client.Client, namespace string) error {
+	configMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: envConfigMapName, Namespace: namespace}}
+
+	err := client.IgnoreNotFound(downstream.Delete(ctx, configMap))
+	if err != nil {
+		return fmt.Errorf("failed to delete %q configmap: %w", envConfigMapName, err)
+	}
+
+	return nil
+}
+
+// deleteSecret deletes the Secret ensureSecret upserts, tolerating NotFound.
+func deleteSecret(ctx context.Context, downstream client.Client, namespace string) error {
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: envSecretName, Namespace: namespace}}
+
+	err := client.IgnoreNotFound(downstream.Delete(ctx, secret))
+	if err != nil {
+		return fmt.Errorf("failed to delete %q secret: %w", envSecretName, err)
+	}
+
+	return nil
+}
+
+// deleteNamespace deletes namespace itself, tolerating NotFound — the last
+// step of teardown.go's own uninstallWorkload, cascading away anything this
+// package (or cert-manager, e.g. the Certificate's own TLS Secret) ever
+// created inside it that isn't explicitly deleted above.
+func deleteNamespace(ctx context.Context, downstream client.Client, namespace string) error {
+	err := client.IgnoreNotFound(downstream.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}))
+	if err != nil {
+		return fmt.Errorf("failed to delete %q namespace: %w", namespace, err)
 	}
 
 	return nil

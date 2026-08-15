@@ -156,7 +156,7 @@ func newMigrateHook(
 			return err
 		}
 
-		err = crd.RestoreMigrated(ctx, loopbackConfig, migrated, v1alpha2.DefaultSecretNamespace, logger)
+		err = crd.RestoreMigrated(ctx, loopbackConfig, migrated, v1alpha2.KontinuumSystemNamespace, logger)
 		if err != nil {
 			err = fmt.Errorf("restore: %w", err)
 		}
@@ -185,7 +185,7 @@ func assertMigrated(
 	var migratedZone v1alpha2.Zone
 
 	require.Eventually(t, func() bool {
-		key := ctrlclient.ObjectKey{Name: zoneName, Namespace: v1alpha2.DefaultSecretNamespace}
+		key := ctrlclient.ObjectKey{Name: zoneName, Namespace: v1alpha2.KontinuumSystemNamespace}
 
 		return kubeClient.Get(ctx, key, &migratedZone) == nil
 	}, e2eHealthzTimeout, e2eHealthzInterval, "migrated zone was never recreated in kontinuum-system")

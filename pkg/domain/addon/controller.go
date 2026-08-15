@@ -149,12 +149,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return result, err
 	}
 
-	kubeconfig, result, ready, err := r.readyKubeconfig(ctx, addon.Spec.TalosClusterRef.Name)
+	kubeconfig, result, ready, err := r.readyKubeconfig(ctx, addon.Namespace, addon.Spec.TalosClusterRef.Name)
 	if err != nil || !ready {
 		return result, err
 	}
 
-	installReq, err := r.resolveInstallRequest(ctx, addon.Spec)
+	installReq, err := r.resolveInstallRequest(ctx, &addon)
 	if err != nil {
 		return r.setReady(ctx, &addon, metav1.ConditionFalse, "InstallFailed", err.Error())
 	}
@@ -211,7 +211,7 @@ func (r *Reconciler) waitForEarlierWaves(ctx context.Context, addon *v1alpha2.Ad
 		return ctrl.Result{}, false, err
 	}
 
-	siblings, err := ListForCluster(ctx, r.Client, addon.Spec.TalosClusterRef.Name)
+	siblings, err := ListForCluster(ctx, r.Client, addon.Namespace, addon.Spec.TalosClusterRef.Name)
 	if err != nil {
 		return ctrl.Result{}, false, err
 	}
@@ -244,8 +244,10 @@ func (r *Reconciler) waitForEarlierWaves(ctx context.Context, addon *v1alpha2.Ad
 // result as Reconcile's own result and stop", not ready with a non-nil
 // error means "propagate the error" — see clusterKubeconfig's own doc for
 // what each outcome actually means.
-func (r *Reconciler) readyKubeconfig(ctx context.Context, clusterName string) ([]byte, ctrl.Result, bool, error) {
-	kubeconfig, found, err := r.clusterKubeconfig(ctx, clusterName)
+func (r *Reconciler) readyKubeconfig(
+	ctx context.Context, namespace, clusterName string,
+) ([]byte, ctrl.Result, bool, error) {
+	kubeconfig, found, err := r.clusterKubeconfig(ctx, namespace, clusterName)
 	if err != nil {
 		return nil, ctrl.Result{}, false, err
 	}
@@ -261,21 +263,19 @@ func (r *Reconciler) readyKubeconfig(ctx context.Context, clusterName string) ([
 	return kubeconfig, ctrl.Result{}, true, nil
 }
 
-// clusterKubeconfig resolves clusterName's own stored kubeconfig. found is
-// false only when the owning TalosCluster itself is missing — an orphaned
-// reference (GC hasn't caught up yet), nothing productive to do, not
-// worth retrying. found true with a nil kubeconfig means the cluster
-// exists but hasn't bootstrapped far enough to have stored one yet —
-// callers should retry that case, not treat it the same as "give up".
-// Looks the TalosCluster up in v1alpha2.DefaultSecretNamespace — Addon
-// itself stays cluster-scoped, and this codebase's only path that creates a
-// TalosCluster (pkg/domain/zone.Add) always puts it there (see issue #63's
-// architecture); a tenant's own namespaced TalosCluster isn't reachable via
-// TalosClusterRef yet.
-func (r *Reconciler) clusterKubeconfig(ctx context.Context, clusterName string) ([]byte, bool, error) {
+// clusterKubeconfig resolves clusterName's own stored kubeconfig, looked
+// up in namespace — always the calling Addon's own namespace, which
+// always matches its owning TalosCluster's, since Addon is namespaced
+// alongside it. found is false only when the owning TalosCluster itself
+// is missing — an orphaned reference (GC hasn't caught up yet), nothing
+// productive to do, not worth retrying. found true with a nil kubeconfig
+// means the cluster exists but hasn't bootstrapped far enough to have
+// stored one yet — callers should retry that case, not treat it the same
+// as "give up".
+func (r *Reconciler) clusterKubeconfig(ctx context.Context, namespace, clusterName string) ([]byte, bool, error) {
 	var cluster v1alpha2.TalosCluster
 
-	err := r.Client.Get(ctx, client.ObjectKey{Name: clusterName, Namespace: v1alpha2.DefaultSecretNamespace}, &cluster)
+	err := r.Client.Get(ctx, client.ObjectKey{Name: clusterName, Namespace: namespace}, &cluster)
 	if apierrors.IsNotFound(err) {
 		return nil, false, nil
 	}
@@ -292,17 +292,20 @@ func (r *Reconciler) clusterKubeconfig(ctx context.Context, clusterName string) 
 	return kubeconfig, true, nil
 }
 
-// resolveInstallRequest builds spec's own install request, evaluating its
-// CEL-computed defaults fresh against cluster's current control-plane
-// count — e.g. so cilium's operator.replicas keeps tracking it even after
-// the Addon itself was created once.
-func (r *Reconciler) resolveInstallRequest(ctx context.Context, spec v1alpha2.AddonSpec) (InstallRequest, error) {
+// resolveInstallRequest builds addon's own install request, evaluating its
+// CEL-computed defaults fresh against its owning cluster's current
+// control-plane count — e.g. so cilium's operator.replicas keeps tracking
+// it even after the Addon itself was created once. The owning TalosCluster
+// is looked up in addon's own namespace, which always matches its since
+// Addon is namespaced alongside it.
+func (r *Reconciler) resolveInstallRequest(ctx context.Context, addon *v1alpha2.Addon) (InstallRequest, error) {
 	var cluster v1alpha2.TalosCluster
 
-	err := r.Client.Get(ctx,
-		client.ObjectKey{Name: spec.TalosClusterRef.Name, Namespace: v1alpha2.DefaultSecretNamespace}, &cluster)
+	clusterName := addon.Spec.TalosClusterRef.Name
+
+	err := r.Client.Get(ctx, client.ObjectKey{Name: clusterName, Namespace: addon.Namespace}, &cluster)
 	if err != nil {
-		return InstallRequest{}, fmt.Errorf("failed to get talos cluster %q: %w", spec.TalosClusterRef.Name, err)
+		return InstallRequest{}, fmt.Errorf("failed to get talos cluster %q: %w", clusterName, err)
 	}
 
 	controlPlaneCount, err := controlPlaneMemberCount(ctx, r.Client, &cluster)
@@ -315,7 +318,7 @@ func (r *Reconciler) resolveInstallRequest(ctx context.Context, spec v1alpha2.Ad
 		return InstallRequest{}, err
 	}
 
-	return resolveAddon(spec, celCtx)
+	return resolveAddon(addon.Spec, celCtx)
 }
 
 // probeHealthy checks installReq's own pods via PodProber — installRelease/

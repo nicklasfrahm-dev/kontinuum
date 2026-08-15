@@ -15,6 +15,7 @@ import (
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
 	talosclient "github.com/siderolabs/talos/pkg/machinery/client"
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
+	"github.com/siderolabs/talos/pkg/machinery/constants"
 )
 
 // maintenanceModePort is the gRPC port apid listens on while a Talos node
@@ -63,6 +64,18 @@ type ClusterBootstrapper interface {
 	// this on current Talos releases, making endpoint/node's post-config
 	// identity the only place left to fetch it.
 	Version(ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config) (string, error)
+	// Reset wipes node back to maintenance mode — talosctl reset's
+	// programmatic equivalent — dialing endpoint with the real
+	// (non-maintenance-mode) admin identity in talosCfg and routing the
+	// request to node via client.WithNode, the same targeting Version
+	// already uses (a reset seed node can no longer serve its own dial, so
+	// this always goes through some other still-reachable member's
+	// endpoint, or node's own address when it's the only member — see
+	// pkg/domain/zone's teardown, this interface's only caller). graceful
+	// must be false when node is (or is about to become, mid-reset) etcd's
+	// only member — see graceful's doc on Reset's implementation for why
+	// leaving etcd isn't safe to attempt in that case.
+	Reset(ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config, graceful bool) error
 }
 
 // talosBootstrapper is ClusterBootstrapper's production implementation.
@@ -228,6 +241,58 @@ func (t talosBootstrapper) Version(
 	}
 
 	return "", nil
+}
+
+// Reset implements ClusterBootstrapper. graceful is passed straight through
+// as Talos's own Graceful flag — it is NOT safe to just always pass true.
+// Talos's own docs are explicit about this: a graceful reset only works
+// when the cluster is in a good HA state; a single-member cluster can't
+// gracefully "leave" etcd at all (LeaveCluster's own etcd MemberRemove call
+// against yourself, as the only member, is the documented hazard —
+// https://docs.siderolabs.com/talos/v1.13/configure-your-talos-cluster/lifecycle-management/resetting-a-machine
+// recommends --graceful=false for exactly this case). ResetControlPlane
+// decides graceful per call based on how many members it resolved — this
+// method has no cluster-topology awareness of its own and trusts whatever
+// the caller passes. Reboot is always true, so the node comes back up into
+// maintenance mode (wiped, discoverable again) rather than halting.
+//
+// Only the STATE and EPHEMERAL partitions are wiped — not the default
+// whole-disk wipe talosClient.Reset's own convenience method would issue.
+// kontinuum's seed nodes are bare-metal, pre-provisioned with Talos already
+// installed to disk (see docs/workflows/zone-add.md: discovery dials an
+// address the operator already booted into maintenance mode), not
+// network/PXE-booted on every boot — a whole-disk wipe would also erase the
+// boot/EFI partition Talos's own installer wrote there, leaving the machine
+// unable to boot back into maintenance mode on its own and defeating
+// ResetControlPlane's entire "rejoinable with no manual intervention"
+// purpose (see docs/workflows/zone-remove.md). See
+// https://docs.siderolabs.com/talos/v1.13/configure-your-talos-cluster/lifecycle-management/resetting-a-machine
+// for the same caveat Talos's own docs give for cloud VMs.
+func (t talosBootstrapper) Reset(
+	ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config, graceful bool,
+) error {
+	talosClient, err := t.dial(ctx, endpoint, talosCfg)
+	if err != nil {
+		return err
+	}
+	defer talosClient.Close() //nolint:errcheck // best-effort close of a short-lived reset connection
+
+	rpcCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+
+	err = talosClient.ResetGeneric(talosclient.WithNode(rpcCtx, node), &machineapi.ResetRequest{
+		Graceful: graceful,
+		Reboot:   true,
+		SystemPartitionsToWipe: []*machineapi.ResetPartitionSpec{
+			{Label: constants.StatePartitionLabel, Wipe: true},
+			{Label: constants.EphemeralPartitionLabel, Wipe: true},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to reset %s via %s: %w", node, endpoint, err)
+	}
+
+	return nil
 }
 
 // dial connects to addr with talosCfg's real (non-maintenance-mode) admin

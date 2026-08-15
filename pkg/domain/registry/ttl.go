@@ -82,7 +82,7 @@ func (r *TTLReconciler) deleteStale(ctx context.Context, server *v1alpha2.Kontin
 // created) is expected, not an error.
 func (r *TTLReconciler) cleanupSecret(ctx context.Context, name string) error {
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: secretName(name), Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: secretName(name), Namespace: v1alpha2.KontinuumSystemNamespace},
 	}
 
 	err := r.Client.Delete(ctx, secret)

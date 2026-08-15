@@ -8,6 +8,7 @@ import (
 	certmanagerv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
@@ -278,6 +279,85 @@ func ensureHTTPRoute(
 
 	if err != nil {
 		return fmt.Errorf("failed to create %q httproute: %w", name, err)
+	}
+
+	return nil
+}
+
+// IgnoreNotFoundOrNoMatch tolerates both NotFound (the object itself is
+// already gone) and meta.IsNoMatchError (the object's whole Kind isn't even
+// registered on the downstream cluster, e.g. the gateway-api/cert-manager
+// CRDs that back these four types were never actually installed there —
+// addon install failing, or genuinely never getting that far before the
+// Zone was deleted, are both real, observed cases, not hypothetical). The
+// second case matters distinctly from NotFound: a plain 404 still means
+// controller-runtime's RESTMapper *found* the resource type and asked the
+// server, which said "no such object"; a NoMatchError means the client
+// couldn't even resolve the type to ask about, so there is categorically
+// nothing installed of this kind to have deleted in the first place —
+// exactly as safe to treat as "already gone" as NotFound itself, rather
+// than a real failure worth retrying until Zone's own TeardownTimeout.
+func IgnoreNotFoundOrNoMatch(err error) error {
+	if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
+		return nil
+	}
+
+	return err
+}
+
+// deleteHTTPRoute deletes the HTTPRoute ensureHTTPRoute upserts, tolerating
+// NotFound and a not-installed Gateway API — see teardown.go's own doc for
+// why every deleteX helper is idempotent the same way its ensureX
+// counterpart already is, and IgnoreNotFoundOrNoMatch's own doc for why a
+// missing Kind is tolerated the same way as a missing object.
+func deleteHTTPRoute(ctx context.Context, downstream client.Client, namespace, name string) error {
+	route := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
+
+	err := IgnoreNotFoundOrNoMatch(downstream.Delete(ctx, route))
+	if err != nil {
+		return fmt.Errorf("failed to delete %q httproute: %w", name, err)
+	}
+
+	return nil
+}
+
+// deleteCertificate deletes the Certificate ensureCertificate upserts,
+// tolerating NotFound and a not-installed cert-manager (see
+// IgnoreNotFoundOrNoMatch's own doc).
+func deleteCertificate(ctx context.Context, downstream client.Client, namespace, name string) error {
+	cert := &certmanagerv1.Certificate{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
+
+	err := IgnoreNotFoundOrNoMatch(downstream.Delete(ctx, cert))
+	if err != nil {
+		return fmt.Errorf("failed to delete %q certificate: %w", name, err)
+	}
+
+	return nil
+}
+
+// deleteGateway deletes the Gateway ensureGateway upserts, tolerating
+// NotFound and a not-installed Gateway API (see IgnoreNotFoundOrNoMatch's
+// own doc).
+func deleteGateway(ctx context.Context, downstream client.Client, namespace, name string) error {
+	gateway := &gatewayv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
+
+	err := IgnoreNotFoundOrNoMatch(downstream.Delete(ctx, gateway))
+	if err != nil {
+		return fmt.Errorf("failed to delete %q gateway: %w", name, err)
+	}
+
+	return nil
+}
+
+// deleteClusterIssuer deletes the cluster-scoped ClusterIssuer
+// ensureClusterIssuer upserts, tolerating NotFound and a not-installed
+// cert-manager (see IgnoreNotFoundOrNoMatch's own doc).
+func deleteClusterIssuer(ctx context.Context, downstream client.Client, name string) error {
+	issuer := &certmanagerv1.ClusterIssuer{ObjectMeta: metav1.ObjectMeta{Name: name}}
+
+	err := IgnoreNotFoundOrNoMatch(downstream.Delete(ctx, issuer))
+	if err != nil {
+		return fmt.Errorf("failed to delete %q clusterissuer: %w", name, err)
 	}
 
 	return nil

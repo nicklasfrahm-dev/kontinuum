@@ -10,6 +10,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -26,7 +27,7 @@ func getSeedInstance(t *testing.T, hubClient client.Client) v1alpha2.Instance {
 
 	var list v1alpha2.InstanceList
 
-	require.NoError(t, hubClient.List(t.Context(), &list, client.InNamespace(v1alpha2.DefaultSecretNamespace),
+	require.NoError(t, hubClient.List(t.Context(), &list, client.InNamespace(v1alpha2.KontinuumSystemNamespace),
 		client.MatchingLabels{v1alpha2.LabelRegion: testRegion, v1alpha2.LabelZone: testZone}))
 	require.Len(t, list.Items, 1)
 
@@ -85,6 +86,24 @@ func TestBuildAddObjectsSharesNameAcrossZoneInstancePoolAndTalosCluster(t *testi
 	assert.Equal(t, testZoneName, cluster.Spec.ControlPlane.PoolRef.Name)
 	assert.Empty(t, cluster.Spec.Talos.Version)
 	assert.Empty(t, cluster.Spec.Kubernetes.Version)
+	assert.False(t, cluster.Spec.Teardown.UnregisterInstances,
+		"instances stay in inventory by default — see TeardownSpec's own doc")
+}
+
+// TestBuildAddObjectsThreadsUnregisterInstancesOnDeleteToClusterSpec covers
+// the "Unregister instances on decommissioning" checkbox's own path onto
+// the created TalosCluster's spec.teardown.unregisterInstances — the field
+// TalosClusterFinalizer's own teardown actually reads.
+func TestBuildAddObjectsThreadsUnregisterInstancesOnDeleteToClusterSpec(t *testing.T) {
+	t.Parallel()
+
+	opts := testAddOptions()
+	opts.UnregisterInstancesOnDelete = true
+
+	zoneObj, _, _, cluster := zone.BuildAddObjects(opts)
+
+	assert.Equal(t, testZoneName, zoneObj.Name)
+	assert.True(t, cluster.Spec.Teardown.UnregisterInstances)
 }
 
 // TestBuildAddObjectsInstanceNameHashesTalosAddress covers the seed
@@ -124,7 +143,7 @@ func TestAddCreatesAllFourObjects(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, testZoneName, got.Name)
 
-	sharedKey := client.ObjectKey{Name: testZoneName, Namespace: v1alpha2.DefaultSecretNamespace}
+	sharedKey := client.ObjectKey{Name: testZoneName, Namespace: v1alpha2.KontinuumSystemNamespace}
 
 	var z v1alpha2.Zone
 	require.NoError(t, hubClient.Get(t.Context(), sharedKey, &z))
@@ -138,14 +157,16 @@ func TestAddCreatesAllFourObjects(t *testing.T) {
 	assert.NoError(t, hubClient.Get(t.Context(), sharedKey, &cluster))
 }
 
-// TestAddSetsOwnerReferencesFromZoneToDependents covers the fan-out's own
-// ownership metadata: the seed Instance, InstancePool, and TalosCluster
-// are each owned by the created Zone. Nothing acts on this yet —
-// libkapi.WithGarbageCollector, which would cascade a Zone deletion to all
-// three, is deliberately not enabled (see pkg/cli/serve.go's own doc) —
-// but it's still correct, real metadata (kubectl tree already reads it),
-// and ready for whichever cleanup mechanism ends up using it.
-func TestAddSetsOwnerReferencesFromZoneToDependents(t *testing.T) {
+// TestAddSetsOwnershipChain covers the fan-out's own ownership metadata: a
+// strict Zone > TalosCluster > InstancePool chain, not four siblings all
+// owned directly by Zone — see taloscluster.TalosClusterFinalizer's own
+// doc for why. libkapi.WithGarbageCollector is enabled (see
+// pkg/cli/serve.go's own doc), so this is what actually drives cascade
+// deletion, not just inert metadata. The seed Instance is owned by
+// nobody — its fate on cluster teardown is the explicit
+// spec.teardown.unregisterInstances opt-in (see TeardownSpec's own doc),
+// never inferred from ownership.
+func TestAddSetsOwnershipChain(t *testing.T) {
 	t.Parallel()
 
 	hubClient := newHubFakeClient(t)
@@ -153,27 +174,27 @@ func TestAddSetsOwnerReferencesFromZoneToDependents(t *testing.T) {
 	got, err := zone.Add(t.Context(), hubClient, testAddOptions())
 	require.NoError(t, err)
 
-	sharedKey := client.ObjectKey{Name: testZoneName, Namespace: v1alpha2.DefaultSecretNamespace}
-
-	instance := getSeedInstance(t, hubClient)
-	assertOwnedByZone(t, got, instance.OwnerReferences)
-
-	var pool v1alpha2.InstancePool
-	require.NoError(t, hubClient.Get(t.Context(), sharedKey, &pool))
-	assertOwnedByZone(t, got, pool.OwnerReferences)
+	sharedKey := client.ObjectKey{Name: testZoneName, Namespace: v1alpha2.KontinuumSystemNamespace}
 
 	var cluster v1alpha2.TalosCluster
 	require.NoError(t, hubClient.Get(t.Context(), sharedKey, &cluster))
-	assertOwnedByZone(t, got, cluster.OwnerReferences)
+	assertOwnedBy(t, "Zone", got.Name, got.UID, cluster.OwnerReferences)
+
+	var pool v1alpha2.InstancePool
+	require.NoError(t, hubClient.Get(t.Context(), sharedKey, &pool))
+	assertOwnedBy(t, "TalosCluster", cluster.Name, cluster.UID, pool.OwnerReferences)
+
+	instance := getSeedInstance(t, hubClient)
+	assert.Empty(t, instance.OwnerReferences)
 }
 
-func assertOwnedByZone(t *testing.T, zoneObj *v1alpha2.Zone, refs []metav1.OwnerReference) {
+func assertOwnedBy(t *testing.T, kind, name string, uid types.UID, refs []metav1.OwnerReference) {
 	t.Helper()
 
 	require.Len(t, refs, 1)
-	assert.Equal(t, "Zone", refs[0].Kind)
-	assert.Equal(t, zoneObj.Name, refs[0].Name)
-	assert.Equal(t, zoneObj.UID, refs[0].UID)
+	assert.Equal(t, kind, refs[0].Kind)
+	assert.Equal(t, name, refs[0].Name)
+	assert.Equal(t, uid, refs[0].UID)
 	require.NotNil(t, refs[0].Controller)
 	assert.True(t, *refs[0].Controller)
 }

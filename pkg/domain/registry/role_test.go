@@ -27,7 +27,7 @@ func TestRole(t *testing.T) {
 		},
 		"both set is worker": {
 			region:   "eu",
-			zone:     "eu-1a",
+			zone:     e2eZone,
 			wantRole: v1alpha2.RoleWorker,
 		},
 		"only region set is an error": {
@@ -38,7 +38,7 @@ func TestRole(t *testing.T) {
 		},
 		"only zone set is an error": {
 			region:      "",
-			zone:        "eu-1a",
+			zone:        e2eZone,
 			expectError: true,
 			wantErrIs:   registry.ErrRegionZoneRequired,
 		},

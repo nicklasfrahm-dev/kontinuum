@@ -34,7 +34,7 @@ const (
 func secretRefFor(clusterName string) v1alpha2.SecretReference {
 	return v1alpha2.SecretReference{
 		Name:      secretNamePrefix + clusterName,
-		Namespace: v1alpha2.DefaultSecretNamespace,
+		Namespace: v1alpha2.KontinuumSystemNamespace,
 	}
 }
 

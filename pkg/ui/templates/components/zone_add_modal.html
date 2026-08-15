@@ -33,9 +33,18 @@
 */}}
 {{define "zone-add-modal-body"}}
 {{if .CreatedZone}}
-<div class="bg-accent/10 border border-accent/30 rounded-xl px-4 py-3 text-sm text-accent">
-    Created zone <span class="font-medium">{{.CreatedZone}}</span>. Cluster provisioning is now underway — check the zone's status with <code class="font-mono">kubectl get zone {{.CreatedZone}}</code>.
-</div>
+{{/* A hidden marker, not a message rendered inline — registry_content.html's
+     own htmx:afterSwap listener on #zone-add-modal-body reads this, closes
+     the dialog, and surfaces the text as a toast instead, so a successful
+     submission doesn't leave a stale success banner sitting in the modal
+     the next time it's opened (see openZoneAddModal's own pristine-HTML
+     reset, which only guards against a partially-filled *form*). Split into
+     three attributes, rather than one combined message, so showToast can
+     render data-toast-command as its own click-to-copy chip (see
+     layout.html's buildCopyChip) instead of plain text. */}}
+<div data-toast-prefix="Created zone {{.CreatedZone}}. Cluster provisioning is now underway — check the zone's status with "
+     data-toast-command="kubectl get zone {{.CreatedZone}}"
+     data-toast-suffix="." class="hidden"></div>
 {{else}}
 {{if .Error}}
 <div class="mb-4 bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 text-sm text-red-400">
@@ -72,6 +81,37 @@
             <input type="text" name="kubernetes-version" value="{{.KubernetesVersion}}" placeholder="defaulted"
                    class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
         </label>
+    </div>
+    <!--
+        One bordered subarea for the checkbox and its own explanation,
+        rather than a floating label plus a separately-colored callout box
+        below it — the caption is styled as a muted, indented line under
+        the checkbox's own label (mirroring the "Talos address" field's
+        identical helper-caption pattern above), so the two visually read
+        as one unit instead of two unrelated ones.
+    -->
+    <div class="bg-neutral-800/50 border border-neutral-700 rounded-lg p-3 space-y-1.5">
+        <!--
+            The checkbox itself is visually hidden (peer + sr-only) rather
+            than styled directly — native checkboxes can't be restyled
+            consistently across browsers. The box/checkmark beside it is a
+            plain span reacting to the hidden input's :checked state via
+            Tailwind's peer-checked variant, reusing the same icon-check
+            component the toast/copy-chip "Copied" feedback already uses
+            elsewhere, so this matches the app's own confirmation styling
+            instead of a raw OS-drawn checkbox.
+        -->
+        <label class="flex items-start gap-2.5 cursor-pointer group">
+            <input type="checkbox" name="unregister-instances" {{if .UnregisterInstances}}checked{{end}} class="peer sr-only">
+            <span class="mt-0.5 shrink-0 h-4 w-4 rounded border border-neutral-700 bg-neutral-800 flex items-center justify-center transition-colors peer-checked:bg-accent peer-checked:border-accent peer-focus-visible:ring-2 peer-focus-visible:ring-accent peer-focus-visible:ring-offset-2 peer-focus-visible:ring-offset-neutral-900 [&>svg]:h-3 [&>svg]:w-3 [&>svg]:text-neutral-950 [&>svg]:hidden peer-checked:[&>svg]:block">
+                {{template "icon-check"}}
+            </span>
+            <span class="text-sm text-neutral-300 group-hover:text-white transition-colors">Unregister instances on decommissioning</span>
+        </label>
+        <p class="pl-6 text-xs text-neutral-500">
+            Unregistering the instances will remove them from your inventory. We only recommend doing this if
+            you plan to fully decommission the asset and plan to never use it again.
+        </p>
     </div>
     <div class="flex justify-end pt-2">
         <button type="submit"

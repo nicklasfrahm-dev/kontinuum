@@ -32,13 +32,23 @@ const (
 	testDomain        = "kontinuum.example.com"
 	testRetryInterval = 15 * time.Second
 	testImage         = "ghcr.io/nicklasfrahm/kontinuum:test"
+
+	// testDownstreamNamespace/testDownstreamResourceName mirror
+	// pkg/domain/zone's own unexported downstreamNamespace/deploymentName
+	// et al. (see workload.go/network.go) — every kontinuum-server object
+	// the zone controller installs downstream shares this one namespace and
+	// this one resource name, so tests across this package assert against
+	// these local copies rather than a literal repeated at every call site.
+	testDownstreamNamespace    = "kontinuum-system"
+	testDownstreamResourceName = "kontinuum"
+	testDownstreamEnvName      = "kontinuum-env"
 )
 
 // testZoneKey() is testZoneName's own ObjectKey — every zone-add fixture in
-// this file lives in v1alpha2.DefaultSecretNamespace (see BuildAddObjects'
+// this file lives in v1alpha2.KontinuumSystemNamespace (see BuildAddObjects'
 // own doc), so every Get below needs both, not just Name.
 func testZoneKey() client.ObjectKey {
-	return client.ObjectKey{Name: testZoneName, Namespace: v1alpha2.DefaultSecretNamespace}
+	return client.ObjectKey{Name: testZoneName, Namespace: v1alpha2.KontinuumSystemNamespace}
 }
 
 // testStorage is a fake connection string, not a real credential.
@@ -95,26 +105,26 @@ func newDownstreamFakeClient(t *testing.T) client.Client {
 
 func testZoneObject() *v1alpha2.Zone {
 	return &v1alpha2.Zone{
-		ObjectMeta: metav1.ObjectMeta{Name: testZoneName, Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: testZoneName, Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec:       v1alpha2.ZoneSpec{Region: testRegion, Zone: testZone, Domain: testDomain},
 	}
 }
 
 func readyTalosCluster() *v1alpha2.TalosCluster {
 	return &v1alpha2.TalosCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: testZoneName, Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: testZoneName, Namespace: v1alpha2.KontinuumSystemNamespace},
 		Status: v1alpha2.TalosClusterStatus{
 			Conditions: []metav1.Condition{
 				{Type: taloscluster.ReadyConditionType, Status: metav1.ConditionTrue, Reason: "AddonsInstalled"},
 			},
-			SecretRef: v1alpha2.SecretReference{Name: "taloscluster-" + testZoneName, Namespace: "kontinuum-system"},
+			SecretRef: v1alpha2.SecretReference{Name: "taloscluster-" + testZoneName, Namespace: testDownstreamNamespace},
 		},
 	}
 }
 
 func kubeconfigSecret() *corev1.Secret {
 	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "taloscluster-" + testZoneName, Namespace: "kontinuum-system"},
+		ObjectMeta: metav1.ObjectMeta{Name: "taloscluster-" + testZoneName, Namespace: testDownstreamNamespace},
 		Data:       map[string][]byte{"kubeconfig": []byte("fake-kubeconfig")},
 	}
 }
@@ -123,14 +133,14 @@ func registeredKontinuum(name, storage string) (*v1alpha2.Kontinuum, *corev1.Sec
 	secretName := "kontinuum-" + name
 
 	kontinuum := &v1alpha2.Kontinuum{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace},
 		Status: v1alpha2.KontinuumStatus{
-			SecretRef: v1alpha2.KontinuumSecretReference{Name: secretName, Namespace: "kontinuum-system"},
+			SecretRef: v1alpha2.KontinuumSecretReference{Name: secretName, Namespace: testDownstreamNamespace},
 		},
 	}
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: "kontinuum-system"},
+		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: testDownstreamNamespace},
 		Data:       map[string][]byte{"KONTINUUM_SERVER_STORAGE": []byte(storage)},
 	}
 
@@ -151,7 +161,7 @@ func newReconciler(hubClient client.Client, downstreamBuilder zone.DownstreamCli
 
 func reconcileRequest() ctrl.Request {
 	return ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: testZoneName, Namespace: v1alpha2.DefaultSecretNamespace},
+		NamespacedName: types.NamespacedName{Name: testZoneName, Namespace: v1alpha2.KontinuumSystemNamespace},
 	}
 }
 
@@ -174,11 +184,24 @@ func TestReconcileReportsTalosClusterNotFound(t *testing.T) {
 	assert.Equal(t, "TalosClusterNotFound", cond.Reason)
 }
 
+// assertReadyMirrors asserts that got's own aggregate Ready condition (see
+// zone.ReadyConditionType's own doc) reports status/reason — shared by
+// every test below that also checks whichever of ClusterReady/Installed
+// actually drove it, since Ready always just mirrors that.
+func assertReadyMirrors(t *testing.T, got v1alpha2.Zone, status metav1.ConditionStatus, reason string) {
+	t.Helper()
+
+	readyCond := meta.FindStatusCondition(got.Status.Conditions, zone.ReadyConditionType)
+	require.NotNil(t, readyCond)
+	assert.Equal(t, status, readyCond.Status)
+	assert.Equal(t, reason, readyCond.Reason)
+}
+
 func TestReconcileWaitsForTalosClusterReady(t *testing.T) {
 	t.Parallel()
 
 	notReadyCluster := &v1alpha2.TalosCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: testZoneName, Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: testZoneName, Namespace: v1alpha2.KontinuumSystemNamespace},
 	}
 	hubClient := newHubFakeClient(t, testZoneObject(), notReadyCluster)
 	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{})
@@ -194,6 +217,9 @@ func TestReconcileWaitsForTalosClusterReady(t *testing.T) {
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, "WaitingForTalosCluster", cond.Reason)
+
+	// A blocked ClusterReady propagates to the aggregate Ready condition too.
+	assertReadyMirrors(t, got, metav1.ConditionFalse, "WaitingForTalosCluster")
 }
 
 func TestReconcileReportsNoStorageSecretFound(t *testing.T) {
@@ -236,12 +262,27 @@ func TestReconcileInstallsDownstreamObjectsAndWaitsForCertificate(t *testing.T) 
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, "WaitingForCertificate", cond.Reason)
 
+	// Installed always mirrors onto Ready, regardless of its own status —
+	// confirms the False branch, not just the True happy path (see
+	// TestReconcileFlipsInstalledOnceCertificateReady).
+	assertReadyMirrors(t, got, metav1.ConditionFalse, "WaitingForCertificate")
+
+	assertDownstreamFootprintInstalled(t, downstream)
+}
+
+// assertDownstreamFootprintInstalled asserts every object a single
+// Reconcile pass installs onto the zone's own downstream cluster exists
+// with the expected content — namespace, env Secret/ConfigMap, Deployment/
+// Service, ClusterIssuer, Gateway, and Certificate.
+func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) {
+	t.Helper()
+
 	var ns corev1.Namespace
-	assert.NoError(t, downstream.Get(t.Context(), client.ObjectKey{Name: "kontinuum-system"}, &ns))
+	assert.NoError(t, downstream.Get(t.Context(), client.ObjectKey{Name: testDownstreamNamespace}, &ns))
 
 	var secret corev1.Secret
 	require.NoError(t, downstream.Get(t.Context(),
-		client.ObjectKey{Name: "kontinuum-env", Namespace: "kontinuum-system"}, &secret))
+		client.ObjectKey{Name: testDownstreamEnvName, Namespace: testDownstreamNamespace}, &secret))
 	// A real apiserver converts StringData into the base64-encoded Data via
 	// admission logic the fake client doesn't replicate — see
 	// pkg/domain/registry/heartbeat_test.go's identical note.
@@ -249,35 +290,35 @@ func TestReconcileInstallsDownstreamObjectsAndWaitsForCertificate(t *testing.T) 
 
 	var configMap corev1.ConfigMap
 	require.NoError(t, downstream.Get(t.Context(),
-		client.ObjectKey{Name: "kontinuum-env", Namespace: "kontinuum-system"}, &configMap))
+		client.ObjectKey{Name: testDownstreamEnvName, Namespace: testDownstreamNamespace}, &configMap))
 	assert.Equal(t, testRegion, configMap.Data["KONTINUUM_SERVER_REGION"])
 	assert.Equal(t, testZone, configMap.Data["KONTINUUM_SERVER_ZONE"])
 
 	var deployment appsv1.Deployment
 	require.NoError(t, downstream.Get(t.Context(),
-		client.ObjectKey{Name: "kontinuum", Namespace: "kontinuum-system"}, &deployment))
+		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &deployment))
 	assert.Equal(t, testImage, deployment.Spec.Template.Spec.Containers[0].Image)
 
 	var service corev1.Service
 	assert.NoError(t, downstream.Get(t.Context(),
-		client.ObjectKey{Name: "kontinuum", Namespace: "kontinuum-system"}, &service))
+		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &service))
 
 	var issuer certmanagerv1.ClusterIssuer
-	require.NoError(t, downstream.Get(t.Context(), client.ObjectKey{Name: "kontinuum"}, &issuer))
+	require.NoError(t, downstream.Get(t.Context(), client.ObjectKey{Name: testDownstreamResourceName}, &issuer))
 	assert.Equal(t, "ops@example.com", issuer.Spec.ACME.Email)
 
 	var gateway gatewayv1.Gateway
 	require.NoError(t, downstream.Get(t.Context(),
-		client.ObjectKey{Name: "kontinuum", Namespace: "kontinuum-system"}, &gateway))
+		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &gateway))
 	assert.Len(t, gateway.Spec.Listeners, 2)
 
 	var httpRoute gatewayv1.HTTPRoute
 	assert.NoError(t, downstream.Get(t.Context(),
-		client.ObjectKey{Name: "kontinuum", Namespace: "kontinuum-system"}, &httpRoute))
+		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &httpRoute))
 
 	var cert certmanagerv1.Certificate
 	require.NoError(t, downstream.Get(t.Context(),
-		client.ObjectKey{Name: "kontinuum", Namespace: "kontinuum-system"}, &cert))
+		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &cert))
 	assert.Equal(t, []string{testZone + "." + testRegion + "." + testDomain}, cert.Spec.DNSNames)
 }
 
@@ -303,7 +344,7 @@ func TestReconcileFlipsInstalledOnceCertificateReady(t *testing.T) {
 
 	var cert certmanagerv1.Certificate
 	require.NoError(t, downstream.Get(t.Context(),
-		client.ObjectKey{Name: "kontinuum", Namespace: "kontinuum-system"}, &cert))
+		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &cert))
 
 	cert.Status.Conditions = []certmanagerv1.CertificateCondition{
 		{Type: certmanagerv1.CertificateConditionReady, Status: cmmeta.ConditionTrue, Reason: "Ready"},
@@ -321,6 +362,11 @@ func TestReconcileFlipsInstalledOnceCertificateReady(t *testing.T) {
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionTrue, cond.Status)
 	assert.Equal(t, "Installed", cond.Reason)
+
+	// The aggregate Ready condition (see zone.ReadyConditionType's own doc)
+	// only ever flips true here, once Installed itself does — this is the
+	// condition `kubectl tree`/kstatus tooling actually reads.
+	assertReadyMirrors(t, got, metav1.ConditionTrue, "Installed")
 }
 
 func TestReconcileIgnoresMissingZone(t *testing.T) {
@@ -354,6 +400,6 @@ func TestReconcileUsesAnyRegisteredKontinuumForStorage(t *testing.T) {
 
 	var secret corev1.Secret
 	require.NoError(t, downstream.Get(t.Context(),
-		client.ObjectKey{Name: "kontinuum-env", Namespace: "kontinuum-system"}, &secret))
+		client.ObjectKey{Name: testDownstreamEnvName, Namespace: testDownstreamNamespace}, &secret))
 	assert.Equal(t, "postgres://worker-copy/db", secret.StringData["KONTINUUM_SERVER_STORAGE"])
 }

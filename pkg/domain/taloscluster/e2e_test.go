@@ -227,7 +227,8 @@ func reconcileAddonsOnce(
 	}
 
 	for _, a := range addons.Items {
-		_, err := addonReconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: a.Name}})
+		_, err := addonReconciler.Reconcile(ctx,
+			ctrl.Request{NamespacedName: types.NamespacedName{Name: a.Name, Namespace: a.Namespace}})
 		if err != nil {
 			logger.Warn("addon reconcile error (may be transient while bootstrapping)", "addon", a.Name, "error", err)
 		}
@@ -243,7 +244,7 @@ func logAddonStatuses(ctx context.Context, logger *slog.Logger, fakeClient clien
 	for _, addonItem := range addons.Items {
 		var got v1alpha2.Addon
 
-		err := fakeClient.Get(ctx, types.NamespacedName{Name: addonItem.Name}, &got)
+		err := fakeClient.Get(ctx, types.NamespacedName{Name: addonItem.Name, Namespace: addonItem.Namespace}, &got)
 		if err != nil {
 			logger.Warn("progress: failed to refetch addon status", "addon", addonItem.Name, "error", err)
 
@@ -287,7 +288,7 @@ func setupE2ECluster(
 	workerIP := startTalosContainer(ctx, t)
 
 	cluster := &v1alpha2.TalosCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "e2e-cluster", Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "e2e-cluster", Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec: v1alpha2.TalosClusterSpec{
 			ControlPlane: v1alpha2.TalosClusterMemberSpec{
 				PoolRef: v1alpha2.InstancePoolReference{Name: "cp-pool"},
@@ -299,10 +300,10 @@ func setupE2ECluster(
 	}
 
 	cpInstance := claimedDiscoveredInstance("cp-node", "cp-pool", controlPlaneIP)
-	cpInstance.Namespace = v1alpha2.DefaultSecretNamespace
+	cpInstance.Namespace = v1alpha2.KontinuumSystemNamespace
 
 	workerInstance := claimedDiscoveredInstance("worker-node", "worker-pool", workerIP)
-	workerInstance.Namespace = v1alpha2.DefaultSecretNamespace
+	workerInstance.Namespace = v1alpha2.KontinuumSystemNamespace
 
 	fakeClient := newFakeClient(t, cluster, cpInstance, workerInstance)
 
@@ -331,7 +332,7 @@ func setupE2ECluster(
 	}
 
 	req := ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "e2e-cluster", Namespace: v1alpha2.DefaultSecretNamespace},
+		NamespacedName: types.NamespacedName{Name: "e2e-cluster", Namespace: v1alpha2.KontinuumSystemNamespace},
 	}
 
 	return fakeClient, talosReconciler, addonReconciler, req

@@ -41,6 +41,11 @@ type AddOptions struct {
 	// pkg/domain/taloscluster/config.go's resolveVersions).
 	TalosVersion      string
 	KubernetesVersion string
+	// UnregisterInstancesOnDelete sets the created TalosCluster's own
+	// spec.teardown.unregisterInstances — see v1alpha2.TeardownSpec's own
+	// doc. Defaults to false: this zone's instances stay in inventory,
+	// reset but claimable again, when the zone is later removed.
+	UnregisterInstancesOnDelete bool
 }
 
 var (
@@ -128,7 +133,7 @@ func instanceHash(spec v1alpha2.InstanceSpec) string {
 // instanceHash), since Instance is a distinct Kind — no collision risk with
 // the other three — but is labeled v1alpha2.LabelRegion/LabelZone so the
 // InstancePool's selector matches it.
-// All four are namespaced into v1alpha2.DefaultSecretNamespace
+// All four are namespaced into v1alpha2.KontinuumSystemNamespace
 // ("kontinuum-system") — the admin-driven, system-managed namespace issue
 // #63's architecture reserves for zone-join's own objects, as opposed to a
 // tenant's own namespace.
@@ -139,7 +144,7 @@ func BuildAddObjects(
 	labels := map[string]string{v1alpha2.LabelRegion: opts.Region, v1alpha2.LabelZone: opts.Zone}
 
 	zoneObj := &v1alpha2.Zone{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec:       v1alpha2.ZoneSpec{Region: opts.Region, Zone: opts.Zone, Domain: opts.Domain},
 	}
 
@@ -147,13 +152,13 @@ func BuildAddObjects(
 
 	instance := &v1alpha2.Instance{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: name + "-" + instanceHash(instanceSpec), Namespace: v1alpha2.DefaultSecretNamespace, Labels: labels,
+			Name: name + "-" + instanceHash(instanceSpec), Namespace: v1alpha2.KontinuumSystemNamespace, Labels: labels,
 		},
 		Spec: instanceSpec,
 	}
 
 	pool := &v1alpha2.InstancePool{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec: v1alpha2.InstancePoolSpec{
 			Selector: metav1.LabelSelector{MatchLabels: labels},
 			Replicas: 1,
@@ -161,11 +166,12 @@ func BuildAddObjects(
 	}
 
 	cluster := &v1alpha2.TalosCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: v1alpha2.DefaultSecretNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec: v1alpha2.TalosClusterSpec{
 			Talos:        v1alpha2.TalosSpec{Version: opts.TalosVersion},
 			Kubernetes:   v1alpha2.KubernetesSpec{Version: opts.KubernetesVersion},
 			ControlPlane: v1alpha2.TalosClusterMemberSpec{PoolRef: v1alpha2.InstancePoolReference{Name: name}},
+			Teardown:     v1alpha2.TeardownSpec{UnregisterInstances: opts.UnregisterInstancesOnDelete},
 		},
 	}
 
@@ -175,18 +181,14 @@ func BuildAddObjects(
 // Add validates opts, infers opts.Domain when left empty, and creates all
 // four of BuildAddObjects' objects on hubClient, tolerating AlreadyExists on
 // each — safe to re-run zone-add against a zone that's already being added
-// or already exists. zoneObj is created first (and, if it already existed,
-// re-fetched) so its UID is available to set as the other three's
-// controller owner reference — matching TalosCluster-owns-Addon and
-// TalosCluster/registry's own secrets Secrets (see
-// pkg/domain/addon/resources.go and pkg/domain/taloscluster/secrets.go).
-// This metadata alone doesn't cascade-delete anything today —
-// libkapi.WithGarbageCollector, the mechanism that would act on it, is
-// deliberately not enabled (see pkg/cli/serve.go's own doc for why: it
-// took the controller manager down entirely, via the Kontinuum
-// v1alpha1/v1alpha2 conversion webhook, the one time it was tried) — but
-// it's the reference every owning object here is already written to
-// expect, ready for whenever that's revisited. Returns the created (or
+// or already exists. Ownership is a strict chain, not four siblings under
+// Zone: Zone owns TalosCluster, TalosCluster owns InstancePool, and Instance
+// is owned by nobody — see taloscluster.TalosClusterFinalizer's own doc for
+// why. zoneObj (and, in turn, cluster) is created first and re-fetched if it
+// already existed, so its UID is available to set as the next link's own
+// controller owner reference. libkapi.WithGarbageCollector is enabled (see
+// pkg/cli/serve.go's own doc), so this ownership is what actually drives
+// cascade deletion — not just inert metadata. Returns the created (or
 // already-existing) Zone.
 func Add(ctx context.Context, hubClient client.Client, opts AddOptions) (*v1alpha2.Zone, error) {
 	err := validateAddOptions(opts)
@@ -205,60 +207,80 @@ func Add(ctx context.Context, hubClient client.Client, opts AddOptions) (*v1alph
 
 	zoneObj, instance, pool, cluster := BuildAddObjects(opts)
 
-	err = ensureNamespace(ctx, hubClient, v1alpha2.DefaultSecretNamespace)
+	err = ensureNamespace(ctx, hubClient, v1alpha2.KontinuumSystemNamespace)
 	if err != nil {
 		return nil, err
 	}
 
-	err = ensureZoneObject(ctx, hubClient, zoneObj)
+	err = ensureObject(ctx, hubClient, zoneObj)
 	if err != nil {
 		return nil, err
 	}
 
-	err = createOwnedDependents(ctx, hubClient, zoneObj, instance, pool, cluster)
+	// Zone owns TalosCluster — see Add's own doc for the full chain.
+	// createOwnedDependents itself guarantees cluster's own UID ends up
+	// populated (via ensureObject below) either way, ready to use as
+	// InstancePool's own owner next.
+	err = createOwnedDependents(ctx, hubClient, zoneObj, cluster)
 	if err != nil {
 		return nil, err
+	}
+
+	// TalosCluster owns InstancePool.
+	err = createOwnedDependents(ctx, hubClient, cluster, pool)
+	if err != nil {
+		return nil, err
+	}
+
+	// Instance is owned by nobody — see TeardownSpec's own doc for why its
+	// fate on cluster teardown is an explicit opt-in, not inferred from
+	// ownership.
+	err = hubClient.Create(ctx, instance)
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return nil, fmt.Errorf("failed to create %T %q: %w", instance, instance.GetName(), err)
 	}
 
 	return zoneObj, nil
 }
 
-// ensureZoneObject creates zoneObj, or — if it already exists — re-fetches
-// it so its UID (needed by createOwnedDependents' owner references) is
-// populated; BuildAddObjects' own local zoneObj never carries one.
-func ensureZoneObject(ctx context.Context, hubClient client.Client, zoneObj *v1alpha2.Zone) error {
-	err := hubClient.Create(ctx, zoneObj)
+// ensureObject creates obj, or — if it already exists — re-fetches it so
+// its UID (needed by createOwnedDependents' own owner references, when obj
+// is about to be used as one) is populated; BuildAddObjects' own local
+// objects never carry one until actually created.
+func ensureObject(ctx context.Context, hubClient client.Client, obj client.Object) error {
+	err := hubClient.Create(ctx, obj)
 	if err == nil {
 		return nil
 	}
 
 	if !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("failed to create %T %q: %w", zoneObj, zoneObj.GetName(), err)
+		return fmt.Errorf("failed to create %T %q: %w", obj, obj.GetName(), err)
 	}
 
-	err = hubClient.Get(ctx, client.ObjectKeyFromObject(zoneObj), zoneObj)
+	err = hubClient.Get(ctx, client.ObjectKeyFromObject(obj), obj)
 	if err != nil {
-		return fmt.Errorf("failed to fetch already-existing zone %q: %w", zoneObj.GetName(), err)
+		return fmt.Errorf("failed to fetch already-existing %T %q: %w", obj, obj.GetName(), err)
 	}
 
 	return nil
 }
 
-// createOwnedDependents sets zoneObj as each of dependents' controller
-// owner reference and creates it, tolerating AlreadyExists — see Add's own
-// doc for why every dependent is owned by the Zone.
+// createOwnedDependents sets owner as each of dependents' controller owner
+// reference and ensures it exists (see ensureObject — creating it, or
+// re-fetching it so its own UID is populated if it already did) — see
+// Add's own doc for the ownership chain this builds one link of at a time.
 func createOwnedDependents(
-	ctx context.Context, hubClient client.Client, zoneObj *v1alpha2.Zone, dependents ...client.Object,
+	ctx context.Context, hubClient client.Client, owner client.Object, dependents ...client.Object,
 ) error {
 	for _, dependent := range dependents {
-		err := controllerutil.SetControllerReference(zoneObj, dependent, hubClient.Scheme())
+		err := controllerutil.SetControllerReference(owner, dependent, hubClient.Scheme())
 		if err != nil {
 			return fmt.Errorf("failed to set owner reference on %T %q: %w", dependent, dependent.GetName(), err)
 		}
 
-		err = hubClient.Create(ctx, dependent)
-		if err != nil && !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("failed to create %T %q: %w", dependent, dependent.GetName(), err)
+		err = ensureObject(ctx, hubClient, dependent)
+		if err != nil {
+			return err
 		}
 	}
 

@@ -82,11 +82,13 @@ func TestCustomResourceDefinition(t *testing.T) {
 	assert.Contains(t, statusSchema.Properties, "version")
 	assert.Contains(t, statusSchema.Properties, "secretRef")
 
+	const columnTypeString = "string"
+
 	wantColumns := []apiextensionsv1.CustomResourceColumnDefinition{
-		{Name: "Role", Type: "string", JSONPath: ".status.role"},
-		{Name: "Region", Type: "string", JSONPath: ".spec.region"},
-		{Name: "Zone", Type: "string", JSONPath: ".spec.zone"},
-		{Name: "Version", Type: "string", JSONPath: ".status.version"},
+		{Name: "Role", Type: columnTypeString, JSONPath: ".status.role"},
+		{Name: "Region", Type: columnTypeString, JSONPath: ".spec.region"},
+		{Name: "Zone", Type: columnTypeString, JSONPath: ".spec.zone"},
+		{Name: "Version", Type: columnTypeString, JSONPath: ".status.version"},
 	}
 	assert.Equal(t, wantColumns, version.AdditionalPrinterColumns)
 }

@@ -12,6 +12,7 @@ linters:
     - exhaustruct
     # Deprecated linters
     - wsl
+    - gomodguard
   settings:
     gomoddirectives:
       # These replaces mirror kommodity's go.mod; they are required, not

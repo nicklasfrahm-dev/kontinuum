@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -50,6 +51,18 @@ type fakeBootstrapper struct {
 	versionCalls   []string
 	version        string
 	versionErr     error
+	resetCalls     []string
+	// resetGracefulCalls mirrors resetCalls, capturing the graceful bool
+	// each address's Reset call carried — see
+	// TestResetControlPlane*GracefulFlag's own use.
+	resetGracefulCalls []bool
+	resetErr           error
+	// resetErrForNode, when set, fails only that one node's own Reset call
+	// with assert.AnError, leaving every other node's call unaffected —
+	// see teardown_test.go's own
+	// TestReconcileTeardownRetriesFailedMemberWhileReleasingOthers, which
+	// needs one member's reset to fail without blocking the rest.
+	resetErrForNode string
 }
 
 func (f *fakeBootstrapper) ApplyConfiguration(_ context.Context, addr string, data []byte) error {
@@ -89,6 +102,17 @@ func (f *fakeBootstrapper) Version(_ context.Context, _, node string, _ *clientc
 	return f.version, nil
 }
 
+func (f *fakeBootstrapper) Reset(_ context.Context, _, node string, _ *clientconfig.Config, graceful bool) error {
+	f.resetCalls = append(f.resetCalls, node)
+	f.resetGracefulCalls = append(f.resetGracefulCalls, graceful)
+
+	if f.resetErrForNode != "" && node == f.resetErrForNode {
+		return assert.AnError
+	}
+
+	return f.resetErr
+}
+
 func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
 	t.Helper()
 
@@ -126,6 +150,12 @@ const (
 	readyConditionReasonHealthy = "Healthy"
 	ciliumAddonResourceName     = testClusterName + "-cilium"
 	cpNodeName                  = "cp-node-1"
+	// workerNodeName and workerInstanceAddress are the shared worker
+	// fixture name/address reused across every worker-pool test in this
+	// package, mirroring cpNodeName/controlPlaneInstanceAddress's own role
+	// for the control-plane fixtures.
+	workerNodeName        = "worker-node-1"
+	workerInstanceAddress = "10.0.0.2"
 )
 
 func testCluster() *v1alpha2.TalosCluster {
@@ -165,7 +195,11 @@ func newReconciler(fakeClient client.Client, bootstrapper *fakeBootstrapper) *ta
 		HealthCheckTimeout:  testHealthCheckTimeout,
 		RetryInterval:       testRetryInterval,
 		HealthCheckInterval: testHealthCheckInterval,
-		Logger:              slog.Default(),
+		// Generous — no test below means to hit it except teardown_test.go's
+		// own give-up test, which builds its own Reconciler with this set to
+		// zero instead.
+		TeardownTimeout: testHealthCheckInterval,
+		Logger:          slog.Default(),
 	}
 }
 
@@ -491,7 +525,7 @@ func TestReconcileFullSequence(t *testing.T) {
 
 	cluster := testCluster()
 	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", controlPlaneInstanceAddress)
-	workerInstance := claimedDiscoveredInstance("worker-node-1", "worker-pool", "10.0.0.2")
+	workerInstance := claimedDiscoveredInstance(workerNodeName, "worker-pool", workerInstanceAddress)
 
 	fakeClient := newFakeClient(t, cluster, cpInstance, workerInstance)
 
@@ -530,7 +564,7 @@ func TestReconcileFullSequence(t *testing.T) {
 	result, err = reconciler.Reconcile(context.Background(), req)
 	require.NoError(t, err)
 	assert.Equal(t, testRetryInterval, result.RequeueAfter)
-	assert.Equal(t, []string{controlPlaneInstanceAddress, "10.0.0.2"}, bootstrapper.applyConfigCalls,
+	assert.Equal(t, []string{controlPlaneInstanceAddress, workerInstanceAddress}, bootstrapper.applyConfigCalls,
 		"the worker is only touched on the reconcile after ControlPlaneReady")
 }
 
@@ -547,7 +581,7 @@ func TestReconcileRecordsTalosVersionOnceMembersAreConfigured(t *testing.T) {
 
 	cluster := testCluster()
 	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", controlPlaneInstanceAddress)
-	workerInstance := claimedDiscoveredInstance("worker-node-1", "worker-pool", "10.0.0.2")
+	workerInstance := claimedDiscoveredInstance(workerNodeName, "worker-pool", workerInstanceAddress)
 
 	fakeClient := newFakeClient(t, cluster, cpInstance, workerInstance)
 
@@ -568,13 +602,13 @@ func TestReconcileRecordsTalosVersionOnceMembersAreConfigured(t *testing.T) {
 
 	_, err = reconciler.Reconcile(context.Background(), req)
 	require.NoError(t, err)
-	assert.Equal(t, []string{controlPlaneInstanceAddress, "10.0.0.2"}, bootstrapper.versionCalls,
+	assert.Equal(t, []string{controlPlaneInstanceAddress, workerInstanceAddress}, bootstrapper.versionCalls,
 		"the control-plane member's already-known version is never re-fetched; "+
 			"the worker is checked once its config is applied")
 
 	var afterSecond v1alpha2.Instance
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "worker-node-1"}, &afterSecond))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: workerNodeName}, &afterSecond))
 	assert.Equal(t, "v1.9.0", afterSecond.Status.Talos.Version)
 }
 
@@ -622,7 +656,7 @@ func TestReconcileGeneratesInstallableConfigs(t *testing.T) {
 
 	cluster := testCluster()
 	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", controlPlaneInstanceAddress)
-	workerInstance := claimedDiscoveredInstance("worker-node-1", "worker-pool", "10.0.0.2")
+	workerInstance := claimedDiscoveredInstance(workerNodeName, "worker-pool", workerInstanceAddress)
 
 	fakeClient := newFakeClient(t, cluster, cpInstance, workerInstance)
 
@@ -660,7 +694,7 @@ func TestReconcileSetsHostnameToInstanceName(t *testing.T) {
 
 	cluster := testCluster()
 	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", controlPlaneInstanceAddress)
-	workerInstance := claimedDiscoveredInstance("worker-node-1", "worker-pool", "10.0.0.2")
+	workerInstance := claimedDiscoveredInstance(workerNodeName, "worker-pool", workerInstanceAddress)
 
 	fakeClient := newFakeClient(t, cluster, cpInstance, workerInstance)
 
@@ -678,7 +712,7 @@ func TestReconcileSetsHostnameToInstanceName(t *testing.T) {
 
 	wantHostname := map[string]string{
 		controlPlaneInstanceAddress: cpInstance.Name,
-		"10.0.0.2":                  workerInstance.Name,
+		workerInstanceAddress:       workerInstance.Name,
 	}
 
 	for index, data := range bootstrapper.appliedConfigs {
@@ -704,7 +738,7 @@ func TestReconcileSetsMemberConditionsThroughBootstrapPipeline(t *testing.T) {
 
 	cluster := testCluster()
 	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", controlPlaneInstanceAddress)
-	workerInstance := claimedDiscoveredInstance("worker-node-1", "worker-pool", "10.0.0.2")
+	workerInstance := claimedDiscoveredInstance(workerNodeName, "worker-pool", workerInstanceAddress)
 
 	fakeClient := newFakeClient(t, cluster, cpInstance, workerInstance)
 
@@ -731,7 +765,7 @@ func TestReconcileSetsMemberConditionsThroughBootstrapPipeline(t *testing.T) {
 
 	var afterSecond v1alpha2.Instance
 
-	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "worker-node-1"}, &afterSecond))
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: workerNodeName}, &afterSecond))
 	assert.True(t, meta.IsStatusConditionTrue(afterSecond.Status.Conditions, taloscluster.MemberConfiguredConditionType),
 		"worker member's config was applied once ControlPlaneReady")
 	assert.True(t, meta.IsStatusConditionTrue(afterSecond.Status.Conditions, taloscluster.MemberJoinedConditionType),
@@ -842,4 +876,66 @@ func TestReconcileIgnoresMissingCluster(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Zero(t, result)
+}
+
+func TestReconcileAddsFinalizerOnNormalReconcile(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	fakeClient := newFakeClient(t, cluster)
+	reconciler := newReconciler(fakeClient, &fakeBootstrapper{})
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: testClusterName},
+	})
+	require.NoError(t, err)
+
+	var got v1alpha2.TalosCluster
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: testClusterName}, &got))
+	assert.Contains(t, got.Finalizers, taloscluster.TalosClusterFinalizer)
+}
+
+// TestReconcileTeardownStopsTouchingMembersAndRemovesFinalizer covers the
+// fix for a real bug: without this, Reconcile kept trying to re-apply
+// configuration/bootstrap a control-plane member for as long as the
+// TalosCluster object existed, racing zone.reconcileTeardown's own Talos
+// Reset against the same member — observed for real: a node reset via
+// hack/reset-hetzner-node.sh came back up in maintenance mode and got
+// reconfigured back into the cluster before the object was ever deleted.
+// Once DeletionTimestamp is set, Reconcile must remove the finalizer
+// without ever calling ApplyConfiguration/Bootstrap.
+func TestReconcileTeardownStopsTouchingMembersAndRemovesFinalizer(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	cluster.Finalizers = []string{taloscluster.TalosClusterFinalizer}
+	cpInstance := claimedDiscoveredInstance(cpNodeName, "cp-pool", controlPlaneInstanceAddress)
+
+	fakeClient := newFakeClient(t, cluster, cpInstance)
+	bootstrapper := &fakeBootstrapper{}
+	reconciler := newReconciler(fakeClient, bootstrapper)
+
+	// Delete — the fake client rejects Create with a DeletionTimestamp
+	// directly, so Create-then-Delete is how this reaches "finalizer
+	// present, DeletionTimestamp set", the same state a real apiserver
+	// leaves a TalosCluster in once zone.reconcileTeardown deletes it.
+	var toDelete v1alpha2.TalosCluster
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: testClusterName}, &toDelete))
+	require.NoError(t, fakeClient.Delete(context.Background(), &toDelete))
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: testClusterName},
+	})
+	require.NoError(t, err)
+	assert.Zero(t, result)
+
+	assert.Empty(t, bootstrapper.applyConfigCalls, "must not touch members once deletion is requested")
+	assert.Empty(t, bootstrapper.bootstrapCalls, "must not touch members once deletion is requested")
+
+	var gone v1alpha2.TalosCluster
+
+	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: testClusterName}, &gone)
+	assert.True(t, apierrors.IsNotFound(err), "talos cluster must be fully deleted once the finalizer is removed")
 }

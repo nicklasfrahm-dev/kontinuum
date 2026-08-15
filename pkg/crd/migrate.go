@@ -29,8 +29,10 @@ const migrateDeleteTimeout = 30 * time.Second
 // in place: an already-applied CRD that's still Cluster-scoped, while def's
 // generated manifest (see Build) now says Namespaced — exactly the change
 // issue #63's architecture makes to Zone/Instance/InstancePool/TalosCluster/
-// Kontinuum. Ensure's own create-or-update (see ensureEstablished/Apply)
-// would otherwise just fail trying to Update an immutable field.
+// Kontinuum, and later to Addon once it moved to a TalosCluster-owned,
+// namespaced resource too. Ensure's own create-or-update (see
+// ensureEstablished/Apply) would otherwise just fail trying to Update an
+// immutable field.
 //
 // When that exact transition is detected, MigrateScope lists every existing
 // object of def's kind (via def.GVKs[0], the storage version), deletes the
@@ -42,9 +44,9 @@ const migrateDeleteTimeout = 30 * time.Second
 //
 // Returns (nil, nil), doing nothing, in every other case: a fresh install
 // with no existing CRD, a CRD that's already Namespaced (already migrated,
-// or a kind that was never Cluster-scoped to begin with, like Addon), or one
-// whose manifest still says Cluster (nothing this repo does today, but not
-// this function's job to migrate).
+// or — for any future kind — one that was never Cluster-scoped to begin
+// with), or one whose manifest still says Cluster (nothing this repo does
+// today, but not this function's job to migrate).
 func MigrateScope(
 	ctx context.Context, loopbackConfig *restclient.Config, manifestFS fs.FS, def Definition, logger *slog.Logger,
 ) ([]unstructured.Unstructured, error) {
