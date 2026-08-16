@@ -32,7 +32,20 @@ const (
 	testDomain        = "kontinuum.example.com"
 	testTalosAddress  = "10.0.0.5"
 	testRetryInterval = 15 * time.Second
-	testImage         = "ghcr.io/nicklasfrahm/kontinuum:test"
+	testImageRepo     = "ghcr.io/nicklasfrahm/kontinuum"
+	// testHubVersion is newReconciler's own default Version — deliberately
+	// distinct from testKontinuumVersion below, so a test asserting the
+	// deployed image tag can't accidentally pass by resolveImage reading
+	// r.Version directly instead of actually looking the version up off a
+	// registered Kontinuum (see resolveImage's own doc for why it must).
+	testHubVersion = "v0.0.0-hub"
+	// testKontinuumVersion is registeredKontinuum's own fixture status.version
+	// — what resolveImage is expected to find and deploy.
+	testKontinuumVersion = "v1.2.3"
+	// testImage is what resolveImage resolves to across most of this file's
+	// tests: testHubVersion is never "dev", so resolveImage reads the tag
+	// off a registered Kontinuum instead — see registeredKontinuum.
+	testImage = testImageRepo + ":" + testKontinuumVersion
 
 	// testDownstreamNamespace/testDownstreamResourceName mirror
 	// pkg/domain/zone's own unexported downstreamNamespace/deploymentName
@@ -137,6 +150,7 @@ func registeredKontinuum(name, storage string) (*v1alpha2.Kontinuum, *corev1.Sec
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace},
 		Status: v1alpha2.KontinuumStatus{
 			SecretRef: v1alpha2.KontinuumSecretReference{Name: secretName, Namespace: testDownstreamNamespace},
+			Version:   testKontinuumVersion,
 		},
 	}
 
@@ -173,7 +187,8 @@ func newReconciler(hubClient client.Client, downstreamBuilder zone.DownstreamCli
 		ACMEEmail:               "ops@example.com",
 		ACMEServer:              "https://acme-v02.api.letsencrypt.org/directory",
 		Auth:                    zone.AuthConfig{InsecureAllowAnonymous: "true"},
-		Image:                   testImage,
+		ImageRepo:               testImageRepo,
+		Version:                 testHubVersion,
 		RetryInterval:           testRetryInterval,
 		Logger:                  slog.Default(),
 	}
@@ -288,6 +303,63 @@ func TestReconcileInstallsDownstreamObjectsAndWaitsForCertificate(t *testing.T) 
 	assertReadyMirrors(t, got, metav1.ConditionFalse, "WaitingForCertificate")
 
 	assertDownstreamFootprintInstalled(t, downstream)
+}
+
+// TestReconcileDevVersionDeploysLatestTag covers resolveImage's own
+// devVersion branch: a hub process built without a real -ldflags -X
+// version override (the default local `make dev`/`make build` case — see
+// pkg/cli/version.go) has no correspondingly real, published image of its
+// own to deploy, so this asserts ImageRepo:latest is deployed instead of a
+// nonexistent "...:dev" tag — see issue #95's own manual verification,
+// which hit exactly that against a real downstream cluster.
+func TestReconcileDevVersionDeploysLatestTag(t *testing.T) {
+	t.Parallel()
+
+	kontinuum, kontinuumSecret := registeredKontinuum("hub", testStorage)
+	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
+		kontinuum, kontinuumSecret)
+	downstream := newDownstreamFakeClient(t)
+
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: downstream})
+	reconciler.Version = "dev"
+
+	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	var deployment appsv1.Deployment
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &deployment))
+	assert.Equal(t, testImageRepo+":latest", deployment.Spec.Template.Spec.Containers[0].Image)
+}
+
+// TestReconcileReportsNoVersionFoundWhenRegisteredKontinuumHasNoVersion
+// covers resolveImage's own error path: a registered Kontinuum exists (so
+// storage inference already succeeds) but hasn't reported a version yet —
+// an unlikely but real momentary window (Heartbeat sets status.version on
+// its very first beat, immediately after Create — see
+// pkg/domain/registry/heartbeat.go), treated as retryable, mirroring
+// TestReconcileReportsNoStorageSecretFound.
+func TestReconcileReportsNoVersionFoundWhenRegisteredKontinuumHasNoVersion(t *testing.T) {
+	t.Parallel()
+
+	kontinuum, kontinuumSecret := registeredKontinuum("hub", testStorage)
+	kontinuum.Status.Version = ""
+
+	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
+		kontinuum, kontinuumSecret)
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: newDownstreamFakeClient(t)})
+
+	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+	assert.Equal(t, testRetryInterval, result.RequeueAfter)
+
+	var got v1alpha2.Zone
+	require.NoError(t, hubClient.Get(t.Context(), testZoneKey(), &got))
+
+	cond := meta.FindStatusCondition(got.Status.Conditions, zone.InstalledConditionType)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, "NoVersionFound", cond.Reason)
 }
 
 // assertDownstreamFootprintInstalled asserts every object a single

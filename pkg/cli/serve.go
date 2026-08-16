@@ -417,10 +417,10 @@ func addonOptions(logger *slog.Logger) []libkapi.Option {
 	return []libkapi.Option{libkapi.WithController(controller)}
 }
 
-// zoneImage is the kontinuum container image zoneOptions deploys onto
-// every joined zone's downstream cluster — matches the image ci.yml pushes
-// (see .github/workflows/ci.yml), tagged with this repo's own build
-// version so a zone runs the exact same version its own hub does.
+// zoneImageRepo is the kontinuum container image repository zoneOptions
+// deploys onto every joined zone's downstream cluster — matches the image
+// ci.yml pushes (see .github/workflows/ci.yml). Which tag actually gets
+// deployed isn't decided here: see zone.Reconciler.resolveImage's own doc.
 const zoneImageRepo = "ghcr.io/nicklasfrahm/kontinuum"
 
 // zoneOptions builds the libkapi options that wire the Zone downstream-
@@ -438,7 +438,8 @@ func zoneOptions(cfg *config.Config, logger *slog.Logger) []libkapi.Option {
 			OIDCClientID:           cfg.OIDC.ClientID,
 			OIDCAdminGroups:        cfg.OIDC.AdminGroups,
 		},
-		Image: zoneImageRepo + ":" + version,
+		ImageRepo: zoneImageRepo,
+		Version:   version,
 	})
 
 	return []libkapi.Option{libkapi.WithController(controller)}

@@ -155,3 +155,27 @@ func findKontinuumDomain(ctx context.Context, hubClient client.Client) (string, 
 
 	return domain, nil
 }
+
+// errNoKontinuumVersion is findKontinuumVersion's own sentinel — a static
+// error for the same err113 reason as errNoRegisteredKontinuum/
+// errNoKontinuumDNSDomain above.
+var errNoKontinuumVersion = errors.New("no registered kontinuum reports a version yet")
+
+// findKontinuumVersion returns the build version any registered Kontinuum
+// reports on its own status.version, written on every heartbeat (see
+// pkg/domain/registry/heartbeat.go's beat/reregister) — used by
+// resolveImage to pick which tag of ImageRepo to deploy onto a newly
+// joined zone. Every registered Kontinuum is assumed to run the same
+// version, same rationale as anyRegisteredKontinuum's own doc.
+func findKontinuumVersion(ctx context.Context, hubClient client.Client) (string, error) {
+	kontinuum, err := anyRegisteredKontinuum(ctx, hubClient)
+	if err != nil {
+		return "", err
+	}
+
+	if kontinuum.Status.Version == "" {
+		return "", fmt.Errorf("%w: %q has none reported", errNoKontinuumVersion, kontinuum.Name)
+	}
+
+	return kontinuum.Status.Version, nil
+}

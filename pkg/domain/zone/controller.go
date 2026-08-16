@@ -72,11 +72,22 @@ const (
 	reasonClusterReady           = "ClusterReady"
 	reasonDownstreamNotReady     = "DownstreamNotReady"
 	reasonNoStorageSecret        = "NoStorageSecretFound"
+	reasonNoVersionFound         = "NoVersionFound"
 	reasonInstallFailed          = "InstallFailed"
 	reasonWaitingForCertificate  = "WaitingForCertificate"
 	reasonInstalled              = "Installed"
 	reasonWaitingForRegistry     = "WaitingForRegistry"
 	reasonRegistryJoined         = "RegistryJoined"
+
+	// devVersion mirrors pkg/cli/version.go's own unexported default
+	// ("var version = \"dev\"", left unset unless built with a real
+	// -ldflags -X override) — the signal that this hub process is a local,
+	// unreleased build with no correspondingly real, published container
+	// image of its own. See resolveImage's own doc for what that changes.
+	devVersion = "dev"
+	// latestImageTag is what resolveImage deploys instead of devVersion —
+	// see that function's own doc.
+	latestImageTag = "latest"
 
 	// reasonDownstreamTeardownFailed and reasonTalosClusterDeleteFailed are
 	// teardown.go's own retryable-failure reasons — see reconcileTeardown.
@@ -120,11 +131,18 @@ type Config struct {
 	// zone's own kontinuum-server — see AuthConfig's own doc for why this
 	// is required, not optional.
 	Auth AuthConfig
-	// Image is the kontinuum container image this package deploys onto
-	// every joined zone's downstream cluster (e.g.
-	// "ghcr.io/nicklasfrahm/kontinuum:v1.2.3") — see pkg/cli/serve.go's
-	// zoneOptions, which computes this from this repo's own build version.
-	Image string
+	// ImageRepo is the kontinuum container image repository this package
+	// deploys onto every joined zone's downstream cluster (e.g.
+	// "ghcr.io/nicklasfrahm/kontinuum") — see pkg/cli/serve.go's
+	// zoneOptions. The tag to deploy is resolved separately, at reconcile
+	// time — see resolveImage's own doc for why that can't just be Version
+	// below, baked in once at startup.
+	ImageRepo string
+	// Version is this hub process's own build version (e.g. "v1.2.3", or
+	// "dev" for a local, unreleased build — see pkg/cli/version.go). Used
+	// only to detect that dev case; resolveImage otherwise ignores it in
+	// favor of a live lookup — see that function's own doc.
+	Version string
 	// RetryInterval is how long Reconcile waits before retrying a step that
 	// hasn't converged yet. Defaults to fifteen seconds when zero.
 	RetryInterval time.Duration
@@ -198,7 +216,8 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		ACMEEmail:               c.Config.ACMEEmail,
 		ACMEServer:              c.Config.ACMEServer,
 		Auth:                    c.Config.Auth,
-		Image:                   c.Config.Image,
+		ImageRepo:               c.Config.ImageRepo,
+		Version:                 c.Config.Version,
 		RetryInterval:           c.Config.RetryInterval,
 		TeardownTimeout:         c.Config.TeardownTimeout,
 		Logger:                  c.Config.Logger,
@@ -235,7 +254,8 @@ type Reconciler struct {
 	ACMEEmail               string
 	ACMEServer              string
 	Auth                    AuthConfig
-	Image                   string
+	ImageRepo               string
+	Version                 string
 	RetryInterval           time.Duration
 	TeardownTimeout         time.Duration
 	Logger                  *slog.Logger
@@ -323,9 +343,16 @@ func (r *Reconciler) reconcileInstall(
 		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonNoStorageSecret, err.Error())
 	}
 
+	image, err := r.resolveImage(ctx)
+	if err != nil {
+		r.Logger.Warn("no kontinuum version to deploy yet", "zone", zoneObj.Name, "error", err)
+
+		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonNoVersionFound, err.Error())
+	}
+
 	hostname := fmt.Sprintf("%s.%s.%s", zoneObj.Spec.Zone, zoneObj.Spec.Region, zoneObj.Spec.Domain)
 
-	err = r.installWorkload(ctx, downstream, zoneObj, storage, hostname)
+	err = r.installWorkload(ctx, downstream, zoneObj, storage, image, hostname)
 	if err != nil {
 		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonInstallFailed, err.Error())
 	}
@@ -370,13 +397,46 @@ func (r *Reconciler) reconcileRegistryJoin(ctx context.Context, zoneObj *v1alpha
 		"kontinuum-server for this zone is registered and heartbeating")
 }
 
+// resolveImage returns the full container image (r.ImageRepo:tag) to
+// deploy onto a newly joined zone's downstream cluster.
+//
+// When r.Version is devVersion, this hub process is a local, unreleased
+// build with no correspondingly real, published image of its own —
+// r.ImageRepo:latest is deployed instead of a nonexistent "...:dev" tag,
+// which used to leave a freshly joined zone stuck in ImagePullBackOff
+// whenever a zone was joined from a local `make dev` hub (see issue #95's
+// own manual verification, which hit exactly this once the registry-join
+// gate above actually surfaced it as a visible failure instead of a silent
+// one).
+//
+// Otherwise, the version to deploy is read live off any already-registered
+// Kontinuum's own status.version (see findKontinuumVersion) rather than
+// r.Version itself — mirroring findKontinuumStorage/findKontinuumDomain's
+// identical "a property of the deployment, not of whichever specific
+// process happens to run this reconcile" reasoning: the fleet's actually
+// running version self-heals across a rolling upgrade this way, where
+// trusting r.Version could deploy a stale or ahead-of-the-fleet tag
+// depending on which hub replica's reconcile happened to win.
+func (r *Reconciler) resolveImage(ctx context.Context) (string, error) {
+	if r.Version == devVersion {
+		return r.ImageRepo + ":" + latestImageTag, nil
+	}
+
+	tag, err := findKontinuumVersion(ctx, r.Client)
+	if err != nil {
+		return "", err
+	}
+
+	return r.ImageRepo + ":" + tag, nil
+}
+
 // installWorkload ensures the namespace, kontinuum-env Secret/ConfigMap,
 // Deployment, and Service — see workload.go. hostname is the zone's own
 // <zone>.<region>.<domain> — only used to compute r.Auth's own
 // zone-specific OIDC redirect URL (see AuthConfig's own doc), not part of
 // storage/region/zone.
 func (r *Reconciler) installWorkload(
-	ctx context.Context, downstream client.Client, zoneObj *v1alpha2.Zone, storage, hostname string,
+	ctx context.Context, downstream client.Client, zoneObj *v1alpha2.Zone, storage, image, hostname string,
 ) error {
 	err := ensureNamespace(ctx, downstream, downstreamNamespace)
 	if err != nil {
@@ -394,7 +454,7 @@ func (r *Reconciler) installWorkload(
 		return err
 	}
 
-	err = ensureDeployment(ctx, downstream, downstreamNamespace, r.Image)
+	err = ensureDeployment(ctx, downstream, downstreamNamespace, image)
 	if err != nil {
 		return err
 	}
