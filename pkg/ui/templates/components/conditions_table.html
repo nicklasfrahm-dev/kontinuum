@@ -2,14 +2,16 @@
     conditions-table renders a status.conditions list as a table, shared by
     the TalosCluster and Instance detail pages so both show conditions with
     identical styling (see issue #93). Type and Status are collapsed into one
-    "Condition" column instead of two — Type shown plain next to a colored
-    Status badge: green when OK, grey otherwise — the same true/false badge
-    coloring the instances list's own Condition column already uses (see
-    instances_content.html's Discovered/Deleting badges), not the blue the
-    standalone Type/Status columns used before. Expects a dict (see
-    templateDict) with: Conditions - a slice of {Type, Status, OK, Reason,
-    Message, Age} (see conditionRow / instanceConditionRow — both already
-    share this exact shape).
+    "Condition" column instead of two — a single pill showing Type (e.g.
+    "Discovered"), colored green when OK and grey otherwise, the same
+    single-pill shape and true/false coloring the instances list's own
+    Condition column already uses (see instances_content.html's
+    Discovered/Deleting badges) — Status itself isn't shown as separate
+    text, since the pill's own color already carries that. Expects a dict
+    (see templateDict) with: Conditions - a slice of {Type, Status, OK,
+    Reason, Message, Age} (see conditionRow / instanceConditionRow — both
+    already share this exact shape; Status is unused here but kept for
+    parity with the two structs).
 */}}
 {{define "conditions-table"}}
 {{if .Conditions}}
@@ -26,14 +28,11 @@
         {{range .Conditions}}
         <tr class="border-b border-neutral-800 last:border-b-0">
             <td class="px-6 py-2">
-                <div class="flex items-center gap-2">
-                    <span class="text-sm font-medium text-white">{{.Type}}</span>
-                    {{if .OK}}
-                    <span class="inline-flex items-center gap-1.5 bg-green-900/40 border border-green-700 rounded-full px-2.5 py-1 text-xs font-medium text-green-300">{{.Status}}</span>
-                    {{else}}
-                    <span class="inline-flex items-center gap-1.5 bg-neutral-800 border border-neutral-700 rounded-full px-2.5 py-1 text-xs font-medium text-neutral-400">{{.Status}}</span>
-                    {{end}}
-                </div>
+                {{if .OK}}
+                <span class="inline-flex items-center gap-1.5 bg-green-900/40 border border-green-700 rounded-full px-2.5 py-1 text-xs font-medium text-green-300">{{.Type}}</span>
+                {{else}}
+                <span class="inline-flex items-center gap-1.5 bg-neutral-800 border border-neutral-700 rounded-full px-2.5 py-1 text-xs font-medium text-neutral-400">{{.Type}}</span>
+                {{end}}
             </td>
             <td class="px-6 py-2 text-sm text-neutral-400">{{if .Reason}}{{.Reason}}{{else}}-{{end}}</td>
             <td class="px-6 py-2 text-sm text-neutral-400">{{if .Message}}{{.Message}}{{else}}-{{end}}</td>

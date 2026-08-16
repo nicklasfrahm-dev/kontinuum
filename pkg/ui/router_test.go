@@ -898,7 +898,7 @@ func TestHandleConnectShowsOIDCKubeconfigWhenAuthEnabled(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
 
-	assert.Contains(t, string(body), "kubectl access")
+	assert.Contains(t, string(body), ">kubectl<")
 	assert.Contains(t, string(body), "KUBECONFIG")
 	assert.Contains(t, string(body), "kontinuum config import")
 	assert.Contains(t, string(body), `href="/app/registry/kubeconfig"`)
@@ -948,7 +948,7 @@ func TestHandleConnectShowsNoAuthKubeconfigWhenOIDCDisabled(t *testing.T) {
 
 	// Kontinuum's default is no authentication at all, not no access — the
 	// kubectl access section (and a working kubeconfig) must still show.
-	assert.Contains(t, string(body), "kubectl access")
+	assert.Contains(t, string(body), ">kubectl<")
 	assert.Contains(t, string(body), "No authentication is required")
 	assert.Contains(t, string(body), "kontinuum config import")
 	assert.Contains(t, string(body), `href="/app/registry/kubeconfig"`)
@@ -1397,10 +1397,10 @@ func TestHandleRegistryRendersZones(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(body), "eu-eu-1a")
 	assert.Contains(t, string(body), ">eu<")
-	assert.Contains(t, string(body), "Installed=False")
+	assert.Contains(t, string(body), ">Installed<")
 	assert.Contains(t, string(body), "Waiting for cert-manager to issue",
 		"the condition message's first letter is capitalized")
-	assert.Contains(t, string(body), "bg-blue-900/40", "a False condition renders a blue badge")
+	assert.Contains(t, string(body), "bg-neutral-800", "a False condition renders a grey badge")
 	assert.Contains(t, string(body), "bg-green-900/40", "a True condition renders a green badge")
 }
 
@@ -2523,15 +2523,22 @@ func deletingInstanceMux(t *testing.T) *http.ServeMux {
 }
 
 // assertRendersDeletingNotDiscovered asserts body renders the amber
-// "Deleting" badge instead of the green "Discovered" one — shared by the
-// Instance list/detail "Deleting" tests below.
-func assertRendersDeletingNotDiscovered(t *testing.T, body string) {
+// "Deleting" badge instead of a green "Discovered" one in that same
+// title/list-row spot — shared by the Instance list/detail "Deleting"
+// tests below. wantConditionPill is how many *other* green "Discovered"
+// pills body is still allowed to carry: the detail page's own conditions
+// table (see "conditions-table") always shows the raw, unfiltered
+// status.conditions list — same as the TalosCluster detail page's own
+// conditions table — so it keeps rendering this stale Discovered=True
+// condition as a green pill even once deletion has started; the list page
+// has no such table, so it allows none.
+func assertRendersDeletingNotDiscovered(t *testing.T, body string, wantConditionPill int) {
 	t.Helper()
 
 	assert.Contains(t, body, "bg-amber-900/40", "Deleting must render as the amber badge")
 	assert.Contains(t, body, ">Deleting<")
-	assert.NotContains(t, body, "text-green-300\">Discovered<",
-		"the green Discovered badge must not render once deletion has started")
+	assert.Equal(t, wantConditionPill, strings.Count(body, "text-green-300\">Discovered<"),
+		"the title/list-row spot must show Deleting, not a green Discovered pill")
 }
 
 // TestHandleMachinesRendersDeletingForInstanceWithDeletionTimestamp covers
@@ -2554,7 +2561,7 @@ func TestHandleMachinesRendersDeletingForInstanceWithDeletionTimestamp(t *testin
 	require.NoError(t, resp.Body.Close())
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assertRendersDeletingNotDiscovered(t, string(body))
+	assertRendersDeletingNotDiscovered(t, string(body), 0)
 }
 
 func TestHandleMachinesShowsEmptyState(t *testing.T) {
@@ -2658,7 +2665,10 @@ func TestHandleMachineDetailRendersInstance(t *testing.T) {
 
 // TestHandleMachineDetailRendersDeletingForInstanceWithDeletionTimestamp
 // covers the same "Deleting" override as the list-page test above, on the
-// detail page's own title-bar badge.
+// detail page's own title-bar badge — its conditions table still shows the
+// stale Discovered=True condition as its own green pill (see
+// assertRendersDeletingNotDiscovered's own doc), which is why this expects
+// exactly one, not zero, occurrences.
 func TestHandleMachineDetailRendersDeletingForInstanceWithDeletionTimestamp(t *testing.T) {
 	t.Parallel()
 
@@ -2674,7 +2684,7 @@ func TestHandleMachineDetailRendersDeletingForInstanceWithDeletionTimestamp(t *t
 	require.NoError(t, resp.Body.Close())
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assertRendersDeletingNotDiscovered(t, string(body))
+	assertRendersDeletingNotDiscovered(t, string(body), 1)
 }
 
 func TestHandleMachineDetailRedirectsToListForUnknownInstance(t *testing.T) {
@@ -2939,7 +2949,7 @@ func TestHandleTalosClustersRendersList(t *testing.T) {
 	assert.Contains(t, string(body), "eu-eu-1a")
 	assert.Contains(t, string(body), "v1.13.0")
 	assert.Contains(t, string(body), "v1.32.0")
-	assert.Contains(t, string(body), "Ready=True")
+	assert.Contains(t, string(body), "text-green-300\">Ready<")
 	assert.Contains(t, string(body), `href="/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"`)
 	assert.Contains(t, string(body), `href="/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters"`,
 		"the nav's own Clusters link")
@@ -2947,10 +2957,10 @@ func TestHandleTalosClustersRendersList(t *testing.T) {
 
 // deletingTalosClusterMux builds a router+mux serving a single TalosCluster
 // named testTalosClusterName with its own DeletionTimestamp set (as if
-// TalosClusterFinalizer were still tearing it down) but its stale
-// Ready=True condition from before deletion started left untouched —
-// shared by the list/detail "Deleting" tests below, the same
-// one-fixture-two-routes shape as newTalosClusterKubeconfigMux.
+// TalosClusterFinalizer were still tearing it down) but its stale Ready
+// condition from before deletion started left untouched — shared by the
+// list/detail "Deleting" tests below, the same one-fixture-two-routes
+// shape as newTalosClusterKubeconfigMux.
 func deletingTalosClusterMux(t *testing.T) *http.ServeMux {
 	t.Helper()
 
@@ -2996,7 +3006,7 @@ func TestHandleTalosClustersRendersDeletingForClusterWithDeletionTimestamp(t *te
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	assert.Contains(t, string(body), "Deleting")
-	assert.NotContains(t, string(body), "Ready=True")
+	assert.NotContains(t, string(body), "text-green-300\">Ready<")
 }
 
 func TestHandleTalosClustersShowsEmptyState(t *testing.T) {
@@ -3207,7 +3217,10 @@ func TestHandleTalosClusterDetailShowsNoKubeconfigMessageWhenNotReady(t *testing
 
 // TestHandleTalosClusterDetailRendersDeletingForClusterWithDeletionTimestamp
 // covers the same "Deleting" override as the list-page test above, on the
-// detail page's own title-bar badge.
+// detail page's own title-bar badge — its conditions table still shows the
+// stale Ready=True condition as its own green pill (same as
+// assertRendersDeletingNotDiscovered's own doc for the Instance detail
+// page), which is why this expects exactly one, not zero, occurrences.
 func TestHandleTalosClusterDetailRendersDeletingForClusterWithDeletionTimestamp(t *testing.T) {
 	t.Parallel()
 
@@ -3225,7 +3238,9 @@ func TestHandleTalosClusterDetailRendersDeletingForClusterWithDeletionTimestamp(
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	assert.Contains(t, string(body), "Deleting")
-	assert.NotContains(t, string(body), "Ready=True")
+	assert.Equal(t, 1, strings.Count(string(body), "text-green-300\">Ready<"),
+		"the title-bar spot must show Deleting, not a green Ready pill — "+
+			"the conditions table's own pill is the only allowed occurrence")
 }
 
 func TestHandleTalosClusterDetailRedirectsToListForUnknownCluster(t *testing.T) {
