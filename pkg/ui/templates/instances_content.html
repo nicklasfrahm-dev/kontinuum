@@ -1,5 +1,12 @@
 {{define "content"}}
-<div id="instances-content" hx-get="/app/kontinuum.sh/namespaces/{{.Namespace}}/instances" hx-trigger="every 15s" hx-select="#instances-content" hx-swap="outerHTML" hx-disinherit="hx-select hx-swap">
+<!--
+    "instance-added from:body" lets a successful "Add instance" submission
+    (see this file's own script block below) refresh this table right away
+    instead of leaving the new row invisible until the next 15s poll —
+    hx-trigger survives the outerHTML swap since it's part of the
+    server-rendered markup being swapped in, not a one-off DOM listener.
+-->
+<div id="instances-content" hx-get="/app/kontinuum.sh/namespaces/{{.Namespace}}/instances" hx-trigger="every 15s, instance-added from:body" hx-select="#instances-content" hx-swap="outerHTML" hx-disinherit="hx-select hx-swap">
     <div class="mb-6 flex items-center justify-between gap-4">
         <div class="flex items-center gap-4">
             <div class="text-accent [&>svg]:h-10 [&>svg]:w-10">
@@ -105,11 +112,62 @@
         }
     });
 
+    // Toggle the submit button into a loading state for the POST's own
+    // round trip — delegated on #instance-add-modal-body (stable across
+    // swaps) rather than bound to the button itself, which gets torn down
+    // and replaced by every response.
+    document.getElementById('instance-add-modal-body').addEventListener('htmx:beforeRequest', function (event) {
+        var button = event.target.querySelector('button[type="submit"]');
+        if (!button) {
+            return;
+        }
+
+        button.disabled = true;
+        var spinner = button.querySelector('[data-spinner]');
+        var label = button.querySelector('[data-label]');
+        if (spinner) {
+            spinner.classList.remove('hidden');
+        }
+        if (label) {
+            label.textContent = 'Adding…';
+        }
+    });
+
+    // A successful response (2xx, whether it created the instance or
+    // re-rendered the form with a validation error) always replaces this
+    // button outright via the swap below, so there's nothing left to reset
+    // there. Only a request that never got a response at all (e.g. the
+    // network dropped) leaves the disabled/spinner state stuck on the
+    // original button — reset it so the user can retry instead of being
+    // stuck.
+    document.getElementById('instance-add-modal-body').addEventListener('htmx:afterRequest', function (event) {
+        if (event.detail.successful) {
+            return;
+        }
+
+        var button = event.target.querySelector('button[type="submit"]');
+        if (!button) {
+            return;
+        }
+
+        button.disabled = false;
+        var spinner = button.querySelector('[data-spinner]');
+        var label = button.querySelector('[data-label]');
+        if (spinner) {
+            spinner.classList.add('hidden');
+        }
+        if (label) {
+            label.textContent = 'Add instance';
+        }
+    });
+
     // handleInstanceAdd's success response swaps in a hidden
     // [data-toast-prefix] marker rather than a message rendered inline (see
-    // instance_add_modal.html) — close the dialog and surface it as a toast
-    // (see layout.html's showToast) instead of leaving the dialog open
-    // around a static success banner.
+    // instance_add_modal.html) — close the dialog, surface it as a toast
+    // (see layout.html's showToast), and refresh #instances-content right
+    // away (see its own "instance-added from:body" trigger) instead of
+    // leaving the newly-registered instance invisible until the next 15s
+    // poll, which is what actually looked like nothing happened.
     document.getElementById('instance-add-modal-body').addEventListener('htmx:afterSwap', function (event) {
         var marker = event.target.querySelector('[data-toast-prefix]');
         if (!marker) {
@@ -118,6 +176,7 @@
 
         document.getElementById('instance-add-modal').close();
         showToast(marker.getAttribute('data-toast-prefix'), '', '');
+        htmx.trigger(document.body, 'instance-added');
     });
 </script>
 {{end}}

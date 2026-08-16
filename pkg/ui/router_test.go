@@ -2275,6 +2275,15 @@ func TestInstancesPageEmbedsAddInstanceButtonAndEmptyModal(t *testing.T) {
 	assert.Contains(t, string(body), "openInstanceAddModal()")
 	assert.Contains(t, string(body), `id="instance-add-modal"`)
 	assert.Contains(t, string(body), `name="address"`)
+	// A successful submission refreshes #instances-content right away (see
+	// instances_content.html's own htmx.trigger call) rather than leaving
+	// the new row invisible until the next 15s poll — this is the trigger
+	// that wires the two together.
+	assert.Contains(t, string(body), `hx-trigger="every 15s, instance-added from:body"`)
+	// The submit button's own loading state (see instances_content.html's
+	// htmx:beforeRequest/afterRequest listeners) toggles these two elements.
+	assert.Contains(t, string(body), `data-spinner`)
+	assert.Contains(t, string(body), `data-label`)
 }
 
 // TestHandleInstanceAddCreatesInstanceAndReturnsSuccessFragment also covers
