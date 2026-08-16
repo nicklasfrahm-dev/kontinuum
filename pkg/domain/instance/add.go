@@ -36,14 +36,15 @@ type AddOptions struct {
 	Address string
 }
 
-// nameFromAddress derives Add's own Instance name deterministically from
-// address via Hash — the same ComputeHash-style scheme
-// zone.BuildAddObjects' own seed Instance uses for its own name suffix, just
-// with a fixed "instance-" prefix instead of a region/zone one, since a
-// standalone Instance has no zone to be named after. Re-submitting the same
-// address is then a safe, idempotent no-op (see Add) rather than creating a
-// duplicate candidate every time.
-func nameFromAddress(address string) string {
+// NameFromAddress derives an Instance's name deterministically from address
+// via Hash — shared by Add below and by zone.BuildAddObjects' own seed
+// Instance (see issue #81), so the exact same address always names the exact
+// same Instance object regardless of which of the two ever creates it
+// first: registering an address here that a zone later types in freehand
+// (or the reverse) resolves to one object, not two independent duplicates.
+// Re-submitting the same address is then a safe, idempotent no-op (see
+// Add's own doc) rather than creating a duplicate candidate every time.
+func NameFromAddress(address string) string {
 	return "instance-" + Hash(v1alpha2.InstanceSpec{Interfaces: []string{address}})
 }
 
@@ -61,7 +62,7 @@ func Add(ctx context.Context, hubClient client.Client, opts AddOptions) (*v1alph
 	}
 
 	inst := &v1alpha2.Instance{
-		ObjectMeta: metav1.ObjectMeta{Name: nameFromAddress(address), Namespace: opts.Namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: NameFromAddress(address), Namespace: opts.Namespace},
 		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{address}},
 	}
 

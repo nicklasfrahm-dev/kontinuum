@@ -108,11 +108,16 @@ func addObjectName(opts AddOptions) string {
 // all share one name, <region>-<zone> — this is what lets the Zone
 // controller find "its" TalosCluster by name alone (see controller.go's
 // mapTalosClusterToZone), and matches the naming convention Addon's own
-// resourceName already assumes (see pkg/domain/addon/resources.go). The
-// seed Instance gets its own name, <region>-<zone>-<hash> (see
-// instancedomain.Hash), since Instance is a distinct Kind — no collision risk with
-// the other three — but is labeled v1alpha2.LabelRegion/LabelZone so the
-// InstancePool's selector matches it.
+// resourceName already assumes (see pkg/domain/addon/resources.go). The seed
+// Instance instead gets instancedomain.NameFromAddress(opts.TalosAddress) —
+// the exact same name pkg/domain/instance.Add's own standalone registration
+// derives for that same address (see issue #81) — rather than a name of its
+// own scoped under <region>-<zone>, so the two ways of registering an
+// Instance always converge on one shared object identity for a given
+// address instead of each silently creating its own duplicate. It's still
+// labeled v1alpha2.LabelRegion/LabelZone so the InstancePool's selector
+// matches it; ensureSeedInstance's own doc covers what happens when that
+// name already belongs to an Instance created some other way.
 // All four are namespaced into v1alpha2.KontinuumSystemNamespace
 // ("kontinuum-system") — the admin-driven, system-managed namespace issue
 // #63's architecture reserves for zone-join's own objects, as opposed to a
@@ -132,7 +137,8 @@ func BuildAddObjects(
 
 	instance := &v1alpha2.Instance{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: name + "-" + instancedomain.Hash(instanceSpec), Namespace: v1alpha2.KontinuumSystemNamespace, Labels: labels,
+			Name:      instancedomain.NameFromAddress(opts.TalosAddress),
+			Namespace: v1alpha2.KontinuumSystemNamespace, Labels: labels,
 		},
 		Spec: instanceSpec,
 	}
@@ -224,11 +230,18 @@ func Add(ctx context.Context, hubClient client.Client, opts AddOptions) (*v1alph
 	return zoneObj, nil
 }
 
-// ensureSeedInstance creates newInstance (the brand-new seed Instance
-// BuildAddObjects built from opts.TalosAddress, tolerating AlreadyExists
-// exactly as ensureObject does elsewhere in this file) — or, when
-// opts.ExistingInstanceName is set, adopts that already-registered Instance
-// instead (see adoptInstance's own doc) rather than creating a second one.
+// ensureSeedInstance ensures newInstance's own identity exists and carries
+// this zone's own region/zone labels — either explicitly, via
+// opts.ExistingInstanceName naming an already-registered Instance to adopt
+// (see adoptInstance's own doc) instead of creating a second one, or
+// implicitly: newInstance.Name is now instancedomain.NameFromAddress(opts.TalosAddress)
+// (see BuildAddObjects' own doc), the exact same name a standalone "Add
+// instance" registration for that same address would also use, so a freshly
+// typed address that happens to already be registered that way — or left
+// over, unclaimed, from a previous zone (see instancepool.Reconciler's own
+// release, which strips only v1alpha2.LabelClaimedBy) — must be adopted the
+// same way an explicit pick would be, not just left unlabeled the way a bare
+// tolerate-AlreadyExists create used to leave it.
 func ensureSeedInstance(
 	ctx context.Context, hubClient client.Client, opts AddOptions, newInstance *v1alpha2.Instance,
 ) error {
@@ -237,11 +250,15 @@ func ensureSeedInstance(
 	}
 
 	err := hubClient.Create(ctx, newInstance)
-	if err != nil && !apierrors.IsAlreadyExists(err) {
+	if err == nil {
+		return nil
+	}
+
+	if !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("failed to create %T %q: %w", newInstance, newInstance.GetName(), err)
 	}
 
-	return nil
+	return adoptInstance(ctx, hubClient, newInstance.Name, newInstance.Labels)
 }
 
 // adoptInstance fetches the already-registered Instance named name (in
