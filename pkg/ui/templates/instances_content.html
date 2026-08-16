@@ -34,10 +34,11 @@
             <thead>
                 <tr class="border-b border-neutral-800">
                     <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Name</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Condition</th>
                     <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Talos version</th>
-                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Discovered</th>
                     <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Claimed by</th>
                     <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Age</th>
+                    <th class="px-6 py-2 text-right text-xs font-medium text-neutral-500 uppercase tracking-wider">Actions</th>
                 </tr>
             </thead>
             <tbody>
@@ -46,7 +47,6 @@
                     <td class="px-6 py-2 text-sm font-medium text-white">
                         <a href="/app/kontinuum.sh/namespaces/{{.Namespace}}/instances/{{.Name}}" class="hover:text-accent hover:underline">{{.Name}}</a>
                     </td>
-                    <td class="px-6 py-2 text-sm text-neutral-400">{{if .TalosVersion}}{{.TalosVersion}}{{else}}-{{end}}</td>
                     <td class="px-6 py-2">
                         {{if .Deleting}}
                         <span class="inline-flex items-center gap-1.5 bg-amber-900/40 border border-amber-700 rounded-full px-2.5 py-1 text-xs font-medium text-amber-300">Deleting</span>
@@ -56,6 +56,7 @@
                         <span class="inline-flex items-center gap-1.5 bg-neutral-800 border border-neutral-700 rounded-full px-2.5 py-1 text-xs font-medium text-neutral-400">{{if .Reason}}{{.Reason}}{{else}}Pending{{end}}</span>
                         {{end}}
                     </td>
+                    <td class="px-6 py-2 text-sm text-neutral-400">{{if .TalosVersion}}{{.TalosVersion}}{{else}}-{{end}}</td>
                     <td class="px-6 py-2">
                         {{if .ClaimedBy}}
                         <span class="inline-flex items-center gap-1.5 bg-accent/10 border border-accent/30 rounded-full px-2.5 py-1 text-xs font-medium text-accent">{{.ClaimedBy}}</span>
@@ -64,6 +65,14 @@
                         {{end}}
                     </td>
                     <td class="px-6 py-2 text-sm text-neutral-400">{{.Age}}</td>
+                    <td class="px-6 py-2 text-right">
+                        <button type="button"
+                                onclick="openDeleteInstanceModal('{{js .Name}}', '{{js .Namespace}}', {{if .ClaimedBy}}true{{else}}false{{end}})"
+                                class="inline-flex items-center justify-center rounded-lg p-1.5 text-neutral-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                                aria-label="Delete instance {{.Name}}">
+                            {{template "icon-trash"}}
+                        </button>
+                    </td>
                 </tr>
                 {{end}}
             </tbody>
@@ -79,10 +88,49 @@
 
 <!-- Deliberately outside #instances-content: that div's own 15s poll
      (hx-swap="outerHTML" above) would otherwise wipe out an open dialog or
-     form the user is mid-typing (the "Add instance" modal), every time the
+     form the user is mid-typing (the "Add instance" modal), or close the
+     "Delete instance" confirmation out from under the user, every time the
      instance list refreshes — see registry_content.html's identical note
-     about its own "Add zone" modal. -->
+     about its own "Add zone"/"Decommission zone" modals. -->
 {{template "instance-add-modal" .}}
+
+<!-- One shared dialog, retargeted per row by
+     openDeleteInstanceModal(name, namespace, claimed), rather than one
+     dialog per row, so the DOM stays proportional to the instances table
+     regardless of row count — same shape as zone-leave-modal, but without
+     type-to-confirm: this mirrors the confirmation the instance detail
+     page's own delete-instance-modal already asks for (see
+     instance_detail_content.html), not the zone's stricter "type the name"
+     bar. -->
+<dialog id="delete-instance-modal" class="bg-neutral-900 border border-neutral-800 rounded-xl p-0 w-full max-w-md text-neutral-100 backdrop:bg-black/60">
+    <div class="px-6 py-3 border-b border-neutral-800 flex items-center justify-between gap-2">
+        <h2 class="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+            <span class="text-red-400 [&>svg]:h-4 [&>svg]:w-4">{{template "icon-trash"}}</span>
+            Delete instance
+        </h2>
+        <button type="button" onclick="this.closest('dialog').close()"
+                class="text-neutral-500 hover:text-white transition-colors text-lg leading-none" aria-label="Close">
+            &times;
+        </button>
+    </div>
+    <div class="p-6 space-y-4">
+        <p class="text-sm text-neutral-400">
+            Delete <code id="delete-instance-modal-name" class="font-mono text-white bg-neutral-700 border border-neutral-600 rounded px-1.5 py-1"></code>?
+            <span id="delete-instance-modal-reset" class="hidden">This resets its node back to Talos maintenance mode.</span>
+            This cannot be undone.
+        </p>
+        <div class="flex justify-end gap-2 pt-2">
+            <button type="button" onclick="document.getElementById('delete-instance-modal').close()"
+                    class="inline-flex items-center px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg border border-neutral-700 text-neutral-300 hover:bg-neutral-800 transition-colors">
+                Cancel
+            </button>
+            <button type="button" id="delete-instance-modal-confirm"
+                    class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20 transition-colors">
+                Delete instance
+            </button>
+        </div>
+    </div>
+</dialog>
 
 <script>
     // Captured once, before any submission can mutate
@@ -103,10 +151,34 @@
         document.getElementById('instance-add-modal').showModal();
     }
 
+    var deleteInstanceModal = document.getElementById('delete-instance-modal');
+    var deleteInstanceModalName = document.getElementById('delete-instance-modal-name');
+    var deleteInstanceModalReset = document.getElementById('delete-instance-modal-reset');
+    var deleteInstanceModalConfirm = document.getElementById('delete-instance-modal-confirm');
+
+    function openDeleteInstanceModal(name, namespace, claimed) {
+        deleteInstanceModalName.textContent = name;
+        deleteInstanceModalReset.classList.toggle('hidden', !claimed);
+        deleteInstanceModalConfirm.setAttribute('hx-delete',
+            '/app/kontinuum.sh/namespaces/' + encodeURIComponent(namespace) + '/instances/' + encodeURIComponent(name));
+        // hx-delete is only bound to an element once, on htmx's initial scan
+        // — reassigning the attribute above doesn't itself rebind a
+        // dynamically-retargeted button, so re-process it here exactly as
+        // registry_content.html's openZoneLeaveModal does for its own
+        // freshly-retargeted button.
+        htmx.process(deleteInstanceModalConfirm);
+        deleteInstanceModal.showModal();
+    }
+
     // <dialog> has no built-in "click outside to close" — close only when
     // the click lands on the dialog element itself (the backdrop area), not
     // when it bubbles up from a click inside the dialog's own content.
     document.getElementById('instance-add-modal').addEventListener('click', function (event) {
+        if (event.target === this) {
+            this.close();
+        }
+    });
+    deleteInstanceModal.addEventListener('click', function (event) {
         if (event.target === this) {
             this.close();
         }
