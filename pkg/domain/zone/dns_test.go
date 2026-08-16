@@ -29,7 +29,7 @@ const testGatewayIP = "203.0.113.10"
 // single DNSEndpoint — "kontinuum" in "kontinuum-system", same fixed naming
 // convention as network.go's gatewayName/certificateName/httpRouteName.
 func dnsEndpointKey() client.ObjectKey {
-	return client.ObjectKey{Name: "kontinuum", Namespace: "kontinuum-system"}
+	return client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}
 }
 
 // TestReconcileDNSSkippedWithoutCredentials covers issue #51's own "must not
@@ -115,7 +115,7 @@ func TestReconcileCreatesDNSEndpointOnceGatewayHasIPAddress(t *testing.T) {
 
 	var gateway gatewayv1.Gateway
 	require.NoError(t, downstream.Get(t.Context(),
-		client.ObjectKey{Name: "kontinuum", Namespace: "kontinuum-system"}, &gateway))
+		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &gateway))
 
 	gateway.Status.Addresses = []gatewayv1.GatewayStatusAddress{
 		{Type: new(gatewayv1.IPAddressType), Value: testGatewayIP},
@@ -160,7 +160,7 @@ func TestReconcileCreatesDNSEndpointForHostnameAddress(t *testing.T) {
 
 	var gateway gatewayv1.Gateway
 	require.NoError(t, downstream.Get(t.Context(),
-		client.ObjectKey{Name: "kontinuum", Namespace: "kontinuum-system"}, &gateway))
+		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &gateway))
 
 	gateway.Status.Addresses = []gatewayv1.GatewayStatusAddress{
 		{Type: new(gatewayv1.HostnameAddressType), Value: "lb-1234.us-east-1.elb.amazonaws.com"},
@@ -191,8 +191,8 @@ func TestReconcileTeardownDeletesDNSEndpoint(t *testing.T) {
 	reconciler := &zone.Reconciler{
 		Client:                  hubClient,
 		DownstreamClientBuilder: fakeDownstreamClientBuilder{client: downstream},
-		ACMEEmail:               "ops@example.com",
-		ACMEServer:              "https://acme-v02.api.letsencrypt.org/directory",
+		ACMEEmail:               testACMEEmail,
+		ACMEServer:              testACMEServer,
 		ImageRepo:               testImageRepo,
 		GRPCEndpoint:            testGRPCEndpoint,
 		RetryInterval:           testRetryInterval,
@@ -205,7 +205,7 @@ func TestReconcileTeardownDeletesDNSEndpoint(t *testing.T) {
 
 	var gateway gatewayv1.Gateway
 	require.NoError(t, downstream.Get(t.Context(),
-		client.ObjectKey{Name: "kontinuum", Namespace: "kontinuum-system"}, &gateway))
+		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &gateway))
 
 	gateway.Status.Addresses = []gatewayv1.GatewayStatusAddress{
 		{Type: new(gatewayv1.IPAddressType), Value: testGatewayIP},

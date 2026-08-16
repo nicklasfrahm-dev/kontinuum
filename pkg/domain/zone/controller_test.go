@@ -47,6 +47,8 @@ const (
 	// testGRPCEndpoint is newReconciler's own Reconciler.GRPCEndpoint —
 	// zoneStorageDSN's own KONTINUUM_SERVER_GRPC_ENDPOINT stand-in.
 	testGRPCEndpoint = "hub.example.com:8080"
+	testACMEEmail    = "ops@example.com"
+	testACMEServer   = "https://acme-v02.api.letsencrypt.org/directory"
 
 	// testDownstreamNamespace/testDownstreamResourceName mirror
 	// pkg/domain/zone's own unexported downstreamNamespace/deploymentName
@@ -296,8 +298,8 @@ func newReconciler(hubClient client.Client, downstreamBuilder zone.DownstreamCli
 	return &zone.Reconciler{
 		Client:                  hubClient,
 		DownstreamClientBuilder: downstreamBuilder,
-		ACMEEmail:               "ops@example.com",
-		ACMEServer:              "https://acme-v02.api.letsencrypt.org/directory",
+		ACMEEmail:               testACMEEmail,
+		ACMEServer:              testACMEServer,
 		Auth:                    zone.AuthConfig{InsecureAllowAnonymous: "true"},
 		ImageRepo:               testImageRepo,
 		GRPCEndpoint:            testGRPCEndpoint,
@@ -707,7 +709,7 @@ func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) 
 
 	var issuer certmanagerv1.ClusterIssuer
 	require.NoError(t, downstream.Get(t.Context(), client.ObjectKey{Name: testDownstreamResourceName}, &issuer))
-	assert.Equal(t, "ops@example.com", issuer.Spec.ACME.Email)
+	assert.Equal(t, testACMEEmail, issuer.Spec.ACME.Email)
 
 	var gateway gatewayv1.Gateway
 	require.NoError(t, downstream.Get(t.Context(),
