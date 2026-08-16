@@ -75,6 +75,19 @@ Fans out a new zone's hub-side objects and, once its `TalosCluster` is bootstrap
    `<zone>.<region>.<domain>`. `Installed` only flips `True` once
    cert-manager's own `Certificate` reports `Ready` — a real signal that
    TLS issuance actually succeeded, not just that the object was created.
+4. **Registry join** (`pkg/domain/zone`'s `Reconciler`, once `Installed`) —
+   the reconciler checks the hub's own registry for a `Kontinuum` matching
+   this zone's `region`/`zone` with a non-zero heartbeat (see
+   `FindJoinedKontinuum`), and only then flips the aggregate `Ready`
+   condition true. `Installed` on its own only means the downstream objects
+   exist and TLS was issued — it says nothing about whether the deployed
+   `kontinuum` container actually managed to start and register itself, which
+   is a real, separate failure mode: the `kontinuum-env` ConfigMap/Secret
+   carry the *same* authentication choice (`KONTINUUM_INSECURE_ALLOW_ANONYMOUS`
+   or `KONTINUUM_OIDC_*`) the hub itself is running with, mirrored by the
+   `zone` controller's own `AuthConfig` — without it, the deployed process
+   refuses to even start (see [Authentication](../authentication.md)) and
+   never gets as far as heartbeating.
 
 Every step past machine-config generation is best-effort and idempotent: a
 maintenance-mode call against a node that's already moved past maintenance
@@ -309,10 +322,14 @@ flowchart TD
     StorageOK -- No --> NoStorage[Installed = False\nNoStorageSecretFound]
     NoStorage --> Requeue1
 
-    StorageOK -- Yes --> InstallWorkload[Ensure namespace, kontinuum-env\nSecret/ConfigMap, Deployment, Service]
+    StorageOK -- Yes --> InstallWorkload[Ensure namespace, kontinuum-env\nSecret/ConfigMap incl. auth config, Deployment, Service]
     InstallWorkload --> InstallNetwork[Ensure ClusterIssuer, Gateway,\nCertificate, HTTPRoute]
     InstallNetwork --> CertCheck{Certificate reports Ready?}
     CertCheck -- No --> WaitCert[Installed = False\nWaitingForCertificate]
     WaitCert --> Requeue1
-    CertCheck -- Yes --> Done([Installed = True\nkontinuum-server registers\nas a worker Kontinuum])
+    CertCheck -- Yes --> Installed[Installed = True]
+    Installed --> RegistryCheck{Kontinuum matching this\nzone's region/zone heartbeating?}
+    RegistryCheck -- No --> WaitRegistry[Ready = False\nWaitingForRegistry]
+    WaitRegistry --> Requeue1
+    RegistryCheck -- Yes --> Done([Ready = True\nRegistryJoined])
 ```

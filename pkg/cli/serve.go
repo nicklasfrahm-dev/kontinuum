@@ -432,7 +432,13 @@ func zoneOptions(cfg *config.Config, logger *slog.Logger) []libkapi.Option {
 		Logger:     logger.With("component", "zone"),
 		ACMEEmail:  cfg.ACME.Email,
 		ACMEServer: cfg.ACME.Server,
-		Image:      zoneImageRepo + ":" + version,
+		Auth: zone.AuthConfig{
+			InsecureAllowAnonymous: cfg.InsecureAllowAnonymous,
+			OIDCIssuerURL:          cfg.OIDC.IssuerURL,
+			OIDCClientID:           cfg.OIDC.ClientID,
+			OIDCAdminGroups:        cfg.OIDC.AdminGroups,
+		},
+		Image: zoneImageRepo + ":" + version,
 	})
 
 	return []libkapi.Option{libkapi.WithController(controller)}

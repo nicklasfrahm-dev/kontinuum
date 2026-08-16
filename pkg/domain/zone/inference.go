@@ -92,6 +92,45 @@ func findKontinuumStorage(ctx context.Context, hubClient client.Client) (string,
 	return string(storage), nil
 }
 
+// FindJoinedKontinuum returns the Kontinuum registered for the given
+// region/zone — the one ensureConfigMap's own KONTINUUM_SERVER_REGION/_ZONE
+// env vars cause that zone's own kontinuum-server to register itself as,
+// once it heartbeats (see pkg/domain/registry.Heartbeat) — or ok=false if
+// none has joined yet. Matched by spec, not by name: a Kontinuum's own
+// object name is registry.InstanceName(os.Hostname()), arbitrary and with
+// no fixed relationship to the zone's own <region>-<zone> name. A
+// Kontinuum that exists but has never actually heartbeated
+// (status.lastHeartbeatTime still zero — possible for the brief window
+// between Create and its first beat) doesn't count as joined, mirroring
+// what a human staring at the registry page would consider "actually
+// there." Exported so both this package's own Reconciler (the Zone
+// RegistryJoined condition — see controller.go) and pkg/ui's zone detail
+// page (showing whether/which Kontinuum joined) share one definition of
+// "has this zone's kontinuum-server joined the registry," rather than two
+// that could drift apart.
+func FindJoinedKontinuum(
+	ctx context.Context, hubClient client.Client, region, zoneName string,
+) (*v1alpha2.Kontinuum, bool, error) {
+	var list v1alpha2.KontinuumList
+
+	err := hubClient.List(ctx, &list, client.InNamespace(v1alpha2.KontinuumSystemNamespace))
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to list kontinuums: %w", err)
+	}
+
+	sort.Slice(list.Items, func(i, j int) bool { return list.Items[i].Name < list.Items[j].Name })
+
+	for index := range list.Items {
+		item := &list.Items[index]
+
+		if item.Spec.Region == region && item.Spec.Zone == zoneName && !item.Status.LastHeartbeatTime.IsZero() {
+			return item, true, nil
+		}
+	}
+
+	return nil, false, nil
+}
+
 // findKontinuumDomain returns the DNS domain any registered Kontinuum
 // publishes on its own status.config.server.dns.domain — set from
 // KONTINUUM_SERVER_DNS_DOMAIN, the same env var every kontinuum serve

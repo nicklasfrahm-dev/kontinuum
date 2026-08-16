@@ -1,0 +1,188 @@
+{{define "content"}}
+<div id="zone-detail-content" hx-get="/app/kontinuum.sh/namespaces/{{.Namespace}}/zones/{{.Name}}" hx-trigger="every 15s" hx-select="#zone-detail-content" hx-swap="outerHTML" hx-disinherit="hx-select hx-swap">
+    <a href="/app/kontinuum.sh/namespaces/{{.Namespace}}/kontinuums" class="inline-flex items-center gap-1.5 text-sm text-neutral-500 hover:text-white transition-colors mb-4">
+        {{template "icon-chevron-left"}}
+        Back to registry
+    </a>
+
+    <div class="mb-6 flex items-center justify-between gap-3">
+        <div class="flex items-center gap-3">
+            <h1 class="text-xl font-bold text-white">{{.Name}}</h1>
+            {{if .Deleting}}
+            <span class="inline-flex items-center gap-1.5 bg-amber-900/40 border border-amber-700 rounded-full px-2.5 py-1 text-xs font-medium text-amber-300">Deleting</span>
+            {{else if .Ready}}
+            {{if .ReadyOK}}
+            <span class="inline-flex items-center gap-1.5 bg-green-900/40 border border-green-700 rounded-full px-2.5 py-1 text-xs font-medium text-green-300">Ready</span>
+            {{else}}
+            <span class="inline-flex items-center gap-1.5 bg-neutral-800 border border-neutral-700 rounded-full px-2.5 py-1 text-xs font-medium text-neutral-400">Ready</span>
+            {{end}}
+            {{end}}
+        </div>
+        <button type="button" onclick="document.getElementById('delete-zone-modal').showModal()"
+                class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium uppercase tracking-wider rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20 transition-colors"
+                aria-label="Decommission zone {{.Name}}">
+            {{template "icon-trash"}}
+            Decommission zone
+        </button>
+    </div>
+
+    <div class="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+        <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
+            {{template "icon-info"}}
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider">Overview</h2>
+        </div>
+        <dl class="divide-y divide-neutral-800">
+            <div class="px-6 py-3 flex items-center justify-between gap-4">
+                <dt class="text-sm text-neutral-500">Region</dt>
+                <dd class="text-sm font-medium text-white">{{if .Region}}{{.Region}}{{else}}-{{end}}</dd>
+            </div>
+            <div class="px-6 py-3 flex items-center justify-between gap-4">
+                <dt class="text-sm text-neutral-500">Zone</dt>
+                <dd class="text-sm font-medium text-white">{{if .ZoneName}}{{.ZoneName}}{{else}}-{{end}}</dd>
+            </div>
+            <div class="px-6 py-3 flex items-center justify-between gap-4">
+                <dt class="text-sm text-neutral-500">Domain</dt>
+                <dd class="text-sm font-medium text-white break-all text-right">{{if .Domain}}{{.Domain}}{{else}}-{{end}}</dd>
+            </div>
+            <div class="px-6 py-3 flex items-center justify-between gap-4">
+                <dt class="text-sm text-neutral-500">Age</dt>
+                <dd class="text-sm font-medium text-white">{{.Age}}</dd>
+            </div>
+        </dl>
+    </div>
+
+    <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+        <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
+            {{template "icon-kubernetes"}}
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider">Cluster</h2>
+        </div>
+        <dl class="divide-y divide-neutral-800">
+            <div class="px-6 py-3 flex items-center justify-between gap-4">
+                <dt class="text-sm text-neutral-500">TalosCluster</dt>
+                <dd class="text-sm font-medium text-white">
+                    {{if .HasCluster}}
+                    <a href="/app/kontinuum.sh/namespaces/{{.Namespace}}/talosclusters/{{.ClusterName}}" class="hover:text-accent hover:underline">{{.ClusterName}}</a>
+                    {{else}}
+                    <span class="text-neutral-500">Not provisioned yet</span>
+                    {{end}}
+                </dd>
+            </div>
+            {{if .HasCluster}}
+            <div class="px-6 py-3 flex items-center justify-between gap-4">
+                <dt class="text-sm text-neutral-500">Cluster ready</dt>
+                <dd class="text-sm font-medium text-white">
+                    {{if .ClusterReady}}
+                    {{if .ClusterReadyOK}}
+                    <span class="inline-flex items-center gap-1.5 bg-green-900/40 border border-green-700 rounded-full px-2.5 py-1 text-xs font-medium text-green-300">{{.ClusterReady}}</span>
+                    {{else}}
+                    <span class="inline-flex items-center gap-1.5 bg-neutral-800 border border-neutral-700 rounded-full px-2.5 py-1 text-xs font-medium text-neutral-400">{{.ClusterReady}}</span>
+                    {{end}}
+                    {{else}}
+                    <span class="text-neutral-500">-</span>
+                    {{end}}
+                </dd>
+            </div>
+            {{end}}
+        </dl>
+    </div>
+
+    <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+        <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
+            {{template "icon-server"}}
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider">Registry</h2>
+        </div>
+        <dl class="divide-y divide-neutral-800">
+            <div class="px-6 py-3 flex items-center justify-between gap-4">
+                <dt class="text-sm text-neutral-500">kontinuum-server</dt>
+                <dd class="text-sm font-medium text-white">
+                    {{if .RegistryJoined}}
+                    <a href="/app/kontinuum.sh/namespaces/{{.KontinuumNamespace}}/kontinuums/{{.KontinuumName}}" class="hover:text-accent hover:underline">{{.KontinuumName}}</a>
+                    {{else}}
+                    <span class="inline-flex items-center gap-1.5 bg-neutral-800 border border-neutral-700 rounded-full px-2.5 py-1 text-xs font-medium text-neutral-400">Not yet joined</span>
+                    {{end}}
+                </dd>
+            </div>
+            {{if .RegistryJoined}}
+            <div class="px-6 py-3 flex items-center justify-between gap-4">
+                <dt class="text-sm text-neutral-500">Role</dt>
+                <dd class="text-sm font-medium text-white">{{if .KontinuumRole}}{{.KontinuumRole}}{{else}}-{{end}}</dd>
+            </div>
+            <div class="px-6 py-3 flex items-center justify-between gap-4">
+                <dt class="text-sm text-neutral-500">Last heartbeat</dt>
+                <dd class="text-sm font-medium text-white">{{.KontinuumLastHeartbeat}}</dd>
+            </div>
+            {{end}}
+        </dl>
+    </div>
+
+    <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+        <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
+            {{template "icon-list-checks"}}
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider">Conditions</h2>
+        </div>
+        {{template "conditions-table" (dict "Conditions" .Conditions)}}
+    </div>
+</div>
+
+<!-- Deliberately outside #zone-detail-content: that div's own 15s poll
+     (hx-swap="outerHTML" above) would otherwise close this dialog out from
+     under the user every time the page refreshes — mirrors
+     instance_detail_content.html's identical delete-instance-modal
+     placement. -->
+<dialog id="delete-zone-modal" class="bg-neutral-900 border border-neutral-800 rounded-xl p-0 w-full max-w-md text-neutral-100 backdrop:bg-black/60">
+    <div class="px-6 py-3 border-b border-neutral-800 flex items-center justify-between gap-2">
+        <h2 class="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+            <span class="text-red-400 [&>svg]:h-4 [&>svg]:w-4">{{template "icon-trash"}}</span>
+            Decommission zone
+        </h2>
+        <button type="button" onclick="this.closest('dialog').close()"
+                class="text-neutral-500 hover:text-white transition-colors text-lg leading-none" aria-label="Close">
+            &times;
+        </button>
+    </div>
+    <div class="p-6 space-y-4">
+        <p class="text-sm text-neutral-400">
+            This tears down everything installed on <code class="font-mono text-white bg-neutral-700 border border-neutral-600 rounded px-1.5 py-1">{{.Name}}</code>'s
+            downstream cluster and resets its seed node back to maintenance mode. This cannot be undone.
+        </p>
+        <div class="flex justify-end gap-2 pt-2">
+            <button type="button" onclick="document.getElementById('delete-zone-modal').close()"
+                    class="inline-flex items-center px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg border border-neutral-700 text-neutral-300 hover:bg-neutral-800 transition-colors">
+                Cancel
+            </button>
+            <button type="button" id="delete-zone-confirm"
+                    hx-delete="/app/kontinuum.sh/namespaces/{{.Namespace}}/zones/{{.Name}}"
+                    hx-swap="none"
+                    class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20 transition-colors">
+                Decommission zone
+            </button>
+        </div>
+    </div>
+</dialog>
+
+<script>
+    // <dialog> has no built-in "click outside to close" — close only when the
+    // click lands on the dialog element itself (the backdrop area), not when
+    // it bubbles up from a click inside the dialog's own content — mirrors
+    // instance_detail_content.html's identical listener.
+    document.getElementById('delete-zone-modal').addEventListener('click', function (event) {
+        if (event.target === this) {
+            this.close();
+        }
+    });
+
+    // handleDeleteZone (unlike handleDeleteInstanceObject/
+    // handleDeleteTalosCluster) always re-renders the registry page itself
+    // rather than sending an Hx-Redirect — see that handler's own doc: it's
+    // shared with the registry page's own row-level "leave zone" button,
+    // which swaps that response into #registry-content in place. This page
+    // has no such element to swap into, so hx-swap="none" above discards
+    // the response body and this listener drives the navigation back to the
+    // registry itself once the delete actually succeeds.
+    document.getElementById('delete-zone-confirm').addEventListener('htmx:afterRequest', function (event) {
+        if (event.detail.successful) {
+            window.location.href = '/app/kontinuum.sh/namespaces/{{.Namespace}}/kontinuums';
+        }
+    });
+</script>
+{{end}}

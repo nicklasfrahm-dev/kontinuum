@@ -101,8 +101,11 @@ const (
 	pageInstanceDetail = "instance-detail"
 	pageTalosClusters  = "talosclusters"
 	pageTalosCluster   = "taloscluster"
-	pageIAM            = "iam"
-	pageConnect        = "connect"
+	// pageZoneDetail backs /app/kontinuum.sh/namespaces/{ns}/zones/{name} —
+	// see handleZoneDetail.
+	pageZoneDetail = "zone-detail"
+	pageIAM        = "iam"
+	pageConnect    = "connect"
 )
 
 // Template data-map keys every page's own render() call shares — layout.html
@@ -119,6 +122,9 @@ const (
 	dataKeyTalosVersion = "TalosVersion"
 	dataKeyName         = "Name"
 	dataKeyAge          = "Age"
+	dataKeyRegion       = "Region"
+	dataKeyDeleting     = "Deleting"
+	dataKeyConditions   = "Conditions"
 )
 
 // defaultTenantNamespace is where GET /app and /app/home land a caller who
@@ -264,6 +270,11 @@ func NewRouter(
 			"templates/components/icon_copy.html", "templates/components/icon_trash.html",
 			"templates/components/reveal_panel.html", "templates/components/reveal_panel_script.html",
 			"templates/components/copy_snippet.html", "templates/components/conditions_table.html"),
+		pageZoneDetail: mustParsePage("templates/zone_detail_content.html",
+			"templates/components/icon_chevron_left.html", "templates/components/icon_info.html",
+			"templates/components/icon_kubernetes.html", "templates/components/icon_server.html",
+			"templates/components/icon_list_checks.html", "templates/components/icon_trash.html",
+			"templates/components/conditions_table.html"),
 		pageIAM: mustParsePage("templates/iam_content.html",
 			"templates/components/icon_key.html", "templates/components/icon_info.html"),
 		pageConnect: mustParsePage("templates/connect_content.html",
@@ -331,6 +342,7 @@ func (r *Router) RegisterRoutes(
 		wrap(r.handleKontinuumSecretDownload))
 	mux.HandleFunc("DELETE /app/kontinuum.sh/namespaces/{ns}/kontinuums/{name}", wrap(r.handleDeleteInstance))
 	mux.HandleFunc("POST /app/zones/add", wrap(r.handleZoneAdd))
+	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/zones/{name}", wrap(r.handleZoneDetail))
 	mux.HandleFunc("DELETE /app/kontinuum.sh/namespaces/{ns}/zones/{name}", wrap(r.handleDeleteZone))
 	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/instances", wrap(r.handleInstances))
 	mux.HandleFunc("POST /app/kontinuum.sh/namespaces/{ns}/instances/add", wrap(r.handleInstanceAdd))
@@ -688,7 +700,7 @@ func (r *Router) renderRegistry(writer http.ResponseWriter, request *http.Reques
 
 	data := map[string]any{
 		dataKeyTitle:       "Registry",
-		dataKeyActiveMenu:  "registry",
+		dataKeyActiveMenu:  pageRegistry,
 		dataKeyVersion:     r.version,
 		dataKeyNamespace:   namespace,
 		dataKeyInstances:   instances,
@@ -824,6 +836,185 @@ func latestCondition(conditions []metav1.Condition) *metav1.Condition {
 	return latest
 }
 
+// fetchZone fetches the Zone named name — Zone is always cluster-scoped
+// into v1alpha2.KontinuumSystemNamespace regardless of which tenant the
+// caller is currently browsing (see handleDeleteZone's own doc for the
+// same convention). ok is false only when fetchZone has already written the
+// response itself: NotFound, a forbidden-redirect, or a bad-gateway error —
+// mirrors fetchTalosCluster's identical contract.
+func (r *Router) fetchZone(
+	writer http.ResponseWriter, request *http.Request, zones client.Client, name string,
+) (v1alpha2.Zone, bool) {
+	var zoneObj v1alpha2.Zone
+
+	key := client.ObjectKey{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace}
+
+	err := zones.Get(request.Context(), key, &zoneObj)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			http.NotFound(writer, request)
+
+			return v1alpha2.Zone{}, false
+		}
+
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return v1alpha2.Zone{}, false
+		}
+
+		http.Error(writer, "failed to get zone: "+err.Error(), http.StatusBadGateway)
+
+		return v1alpha2.Zone{}, false
+	}
+
+	return zoneObj, true
+}
+
+// fetchZoneCluster looks up the TalosCluster sharing zoneObj's own name —
+// see zone-add's shared <region>-<zone> naming convention (BuildAddObjects)
+// — for the zone detail page's own "Cluster" section. found is false, ok is
+// true when there's simply no TalosCluster yet (a Zone can exist for a
+// moment before zone-add's own fan-out finishes creating the rest): that's
+// "not provisioned yet," not a page-load failure, mirroring fetchPoolRow's
+// identical convention. ok is false only when fetchZoneCluster has already
+// written the response itself.
+func (r *Router) fetchZoneCluster(
+	writer http.ResponseWriter, request *http.Request, zones client.Client, zoneObj v1alpha2.Zone,
+) (v1alpha2.TalosCluster, bool, bool) {
+	var cluster v1alpha2.TalosCluster
+
+	key := client.ObjectKey{Name: zoneObj.Name, Namespace: zoneObj.Namespace}
+
+	err := zones.Get(request.Context(), key, &cluster)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return v1alpha2.TalosCluster{}, false, true
+		}
+
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return v1alpha2.TalosCluster{}, false, false
+		}
+
+		http.Error(writer, "failed to get taloscluster: "+err.Error(), http.StatusBadGateway)
+
+		return v1alpha2.TalosCluster{}, false, false
+	}
+
+	return cluster, true, true
+}
+
+// handleZoneDetail is GET /app/kontinuum.sh/namespaces/{ns}/zones/{name}'s
+// handler — it shows one Zone's own identity (region/zone/domain), its
+// full status.conditions list (ClusterReady, Installed, RegistryJoined,
+// Ready — see pkg/domain/zone's own Reconciler), a link to its owning
+// TalosCluster if one exists yet, and whether/which Kontinuum has actually
+// joined the hub's registry for it (see zonedomain.FindJoinedKontinuum) —
+// the one signal issue #95 asked for a page to surface directly, rather
+// than an operator having to cross-reference the registry's own Kontinuum
+// Nodes table by region/zone themselves.
+func (r *Router) handleZoneDetail(writer http.ResponseWriter, request *http.Request) {
+	zones, err := r.zonesFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	zoneObj, found := r.fetchZone(writer, request, zones, request.PathValue("name"))
+	if !found {
+		return
+	}
+
+	cluster, hasCluster, ok := r.fetchZoneCluster(writer, request, zones, zoneObj)
+	if !ok {
+		return
+	}
+
+	kontinuum, joined, err := zonedomain.FindJoinedKontinuum(
+		request.Context(), zones, zoneObj.Spec.Region, zoneObj.Spec.Zone)
+	if err != nil {
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return
+		}
+
+		http.Error(writer, "failed to check zone registry membership: "+err.Error(), http.StatusBadGateway)
+
+		return
+	}
+
+	data := zoneDetailData(zoneObj, cluster, hasCluster, kontinuum, joined,
+		request.PathValue("ns"), r.version, r.authEnabled)
+
+	r.render(writer, request, pageZoneDetail, data)
+}
+
+// zoneDetailData builds handleZoneDetail's template data from zoneObj and
+// its already-fetched cluster/registry-membership (see
+// fetchZoneCluster/zonedomain.FindJoinedKontinuum) — factored out purely to
+// keep handleZoneDetail short, mirroring kontinuumDetailData/
+// talosClusterDetailData's identical role for their own detail pages.
+// namespace is the currently browsed tenant (the route's own {ns} path
+// value) — used only for the back-link/delete-button URLs and the nav's
+// tenant switcher, never to locate zoneObj itself (see fetchZone's own
+// doc).
+func zoneDetailData(
+	zoneObj v1alpha2.Zone, cluster v1alpha2.TalosCluster, hasCluster bool,
+	kontinuum *v1alpha2.Kontinuum, joined bool, namespace, version string, authEnabled bool,
+) map[string]any {
+	conditions := make([]conditionRow, 0, len(zoneObj.Status.Conditions))
+	for _, cond := range zoneObj.Status.Conditions {
+		conditions = append(conditions, conditionRow{
+			Type: cond.Type, Status: string(cond.Status), OK: cond.Status == metav1.ConditionTrue,
+			Reason: cond.Reason, Message: capitalizeFirst(cond.Message), Age: formatAge(cond.LastTransitionTime.Time),
+		})
+	}
+
+	data := map[string]any{
+		dataKeyTitle:       zoneObj.Name,
+		dataKeyActiveMenu:  pageRegistry,
+		dataKeyVersion:     version,
+		dataKeyAuthEnabled: authEnabled,
+		dataKeyName:        zoneObj.Name,
+		dataKeyNamespace:   namespace,
+		dataKeyRegion:      zoneObj.Spec.Region,
+		"ZoneName":         zoneObj.Spec.Zone,
+		"Domain":           zoneObj.Spec.Domain,
+		dataKeyAge:         formatAge(zoneObj.CreationTimestamp.Time),
+		dataKeyDeleting:    !zoneObj.DeletionTimestamp.IsZero(),
+		dataKeyConditions:  conditions,
+		"HasCluster":       hasCluster,
+		"ClusterName":      cluster.Name,
+		"ClusterNamespace": cluster.Namespace,
+		"RegistryJoined":   joined,
+	}
+
+	if cond := conditionOfType(zoneObj.Status.Conditions, "Ready"); cond != nil {
+		data["Ready"] = string(cond.Status)
+		data["ReadyOK"] = cond.Status == metav1.ConditionTrue
+	}
+
+	if hasCluster {
+		if cond := conditionOfType(cluster.Status.Conditions, "Ready"); cond != nil {
+			data["ClusterReady"] = string(cond.Status)
+			data["ClusterReadyOK"] = cond.Status == metav1.ConditionTrue
+		}
+	}
+
+	if joined && kontinuum != nil {
+		data["KontinuumName"] = kontinuum.Name
+		data["KontinuumNamespace"] = kontinuum.Namespace
+		data["KontinuumRole"] = kontinuum.Status.Role
+		data["KontinuumLastHeartbeat"] = formatAge(kontinuum.Status.LastHeartbeatTime.Time)
+	}
+
+	return data
+}
+
 // maxZoneAddFormBytes bounds the "Add zone" form's request body — every
 // field is a short identifier/address, so this is generous, not tight.
 const maxZoneAddFormBytes = 1 << 16
@@ -839,7 +1030,7 @@ func (r *Router) zoneAddFormData(
 	fields zoneAddFields, createdZone, formErr string, suggestions []instanceSuggestion,
 ) map[string]any {
 	return map[string]any{
-		"Region":              fields.region,
+		dataKeyRegion:         fields.region,
 		"Zone":                fields.zone,
 		"TalosAddress":        fields.talosAddress,
 		dataKeyTalosVersion:   fields.talosVersion,
@@ -1066,13 +1257,13 @@ func kontinuumDetailData(
 
 	return map[string]any{
 		dataKeyTitle:       item.Name,
-		dataKeyActiveMenu:  "registry",
+		dataKeyActiveMenu:  pageRegistry,
 		dataKeyVersion:     version,
 		dataKeyAuthEnabled: authEnabled,
 		dataKeyName:        item.Name,
 		dataKeyNamespace:   item.Namespace,
 		"Role":             item.Status.Role,
-		"Region":           item.Spec.Region,
+		dataKeyRegion:      item.Spec.Region,
 		"Zone":             item.Spec.Zone,
 		"LastHeartbeat":    formatAge(item.Status.LastHeartbeatTime.Time),
 		dataKeyAge:         formatAge(item.CreationTimestamp.Time),
@@ -1583,8 +1774,8 @@ func instanceDetailData(item v1alpha2.Instance, version string, authEnabled bool
 		"Hostname":          item.Annotations[instancedomain.AnnotationHostname],
 		"ClaimedBy":         item.Labels[v1alpha2.LabelClaimedBy],
 		"Interfaces":        interfaces,
-		"Conditions":        conditions,
-		"Deleting":          !item.DeletionTimestamp.IsZero(),
+		dataKeyConditions:   conditions,
+		dataKeyDeleting:     !item.DeletionTimestamp.IsZero(),
 	}
 
 	// The title-bar badge shows the same condition instanceRowFrom picks
@@ -1758,8 +1949,7 @@ func (r *Router) handleTalosClusters(writer http.ResponseWriter, request *http.R
 // conditionOfType returns the entry in conditions whose Type matches
 // conditionType, or nil if there is none — used instead of
 // renderRegistry/listZoneRows' own latestCondition where the UI wants one
-// specific, named condition (e.g. "Ready") rather than whichever changed
-// most recently.
+// specific, named condition rather than whichever changed most recently.
 func conditionOfType(conditions []metav1.Condition, conditionType string) *metav1.Condition {
 	for index := range conditions {
 		if conditions[index].Type == conditionType {
@@ -1971,11 +2161,12 @@ func talosClusterDetailData(
 		"KubernetesVersion":  cluster.Spec.Kubernetes.Version,
 		dataKeyAge:           formatAge(cluster.CreationTimestamp.Time),
 		"Pools":              pools,
-		"Conditions":         conditions,
-		"Deleting":           !cluster.DeletionTimestamp.IsZero(),
+		dataKeyConditions:    conditions,
+		dataKeyDeleting:      !cluster.DeletionTimestamp.IsZero(),
 		"KubeconfigReady":    len(kubeconfig) > 0,
 		"KubeconfigRevealed": revealed,
 		"HasZone":            zone.Name != "",
+		"ZoneObjectName":     zone.Name,
 		"ZoneRegion":         zone.Spec.Region,
 		"ZoneName":           zone.Spec.Zone,
 	}

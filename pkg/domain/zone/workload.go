@@ -83,17 +83,33 @@ func ensureSecret(ctx context.Context, downstream client.Client, namespace, stor
 // ensureConfigMap upserts the kontinuum-env ConfigMap with this zone's
 // non-confidential config — KONTINUUM_SERVER_REGION/_ZONE (so this zone's
 // own kontinuum serve process registers itself as a Worker — see
-// pkg/domain/registry.Role) and KONTINUUM_ACME_EMAIL/_SERVER (so it can, in
-// turn, run this same Zone controller for any further zones it joins).
+// pkg/domain/registry.Role), KONTINUUM_ACME_EMAIL/_SERVER (so it can, in
+// turn, run this same Zone controller for any further zones it joins), and
+// auth's own authentication choice (see AuthConfig's own doc) — without
+// that last part, the deployed process refuses to even start (see
+// pkg/config.Config.ValidateAuthentication), so it never gets as far as
+// registering itself at all. hostname is only used to compute a
+// zone-specific KONTINUUM_OIDC_REDIRECT_URL when auth.OIDCIssuerURL is set
+// — see AuthConfig's own doc for why the hub's own redirect URL can't be
+// reused here.
 func ensureConfigMap(
-	ctx context.Context, downstream client.Client, namespace, region, zoneName, acmeEmail, acmeServer string,
+	ctx context.Context, downstream client.Client, namespace, region, zoneName, hostname, acmeEmail, acmeServer string,
+	auth AuthConfig,
 ) error {
 	data := map[string]string{
-		"KONTINUUM_SERVER_ADDR":   ":8080",
-		"KONTINUUM_SERVER_REGION": region,
-		"KONTINUUM_SERVER_ZONE":   zoneName,
-		"KONTINUUM_ACME_EMAIL":    acmeEmail,
-		"KONTINUUM_ACME_SERVER":   acmeServer,
+		"KONTINUUM_SERVER_ADDR":              ":8080",
+		"KONTINUUM_SERVER_REGION":            region,
+		"KONTINUUM_SERVER_ZONE":              zoneName,
+		"KONTINUUM_ACME_EMAIL":               acmeEmail,
+		"KONTINUUM_ACME_SERVER":              acmeServer,
+		"KONTINUUM_INSECURE_ALLOW_ANONYMOUS": auth.InsecureAllowAnonymous,
+	}
+
+	if auth.OIDCIssuerURL != "" {
+		data["KONTINUUM_OIDC_ISSUER_URL"] = auth.OIDCIssuerURL
+		data["KONTINUUM_OIDC_CLIENT_ID"] = auth.OIDCClientID
+		data["KONTINUUM_OIDC_ADMIN_GROUPS"] = auth.OIDCAdminGroups
+		data["KONTINUUM_OIDC_REDIRECT_URL"] = "https://" + hostname + "/app"
 	}
 
 	configMap := &corev1.ConfigMap{

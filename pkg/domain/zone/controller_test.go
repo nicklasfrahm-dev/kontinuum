@@ -148,12 +148,31 @@ func registeredKontinuum(name, storage string) (*v1alpha2.Kontinuum, *corev1.Sec
 	return kontinuum, secret
 }
 
+// joinedKontinuum returns a Kontinuum (plus its backing storage-credential
+// Secret, mirroring registeredKontinuum) registered for
+// testRegion/testZone with a fresh heartbeat — the shape
+// zone.FindJoinedKontinuum looks for once this zone's own kontinuum-server
+// has actually joined the hub's registry (see
+// TestReconcileFlipsReadyOnceKontinuumJoinsRegistry). name is expected to
+// sort after "hub" (the other fixture Kontinuum most of this file's tests
+// register) so anyRegisteredKontinuum's own name-sorted pick — irrelevant
+// to what this helper is testing — keeps landing on a Kontinuum whose
+// Secret actually holds a storage connection string.
+func joinedKontinuum(name string) (*v1alpha2.Kontinuum, *corev1.Secret) {
+	kontinuum, secret := registeredKontinuum(name, testStorage)
+	kontinuum.Spec = v1alpha2.KontinuumSpec{Region: testRegion, Zone: testZone}
+	kontinuum.Status.LastHeartbeatTime = metav1.Now()
+
+	return kontinuum, secret
+}
+
 func newReconciler(hubClient client.Client, downstreamBuilder zone.DownstreamClientBuilder) *zone.Reconciler {
 	return &zone.Reconciler{
 		Client:                  hubClient,
 		DownstreamClientBuilder: downstreamBuilder,
 		ACMEEmail:               "ops@example.com",
 		ACMEServer:              "https://acme-v02.api.letsencrypt.org/directory",
+		Auth:                    zone.AuthConfig{InsecureAllowAnonymous: "true"},
 		Image:                   testImage,
 		RetryInterval:           testRetryInterval,
 		Logger:                  slog.Default(),
@@ -294,6 +313,10 @@ func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) 
 		client.ObjectKey{Name: testDownstreamEnvName, Namespace: testDownstreamNamespace}, &configMap))
 	assert.Equal(t, testRegion, configMap.Data["KONTINUUM_SERVER_REGION"])
 	assert.Equal(t, testZone, configMap.Data["KONTINUUM_SERVER_ZONE"])
+	// Without this, the deployed process refuses to even start (see
+	// pkg/config.Config.ValidateAuthentication) and so never gets as far as
+	// heartbeating — the root cause tracked by issue #95.
+	assert.Equal(t, "true", configMap.Data["KONTINUUM_INSECURE_ALLOW_ANONYMOUS"])
 
 	var deployment appsv1.Deployment
 	require.NoError(t, downstream.Get(t.Context(),
@@ -330,7 +353,11 @@ func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) 
 // simulates cert-manager's own controller finishing issuance directly on
 // the downstream fake client, and a second Reconcile call — hitting every
 // ensureX helper's update-not-create path — must both leave every object
-// unchanged and flip Installed True.
+// unchanged and flip Installed True. The aggregate Ready condition does not
+// flip yet here — see TestReconcileFlipsReadyOnceKontinuumJoinsRegistry for
+// that: Installed only means the downstream footprint exists and TLS was
+// issued, not that this zone's own kontinuum-server has actually joined the
+// hub's registry (see zone.RegistryJoinedConditionType's own doc).
 func TestReconcileFlipsInstalledOnceCertificateReady(t *testing.T) {
 	t.Parallel()
 
@@ -354,7 +381,7 @@ func TestReconcileFlipsInstalledOnceCertificateReady(t *testing.T) {
 
 	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
-	assert.Equal(t, time.Duration(0), result.RequeueAfter)
+	assert.Equal(t, testRetryInterval, result.RequeueAfter)
 
 	var got v1alpha2.Zone
 	require.NoError(t, hubClient.Get(t.Context(), testZoneKey(), &got))
@@ -364,10 +391,65 @@ func TestReconcileFlipsInstalledOnceCertificateReady(t *testing.T) {
 	assert.Equal(t, metav1.ConditionTrue, cond.Status)
 	assert.Equal(t, "Installed", cond.Reason)
 
-	// The aggregate Ready condition (see zone.ReadyConditionType's own doc)
-	// only ever flips true here, once Installed itself does — this is the
-	// condition `kubectl tree`/kstatus tooling actually reads.
-	assertReadyMirrors(t, got, metav1.ConditionTrue, "Installed")
+	registryCond := meta.FindStatusCondition(got.Status.Conditions, zone.RegistryJoinedConditionType)
+	require.NotNil(t, registryCond)
+	assert.Equal(t, metav1.ConditionFalse, registryCond.Status)
+	assert.Equal(t, "WaitingForRegistry", registryCond.Reason)
+
+	// RegistryJoined, not Installed, is what the aggregate Ready condition
+	// (see zone.ReadyConditionType's own doc) mirrors once Installed itself
+	// is true.
+	assertReadyMirrors(t, got, metav1.ConditionFalse, "WaitingForRegistry")
+}
+
+// TestReconcileFlipsReadyOnceKontinuumJoinsRegistry continues past
+// TestReconcileFlipsInstalledOnceCertificateReady: once a Kontinuum matching
+// this zone's own region/zone shows up in the hub's registry with a fresh
+// heartbeat (exactly what this zone's own kontinuum-server produces once it
+// can actually start and beat — see zone.AuthConfig's own doc for why it
+// used to never get that far), a third Reconcile call must flip
+// RegistryJoined — and, with it, the aggregate Ready condition — true.
+func TestReconcileFlipsReadyOnceKontinuumJoinsRegistry(t *testing.T) {
+	t.Parallel()
+
+	kontinuum, kontinuumSecret := registeredKontinuum("hub", testStorage)
+	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
+		kontinuum, kontinuumSecret)
+	downstream := newDownstreamFakeClient(t)
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: downstream})
+
+	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	var cert certmanagerv1.Certificate
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &cert))
+
+	cert.Status.Conditions = []certmanagerv1.CertificateCondition{
+		{Type: certmanagerv1.CertificateConditionReady, Status: cmmeta.ConditionTrue, Reason: "Ready"},
+	}
+	require.NoError(t, downstream.Status().Update(t.Context(), &cert))
+
+	_, err = reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	worker, workerSecret := joinedKontinuum("zzz-worker")
+	require.NoError(t, hubClient.Create(t.Context(), worker))
+	require.NoError(t, hubClient.Create(t.Context(), workerSecret))
+
+	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+	assert.Equal(t, time.Duration(0), result.RequeueAfter)
+
+	var got v1alpha2.Zone
+	require.NoError(t, hubClient.Get(t.Context(), testZoneKey(), &got))
+
+	registryCond := meta.FindStatusCondition(got.Status.Conditions, zone.RegistryJoinedConditionType)
+	require.NotNil(t, registryCond)
+	assert.Equal(t, metav1.ConditionTrue, registryCond.Status)
+	assert.Equal(t, "RegistryJoined", registryCond.Reason)
+
+	assertReadyMirrors(t, got, metav1.ConditionTrue, "RegistryJoined")
 }
 
 func TestReconcileIgnoresMissingZone(t *testing.T) {

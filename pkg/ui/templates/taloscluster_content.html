@@ -58,7 +58,7 @@
                 <dt class="text-sm text-neutral-500">Zone</dt>
                 <dd class="text-sm font-medium text-white">
                     {{if .HasZone}}
-                    <a href="/app/kontinuum.sh/namespaces/{{.Namespace}}/kontinuums" class="hover:text-accent hover:underline">{{.ZoneRegion}}/{{.ZoneName}}</a>
+                    <a href="/app/kontinuum.sh/namespaces/{{.Namespace}}/zones/{{.ZoneObjectName}}" class="hover:text-accent hover:underline">{{.ZoneRegion}}/{{.ZoneName}}</a>
                     {{else}}
                     -
                     {{end}}
