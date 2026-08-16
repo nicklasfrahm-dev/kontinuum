@@ -693,9 +693,28 @@ func (r *Reconciler) recordTalosVersions(
 		})
 
 		if markReady {
+			// metav1.Time's own JSON encoding only carries whole-second
+			// precision (see metav1.Time.MarshalJSON), unlike the
+			// time.Now() calls SetStatusCondition defaults an unset
+			// LastTransitionTime to — so Joined and Ready, set back to
+			// back right here, can come back with an identical
+			// LastTransitionTime once round-tripped through the API. A
+			// consumer picking "whichever condition transitioned most
+			// recently" (see pkg/ui's own latestCondition) then keeps
+			// whichever sorts earlier on a tie, which is Joined — a
+			// one-time latch — not Ready, the condition this pipeline
+			// means to surface as live and current from here on (see
+			// MemberReadyConditionType's own doc). Pinning Ready's own
+			// LastTransitionTime to one full second after Joined's own
+			// (just set above, so never zero) guarantees Ready always
+			// sorts strictly later, at second granularity, without
+			// depending on wall-clock ordering surviving that truncation.
+			joinedCondition := meta.FindStatusCondition(member.Status.Conditions, MemberJoinedConditionType)
+
 			meta.SetStatusCondition(&member.Status.Conditions, metav1.Condition{
 				Type: MemberReadyConditionType, Status: metav1.ConditionTrue, Reason: reasonMemberHealthy,
-				Message: "control plane cluster health check passed with this node included",
+				Message:            "control plane cluster health check passed with this node included",
+				LastTransitionTime: metav1.NewTime(joinedCondition.LastTransitionTime.Add(time.Second)),
 			})
 		}
 

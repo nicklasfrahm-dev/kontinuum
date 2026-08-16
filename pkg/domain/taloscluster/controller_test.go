@@ -760,6 +760,17 @@ func TestReconcileSetsMemberConditionsThroughBootstrapPipeline(t *testing.T) {
 	assert.True(t, meta.IsStatusConditionTrue(afterFirst.Status.Conditions, taloscluster.MemberReadyConditionType),
 		"control-plane member was part of the batch HealthCheck just verified healthy")
 
+	joined := meta.FindStatusCondition(afterFirst.Status.Conditions, taloscluster.MemberJoinedConditionType)
+	ready := meta.FindStatusCondition(afterFirst.Status.Conditions, taloscluster.MemberReadyConditionType)
+
+	require.NotNil(t, joined)
+	require.NotNil(t, ready)
+	assert.True(t, ready.LastTransitionTime.After(joined.LastTransitionTime.Time),
+		"Ready must transition strictly after Joined, even once both round-trip through the API's own "+
+			"whole-second time precision — otherwise a consumer picking whichever condition transitioned most "+
+			"recently (see pkg/ui's own latestCondition) could keep the one-time Joined latch over the actively "+
+			"live Ready condition on a same-second tie")
+
 	_, err = reconciler.Reconcile(context.Background(), req)
 	require.NoError(t, err)
 
