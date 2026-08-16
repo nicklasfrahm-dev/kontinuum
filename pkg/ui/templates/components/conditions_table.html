@@ -3,11 +3,13 @@
     the TalosCluster and Instance detail pages so both show conditions with
     identical styling (see issue #93). Type and Status are collapsed into one
     "Condition" column instead of two — Type shown plain next to a colored
-    Status badge, the same badge styling the standalone Type/Status columns
-    used before — since a condition's type and status are only ever read
-    together anyway. Expects a dict (see templateDict) with: Conditions - a
-    slice of {Type, Status, OK, Reason, Message, Age} (see conditionRow /
-    instanceConditionRow — both already share this exact shape).
+    Status badge: green when OK, grey otherwise — the same true/false badge
+    coloring the instances list's own Condition column already uses (see
+    instances_content.html's Discovered/Deleting badges), not the blue the
+    standalone Type/Status columns used before. Expects a dict (see
+    templateDict) with: Conditions - a slice of {Type, Status, OK, Reason,
+    Message, Age} (see conditionRow / instanceConditionRow — both already
+    share this exact shape).
 */}}
 {{define "conditions-table"}}
 {{if .Conditions}}
@@ -29,7 +31,7 @@
                     {{if .OK}}
                     <span class="inline-flex items-center gap-1.5 bg-green-900/40 border border-green-700 rounded-full px-2.5 py-1 text-xs font-medium text-green-300">{{.Status}}</span>
                     {{else}}
-                    <span class="inline-flex items-center gap-1.5 bg-blue-900/40 border border-blue-700 rounded-full px-2.5 py-1 text-xs font-medium text-blue-300">{{.Status}}</span>
+                    <span class="inline-flex items-center gap-1.5 bg-neutral-800 border border-neutral-700 rounded-full px-2.5 py-1 text-xs font-medium text-neutral-400">{{.Status}}</span>
                     {{end}}
                 </div>
             </td>
