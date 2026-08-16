@@ -425,6 +425,30 @@ func notFoundFallback(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		target := url.URL{Path: parent}
+
+		// A detail page's own "every 15s" hx-get (e.g.
+		// instance_detail_content.html's own poll) hitting this 404 branch
+		// is an htmx AJAX request, not a top-level navigation — a plain
+		// http.Redirect can't steer that: the browser's own XHR/fetch layer
+		// follows a 3xx transparently without ever touching the address
+		// bar or re-running RegisterRoutes' page handlers, so htmx just
+		// tries to hx-select an element (e.g. "#instance-detail-content")
+		// that doesn't exist in whatever page the redirect silently landed
+		// on and does nothing — the caller is left staring at a stale
+		// detail page for an object that's already gone, exactly the bug
+		// this branch fixes. HX-Request marks exactly these requests (see
+		// htmx's own docs); answering them with Hx-Redirect instead makes
+		// htmx itself perform the real top-level navigation — the same
+		// mechanism deleteAndRedirect already uses for an explicit delete,
+		// just reached here for an object that vanished out from under a
+		// still-open page instead.
+		if request.Header.Get("HX-Request") == "true" {
+			writer.Header().Set("Hx-Redirect", target.String())
+			writer.WriteHeader(http.StatusOK)
+
+			return
+		}
+
 		http.Redirect(writer, request, target.String(), http.StatusFound)
 	}
 }

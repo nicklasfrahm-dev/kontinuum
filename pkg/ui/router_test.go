@@ -2670,6 +2670,22 @@ func TestHandleMachineDetailRedirectsToListForUnknownInstance(t *testing.T) {
 		"/app/kontinuum.sh/namespaces/kontinuum-system/instances")
 }
 
+// TestHandleMachineDetailPollSendsHxRedirectForDeletedInstance covers a bug
+// a plain http.Redirect can't fix: a still-open instance detail page's own
+// 15s poll (see instance_detail_content.html) for an Instance deleted out
+// from under it must send the browser to the instances list via
+// Hx-Redirect, which htmx itself turns into a real navigation — not a 3xx
+// the poll's own XHR/fetch layer would just follow transparently in place,
+// landing on content with no matching hx-select target and leaving the
+// caller stuck looking at a stale page for an object that's already gone.
+func TestHandleMachineDetailPollSendsHxRedirectForDeletedInstance(t *testing.T) {
+	t.Parallel()
+
+	assertHTMXGetRedirectsTo(t,
+		"/app/kontinuum.sh/namespaces/kontinuum-system/instances/does-not-exist",
+		"/app/kontinuum.sh/namespaces/kontinuum-system/instances")
+}
+
 func TestHandleMachineDetailReturnsServerErrorWhenFactoryFails(t *testing.T) {
 	t.Parallel()
 
@@ -2734,6 +2750,41 @@ func assertGetRedirectsTo(t *testing.T, path, wantLocation string) {
 
 	require.Equal(t, http.StatusFound, resp.StatusCode)
 	assert.Equal(t, wantLocation, resp.Header.Get("Location"))
+}
+
+// assertHTMXGetRedirectsTo issues an htmx-flavored GET (HX-Request: true —
+// the header every htmx-driven request, including a page's own "every 15s"
+// poll, carries) to path against a router with an empty KontinuumClient (so
+// every object lookup 404s), and asserts the response answers with
+// Hx-Redirect to wantLocation instead of a classic 3xx — see
+// notFoundFallback's own doc for why a plain redirect can't steer an AJAX
+// poll the way it steers a real browser navigation.
+func assertHTMXGetRedirectsTo(t *testing.T, path, wantLocation string) {
+	t.Helper()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	request := newTestRequest(t, path)
+	request.Header.Set("Hx-Request", "true")
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, request)
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, wantLocation, resp.Header.Get("Hx-Redirect"))
+	assert.Empty(t, resp.Header.Get("Location"), "an htmx-driven redirect must not also be a classic 3xx")
 }
 
 // assertDeleteRedirectsToList issues a DELETE to path against a router whose
@@ -3166,6 +3217,19 @@ func TestHandleTalosClusterDetailRedirectsToListForUnknownCluster(t *testing.T) 
 	t.Parallel()
 
 	assertGetRedirectsTo(t,
+		"/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/missing",
+		"/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters")
+}
+
+// TestHandleTalosClusterDetailPollSendsHxRedirectForDeletedCluster is
+// TestHandleMachineDetailPollSendsHxRedirectForDeletedInstance's own
+// counterpart for a TalosCluster's detail page (see taloscluster_content.html's
+// identical 15s poll) — notFoundFallback's Hx-Redirect branch isn't specific
+// to instances, so this covers a second page it applies to.
+func TestHandleTalosClusterDetailPollSendsHxRedirectForDeletedCluster(t *testing.T) {
+	t.Parallel()
+
+	assertHTMXGetRedirectsTo(t,
 		"/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/missing",
 		"/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters")
 }
