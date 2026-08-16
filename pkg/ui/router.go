@@ -21,7 +21,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
@@ -250,12 +249,13 @@ func NewRouter(
 			"templates/components/reveal_panel.html", "templates/components/reveal_panel_script.html"),
 		pageInstances: mustParsePage("templates/instances_content.html",
 			"templates/components/icon_server_plus.html", "templates/components/icon_loader_circle.html",
-			"templates/components/instance_add_modal.html"),
+			"templates/components/instance_add_modal.html", "templates/components/icon_trash.html"),
 		pageInstanceDetail: mustParsePage("templates/instance_detail_content.html",
 			"templates/components/icon_chevron_left.html", "templates/components/icon_info.html",
 			"templates/components/icon_ethernet_port.html", "templates/components/icon_list_checks.html",
+			"templates/components/icon_trash.html", "templates/components/conditions_table.html"),
+		pageTalosClusters: mustParsePage("templates/talosclusters_content.html",
 			"templates/components/icon_trash.html"),
-		pageTalosClusters: mustParsePage("templates/talosclusters_content.html"),
 		pageTalosCluster: mustParsePage("templates/taloscluster_content.html",
 			"templates/components/icon_chevron_left.html", "templates/components/icon_info.html",
 			"templates/components/icon_list_checks.html",
@@ -263,7 +263,7 @@ func NewRouter(
 			"templates/components/icon_eye.html", "templates/components/icon_eye_off.html",
 			"templates/components/icon_copy.html", "templates/components/icon_trash.html",
 			"templates/components/reveal_panel.html", "templates/components/reveal_panel_script.html",
-			"templates/components/copy_snippet.html"),
+			"templates/components/copy_snippet.html", "templates/components/conditions_table.html"),
 		pageIAM: mustParsePage("templates/iam_content.html",
 			"templates/components/icon_key.html", "templates/components/icon_info.html"),
 		pageConnect: mustParsePage("templates/connect_content.html",
@@ -516,20 +516,25 @@ type instance struct {
 // showing "whichever changed last" is a reasonable single-glance summary
 // without needing a column per condition type.
 type zoneRow struct {
-	Name      string
-	Region    string
-	Age       string
+	Name   string
+	Region string
+	Age    string
+	// Condition is that condition's own Type only (e.g. "ClusterReady"),
+	// not "Type=Status" — the badge's own color (see ConditionOK) already
+	// carries the status, matching the pill-per-condition shape every
+	// other conditions display in this package uses (see
+	// templates/components/conditions_table.html and
+	// instances_content.html's own Discovered/Deleting pills).
 	Condition string
 	// ConditionOK is whether Condition's own status is True — the zones
-	// table's badge template colors on this rather than parsing Condition's
-	// "Type=Status" string back apart.
+	// table's badge template colors on this.
 	ConditionOK bool
 	Message     string
 	// Deleting is whether this Zone's own DeletionTimestamp is set — the
 	// template shows this instead of Condition/Message, since a condition
-	// like "ClusterReady=True" left over from before deletion started reads
-	// as "everything's fine" when it's actually mid-teardown (see
-	// ZoneFinalizer's own doc for that window).
+	// like "ClusterReady" left over from before deletion started, still
+	// colored green, reads as "everything's fine" when it's actually
+	// mid-teardown (see ZoneFinalizer's own doc for that window).
 	Deleting bool
 }
 
@@ -790,7 +795,7 @@ func (r *Router) listZoneRows(writer http.ResponseWriter, request *http.Request)
 		}
 
 		if cond := latestCondition(item.Status.Conditions); cond != nil {
-			row.Condition = cond.Type + "=" + string(cond.Status)
+			row.Condition = cond.Type
 			row.ConditionOK = cond.Status == metav1.ConditionTrue
 			row.Message = capitalizeFirst(cond.Message)
 		}
@@ -1274,14 +1279,22 @@ type instanceRow struct {
 	Name         string
 	Namespace    string
 	TalosVersion string
-	Discovered   bool
-	Reason       string
-	ClaimedBy    string
-	Age          string
+	// Condition/ConditionOK reflect whichever of status.conditions most
+	// recently transitioned (see latestCondition) — an Instance can carry
+	// several (Discovered, then once claimed: Configured, Joined, a
+	// per-member Ready), and several of those latch permanently once set
+	// (see pkg/domain/instance's own Reconciler), so pinning to one fixed
+	// type risks showing a stale badge while a later condition is what
+	// actually changed most recently. Mirrors zoneRow's identical
+	// Condition/ConditionOK fields.
+	Condition   string
+	ConditionOK bool
+	ClaimedBy   string
+	Age         string
 	// Deleting is whether this Instance's own DeletionTimestamp is set —
 	// see zoneRow.Deleting's own doc for why the template shows this
-	// instead of a stale Discovered/Reason value while
-	// InstanceResetFinalizer is still resetting it.
+	// instead of a stale Condition value while InstanceResetFinalizer is
+	// still resetting it.
 	Deleting bool
 }
 
@@ -1296,9 +1309,9 @@ func instanceRowFrom(item v1alpha2.Instance) instanceRow {
 		Deleting:     !item.DeletionTimestamp.IsZero(),
 	}
 
-	if cond := meta.FindStatusCondition(item.Status.Conditions, instancedomain.DiscoveredConditionType); cond != nil {
-		row.Discovered = cond.Status == metav1.ConditionTrue
-		row.Reason = cond.Reason
+	if cond := latestCondition(item.Status.Conditions); cond != nil {
+		row.Condition = cond.Type
+		row.ConditionOK = cond.Status == metav1.ConditionTrue
 	}
 
 	return row
@@ -1557,7 +1570,7 @@ func instanceDetailData(item v1alpha2.Instance, version string, authEnabled bool
 		discoverySource = fmt.Sprintf("%s/%s", item.Spec.ProviderRef.Kind, item.Spec.ProviderRef.Name)
 	}
 
-	return map[string]any{
+	data := map[string]any{
 		dataKeyTitle:        item.Name,
 		dataKeyActiveMenu:   "instances",
 		dataKeyVersion:      version,
@@ -1566,13 +1579,24 @@ func instanceDetailData(item v1alpha2.Instance, version string, authEnabled bool
 		dataKeyNamespace:    item.Namespace,
 		dataKeyAge:          formatAge(item.CreationTimestamp.Time),
 		dataKeyTalosVersion: item.Status.Talos.Version,
-		"Discovered":        meta.IsStatusConditionTrue(item.Status.Conditions, instancedomain.DiscoveredConditionType),
 		"DiscoverySource":   discoverySource,
 		"ClaimedBy":         item.Labels[v1alpha2.LabelClaimedBy],
 		"Interfaces":        interfaces,
 		"Conditions":        conditions,
 		"Deleting":          !item.DeletionTimestamp.IsZero(),
 	}
+
+	// The title-bar badge shows the same condition instanceRowFrom picks
+	// for this Instance's own row on the list page (see latestCondition),
+	// not a fixed Discovered lookup — so a viewer sees one consistent
+	// condition for a given Instance whether they're looking at the list
+	// or this detail page.
+	if cond := latestCondition(item.Status.Conditions); cond != nil {
+		data["Condition"] = cond.Type
+		data["ConditionOK"] = cond.Status == metav1.ConditionTrue
+	}
+
+	return data
 }
 
 // handleDeleteInstanceObject is DELETE
@@ -1646,19 +1670,26 @@ func (r *Router) deleteAndRedirect(
 const talosKubeconfigSecretKey = "kubeconfig"
 
 // talosClusterRow is a TalosCluster object rendered as a row on the list
-// page — see handleTalosClusters.
+// page — see handleTalosClusters. Condition/ConditionOK reflect whichever
+// of status.conditions most recently transitioned (see latestCondition),
+// not a fixed "Ready" lookup — mirrors zoneRow's identical fields, and for
+// the same reason instanceRow moved off a fixed lookup: Ready and
+// ControlPlaneReady both latch permanently once true (see
+// pkg/domain/taloscluster's own Reconciler), so pinning to "Ready" risks
+// showing a stale badge while a later condition is what actually changed
+// most recently.
 type talosClusterRow struct {
 	Name              string
 	Namespace         string
 	ControlPlanePool  string
 	TalosVersion      string
 	KubernetesVersion string
-	Ready             string
-	ReadyOK           bool
+	Condition         string
+	ConditionOK       bool
 	Age               string
 	// Deleting is whether this TalosCluster's own DeletionTimestamp is set
 	// — see zoneRow.Deleting's own doc for why the template shows this
-	// instead of a stale Ready value during teardown.
+	// instead of a stale Condition value during teardown.
 	Deleting bool
 }
 
@@ -1703,9 +1734,9 @@ func (r *Router) handleTalosClusters(writer http.ResponseWriter, request *http.R
 			Deleting:          !item.DeletionTimestamp.IsZero(),
 		}
 
-		if cond := conditionOfType(item.Status.Conditions, "Ready"); cond != nil {
-			row.Ready = string(cond.Status)
-			row.ReadyOK = cond.Status == metav1.ConditionTrue
+		if cond := latestCondition(item.Status.Conditions); cond != nil {
+			row.Condition = cond.Type
+			row.ConditionOK = cond.Status == metav1.ConditionTrue
 		}
 
 		clusters = append(clusters, row)
