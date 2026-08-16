@@ -64,11 +64,49 @@
                    class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
         </label>
     </div>
-    <label class="block">
+    <!--
+        The address field doubles as a searchable combobox: typing filters
+        #zone-add-instance-list's own suggestions (already-registered,
+        unclaimed instances — see instanceSuggestion's own doc) below it,
+        and picking one fills the visible input plus the hidden
+        "existing-instance" field the server reads to adopt that Instance
+        instead of creating a new one (see zone.AddOptions.ExistingInstanceName's
+        own doc). Typing a fresh address instead just leaves that hidden
+        field empty, unchanged from before this picker existed.
+
+        Follows the WAI-ARIA "combobox with list autocomplete" pattern:
+        real DOM focus never leaves the input itself (every option below
+        carries tabindex="-1", so Tab moves straight to the next form field
+        instead of stepping through each suggestion one at a time — arrow
+        keys do that instead, moving a "virtual" active option tracked via
+        aria-selected/aria-activedescendant rather than actual focus).
+        Wiring lives in registry_content.html's own script block, delegated
+        off #zone-add-modal itself (which never gets swapped, unlike this
+        form) rather than rebound here on every submission's own re-render.
+    -->
+    <label class="block relative">
         <span class="text-xs uppercase tracking-wider text-neutral-500">Talos address</span>
-        <input type="text" name="talos-address" value="{{.TalosAddress}}" required placeholder="10.0.0.5"
+        <input type="text" id="zone-add-instance-input" name="talos-address" value="{{.TalosAddress}}" required
+               placeholder="10.0.0.5" autocomplete="off"
+               {{if .InstanceSuggestions}}role="combobox" aria-autocomplete="list" aria-expanded="false"
+               aria-controls="zone-add-instance-list"{{end}}
                class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
-        <span class="mt-1 block text-xs text-neutral-600">Maintenance-mode address of the seed node.</span>
+        <input type="hidden" name="existing-instance" id="zone-add-instance-ref" value="{{.ExistingInstance}}">
+        {{if .InstanceSuggestions}}
+        <div id="zone-add-instance-list" role="listbox" aria-label="Registered instances"
+             class="hidden absolute left-0 right-0 mt-1 max-h-48 overflow-y-auto bg-neutral-900 border border-neutral-800 rounded-lg shadow-lg z-10">
+            {{range $i, $suggestion := .InstanceSuggestions}}
+            <button type="button" id="zone-add-instance-option-{{$i}}" role="option" aria-selected="false" tabindex="-1"
+                    data-instance-option data-instance-name="{{$suggestion.Name}}" data-instance-address="{{$suggestion.Address}}"
+                    class="block w-full text-left px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800 hover:text-white transition-colors">
+                <span class="block font-medium">{{$suggestion.Address}}</span>
+                <span class="block text-xs text-neutral-500">{{$suggestion.Name}}</span>
+            </button>
+            {{end}}
+            <p data-instance-empty aria-live="polite" class="hidden px-3 py-2 text-xs text-neutral-500">No matching instances — a new one will be registered from this address.</p>
+        </div>
+        {{end}}
+        <span class="mt-1 block text-xs text-neutral-600">Maintenance-mode address of the seed node — pick an already-registered instance below (arrow keys, Enter to choose), or type a new one.</span>
     </label>
     <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <label class="block">

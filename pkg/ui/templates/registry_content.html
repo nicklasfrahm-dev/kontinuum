@@ -169,6 +169,286 @@
         }
     });
 
+    // Talos address instance-picker (see zone_add_modal.html's own doc) —
+    // delegated off #zone-add-modal itself, which (unlike #zone-add-modal-body)
+    // never gets swapped, so this stays wired across every submission's own
+    // re-render without needing to rebind on each one. Follows the WAI-ARIA
+    // "combobox with list autocomplete" pattern: DOM focus stays on the
+    // input throughout (options are tabindex="-1" — see
+    // zone_add_modal.html), and "which option is highlighted" lives on the
+    // DOM itself (each option's own aria-selected) rather than in a JS
+    // variable, so it can't go stale across openZoneAddModal's own
+    // innerHTML reset.
+    (function () {
+        var addModal = document.getElementById('zone-add-modal');
+
+        function instanceInput() {
+            return document.getElementById('zone-add-instance-input');
+        }
+
+        function instanceList() {
+            return document.getElementById('zone-add-instance-list');
+        }
+
+        function isOpen(list) {
+            return !!list && !list.classList.contains('hidden');
+        }
+
+        function openList() {
+            var list = instanceList();
+            var input = instanceInput();
+            if (!list) {
+                return;
+            }
+
+            list.classList.remove('hidden');
+            if (input) {
+                input.setAttribute('aria-expanded', 'true');
+            }
+        }
+
+        function currentActive() {
+            var list = instanceList();
+            return list ? list.querySelector('[data-instance-option][aria-selected="true"]') : null;
+        }
+
+        // option may be null to clear the highlight entirely (list closed,
+        // or filtering left nothing active).
+        function setActive(option) {
+            var input = instanceInput();
+            var previous = currentActive();
+            if (previous) {
+                previous.setAttribute('aria-selected', 'false');
+                previous.classList.remove('bg-neutral-800', 'text-white');
+            }
+
+            if (!option) {
+                if (input) {
+                    input.removeAttribute('aria-activedescendant');
+                }
+
+                return;
+            }
+
+            option.setAttribute('aria-selected', 'true');
+            option.classList.add('bg-neutral-800', 'text-white');
+            option.scrollIntoView({ block: 'nearest' });
+            if (input) {
+                input.setAttribute('aria-activedescendant', option.id);
+            }
+        }
+
+        function closeList() {
+            var list = instanceList();
+            var input = instanceInput();
+            if (!list) {
+                return;
+            }
+
+            list.classList.add('hidden');
+            setActive(null);
+            if (input) {
+                input.setAttribute('aria-expanded', 'false');
+            }
+        }
+
+        function visibleOptions() {
+            var list = instanceList();
+            if (!list) {
+                return [];
+            }
+
+            return Array.from(list.querySelectorAll('[data-instance-option]')).filter(function (option) {
+                return !option.classList.contains('hidden');
+            });
+        }
+
+        // delta is +1 (ArrowDown) or -1 (ArrowUp) — wraps around either
+        // end, and opens the list first if it wasn't already, same as a
+        // native <select>'s own arrow-key behavior.
+        function moveActive(delta) {
+            var options = visibleOptions();
+            if (options.length === 0) {
+                return;
+            }
+
+            openList();
+
+            var active = currentActive();
+            var index = active ? options.indexOf(active) : -1;
+            index = index === -1 ? (delta > 0 ? 0 : options.length - 1) : (index + delta + options.length) % options.length;
+            setActive(options[index]);
+        }
+
+        function selectOption(option) {
+            var input = instanceInput();
+            var ref = document.getElementById('zone-add-instance-ref');
+            if (input) {
+                input.value = option.getAttribute('data-instance-address');
+            }
+            if (ref) {
+                ref.value = option.getAttribute('data-instance-name');
+            }
+
+            closeList();
+            if (input) {
+                input.focus();
+            }
+        }
+
+        // focus/blur don't bubble, so both need the capture phase to
+        // observe them via one delegated listener rather than binding
+        // directly to an input that gets replaced on every swap.
+        addModal.addEventListener('focus', function (event) {
+            if (event.target && event.target.id === 'zone-add-instance-input') {
+                openList();
+            }
+        }, true);
+
+        // Closing here — not just on an "outside click" — is what makes
+        // Tab (not only a mouse click elsewhere) dismiss the list. A click
+        // on a suggestion itself never reaches here: its own mousedown
+        // handler below keeps focus on the input the whole time, so no
+        // blur ever fires for it.
+        addModal.addEventListener('blur', function (event) {
+            if (event.target && event.target.id === 'zone-add-instance-input') {
+                closeList();
+            }
+        }, true);
+
+        addModal.addEventListener('input', function (event) {
+            if (!event.target || event.target.id !== 'zone-add-instance-input') {
+                return;
+            }
+
+            // Any manual keystroke means "type a fresh address" — clear a
+            // previously-picked suggestion so the server creates a new
+            // Instance instead of silently adopting the one last clicked.
+            var ref = document.getElementById('zone-add-instance-ref');
+            if (ref) {
+                ref.value = '';
+            }
+
+            var list = instanceList();
+            if (!list) {
+                return;
+            }
+
+            openList();
+
+            var query = event.target.value.trim().toLowerCase();
+            var visible = 0;
+
+            list.querySelectorAll('[data-instance-option]').forEach(function (option) {
+                var haystack = (option.getAttribute('data-instance-address') + ' ' +
+                    option.getAttribute('data-instance-name')).toLowerCase();
+                var match = haystack.indexOf(query) !== -1;
+                option.classList.toggle('hidden', !match);
+                if (match) {
+                    visible++;
+                }
+            });
+
+            // The filtered set just changed under whichever option was
+            // highlighted — re-deriving from scratch on the next arrow
+            // press is simplest, rather than trying to carry a highlight
+            // that may have just been filtered out.
+            setActive(null);
+
+            var empty = list.querySelector('[data-instance-empty]');
+            if (empty) {
+                empty.classList.toggle('hidden', visible !== 0);
+            }
+        });
+
+        addModal.addEventListener('keydown', function (event) {
+            if (!event.target || event.target.id !== 'zone-add-instance-input') {
+                return;
+            }
+
+            var list = instanceList();
+            if (!list) {
+                return;
+            }
+
+            switch (event.key) {
+            case 'ArrowDown':
+                event.preventDefault();
+                moveActive(1);
+                break;
+            case 'ArrowUp':
+                event.preventDefault();
+                moveActive(-1);
+                break;
+            case 'Home':
+                if (isOpen(list)) {
+                    event.preventDefault();
+                    var first = visibleOptions()[0];
+                    if (first) {
+                        setActive(first);
+                    }
+                }
+                break;
+            case 'End':
+                if (isOpen(list)) {
+                    event.preventDefault();
+                    var options = visibleOptions();
+                    if (options.length > 0) {
+                        setActive(options[options.length - 1]);
+                    }
+                }
+                break;
+            case 'Enter':
+                var active = currentActive();
+                if (isOpen(list) && active) {
+                    // A highlighted suggestion wins over submitting the
+                    // form with whatever's currently typed.
+                    event.preventDefault();
+                    selectOption(active);
+                }
+                break;
+            case 'Escape':
+                if (isOpen(list)) {
+                    closeList();
+                }
+                break;
+            default:
+                break;
+            }
+        });
+
+        // <dialog> closes itself on Escape by default; while the instance
+        // list is open, the first Escape should only close *that* (handled
+        // by the keydown listener above) — this intercepts the dialog's
+        // own "cancel" event to stop it from also closing the whole "Add
+        // zone" dialog in the same keypress, so a second Escape is what
+        // actually dismisses it.
+        addModal.addEventListener('cancel', function (event) {
+            if (isOpen(instanceList())) {
+                event.preventDefault();
+            }
+        });
+
+        // A suggestion's own mousedown is suppressed first — otherwise the
+        // browser would blur #zone-add-instance-input (moving focus onto
+        // the button) before the click ever fires, and the blur listener
+        // above would close the list out from under it. Keeping focus on
+        // the input throughout is also what the WAI-ARIA combobox pattern
+        // itself expects: real DOM focus never actually leaves it.
+        addModal.addEventListener('mousedown', function (event) {
+            if (event.target.closest('[data-instance-option]')) {
+                event.preventDefault();
+            }
+        });
+
+        addModal.addEventListener('click', function (event) {
+            var option = event.target.closest('[data-instance-option]');
+            if (option) {
+                selectOption(option);
+            }
+        });
+    })();
+
     // handleZoneAdd's success response swaps in a hidden
     // [data-toast-prefix] marker rather than a message rendered inline
     // (see zone_add_modal.html) — close the dialog and surface it as a

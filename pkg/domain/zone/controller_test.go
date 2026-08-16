@@ -30,6 +30,7 @@ const (
 	testRegion        = "eu"
 	testZone          = "eu-1a"
 	testDomain        = "kontinuum.example.com"
+	testTalosAddress  = "10.0.0.5"
 	testRetryInterval = 15 * time.Second
 	testImage         = "ghcr.io/nicklasfrahm/kontinuum:test"
 

@@ -4,18 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"hash/fnv"
-	"strconv"
+	"maps"
 
-	"github.com/davecgh/go-spew/spew"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
+	instancedomain "github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
 )
 
 // AddOptions is zone-add's fan-out input — pkg/cli/zone's flags and pkg/ui's
@@ -46,6 +44,16 @@ type AddOptions struct {
 	// doc. Defaults to false: this zone's instances stay in inventory,
 	// reset but claimable again, when the zone is later removed.
 	UnregisterInstancesOnDelete bool
+	// ExistingInstanceName, when set, names an already-registered, unclaimed
+	// Instance in v1alpha2.KontinuumSystemNamespace to adopt as this zone's
+	// seed Instance instead of creating a new one from TalosAddress — see
+	// issue #81: the UI's "Add zone" modal sets this when its own
+	// instance-picker suggestion is chosen, rather than a freshly typed
+	// address. TalosAddress is still shown/submitted alongside it purely for
+	// display; Add itself only ever reads the adopted Instance's own
+	// spec.interfaces once claimed. Left empty (the common case), Add
+	// creates a brand-new Instance from TalosAddress exactly as before.
+	ExistingInstanceName string
 }
 
 var (
@@ -58,6 +66,11 @@ var (
 	// both become part of an object name (<region>-<zone>) and a label
 	// value (v1alpha2.LabelRegion/LabelZone).
 	errAddOptionsInvalidLabel = errors.New("zone add: invalid value")
+	// errInstanceAlreadyClaimed is adoptInstance's sentinel for
+	// ExistingInstanceName already carrying a v1alpha2.LabelClaimedBy label
+	// — picking an instance-picker suggestion that another zone claimed out
+	// from under it between the modal opening and this submission.
+	errInstanceAlreadyClaimed = errors.New("zone add: instance already claimed")
 )
 
 // validateAddOptions checks that every required field is set and that
@@ -88,39 +101,6 @@ func addObjectName(opts AddOptions) string {
 	return opts.Region + "-" + opts.Zone
 }
 
-// instanceHash derives a short, deterministic suffix for the seed
-// Instance's name from its full spec, using the same algorithm a
-// Kubernetes Deployment uses to derive a ReplicaSet's own
-// pod-template-hash suffix from its pod template
-// (controller.ComputeHash, in k8s.io/kubernetes/pkg/controller). That
-// function itself isn't importable here without pulling in the whole
-// k8s.io/kubernetes module — a much heavier, independently-versioned
-// dependency this repo has no other reason to take — so this reimplements
-// its own two building blocks directly: DeepHashObject's spew.Fprintf-based
-// deep dump (go-spew is already an indirect dependency here via
-// client-go/apimachinery's own test helpers, and DeepHashObject's exact
-// spew.ConfigState — Indent " ", SortKeys/DisableMethods/SpewKeys true — is
-// public knowledge, reproduced below) hashed with FNV-1a-32 (hash/fnv, not
-// a cryptographic hash — collision-resistance against an adversary was
-// never the goal, just a short, stable, low-collision identity), then
-// encoded with k8s.io/apimachinery/pkg/util/rand.SafeEncodeString — the
-// exact same function ComputeHash itself calls, genuinely imported rather
-// than reimplemented, since it already lives in our existing apimachinery
-// dependency. Re-running zone-add with a spec that's since changed (e.g. a
-// different --talos-address) for the same region/zone then gets a new
-// Instance identity instead of colliding with, or silently leaving stale,
-// the old one.
-func instanceHash(spec v1alpha2.InstanceSpec) string {
-	spewConfig := spew.ConfigState{Indent: " ", SortKeys: true, DisableMethods: true, SpewKeys: true}
-
-	hasher := fnv.New32a()
-	// hash.Hash's Write (which Fprintf calls into) never returns an error,
-	// by that interface's own documented contract.
-	_, _ = spewConfig.Fprintf(hasher, "%#v", spec)
-
-	return rand.SafeEncodeString(strconv.FormatUint(uint64(hasher.Sum32()), 10))
-}
-
 // BuildAddObjects builds (without creating) the four hub-side objects
 // zone-add fans out to — see issue #29's architecture: Zone, the seed
 // Instance, a replicas:1 InstancePool selecting it, and a TalosCluster
@@ -128,11 +108,16 @@ func instanceHash(spec v1alpha2.InstanceSpec) string {
 // all share one name, <region>-<zone> — this is what lets the Zone
 // controller find "its" TalosCluster by name alone (see controller.go's
 // mapTalosClusterToZone), and matches the naming convention Addon's own
-// resourceName already assumes (see pkg/domain/addon/resources.go). The
-// seed Instance gets its own name, <region>-<zone>-<hash> (see
-// instanceHash), since Instance is a distinct Kind — no collision risk with
-// the other three — but is labeled v1alpha2.LabelRegion/LabelZone so the
-// InstancePool's selector matches it.
+// resourceName already assumes (see pkg/domain/addon/resources.go). The seed
+// Instance instead gets instancedomain.NameFromAddress(opts.TalosAddress) —
+// the exact same name pkg/domain/instance.Add's own standalone registration
+// derives for that same address (see issue #81) — rather than a name of its
+// own scoped under <region>-<zone>, so the two ways of registering an
+// Instance always converge on one shared object identity for a given
+// address instead of each silently creating its own duplicate. It's still
+// labeled v1alpha2.LabelRegion/LabelZone so the InstancePool's selector
+// matches it; ensureSeedInstance's own doc covers what happens when that
+// name already belongs to an Instance created some other way.
 // All four are namespaced into v1alpha2.KontinuumSystemNamespace
 // ("kontinuum-system") — the admin-driven, system-managed namespace issue
 // #63's architecture reserves for zone-join's own objects, as opposed to a
@@ -152,7 +137,8 @@ func BuildAddObjects(
 
 	instance := &v1alpha2.Instance{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: name + "-" + instanceHash(instanceSpec), Namespace: v1alpha2.KontinuumSystemNamespace, Labels: labels,
+			Name:      instancedomain.NameFromAddress(opts.TalosAddress),
+			Namespace: v1alpha2.KontinuumSystemNamespace, Labels: labels,
 		},
 		Spec: instanceSpec,
 	}
@@ -234,13 +220,81 @@ func Add(ctx context.Context, hubClient client.Client, opts AddOptions) (*v1alph
 
 	// Instance is owned by nobody — see TeardownSpec's own doc for why its
 	// fate on cluster teardown is an explicit opt-in, not inferred from
-	// ownership.
-	err = hubClient.Create(ctx, instance)
-	if err != nil && !apierrors.IsAlreadyExists(err) {
-		return nil, fmt.Errorf("failed to create %T %q: %w", instance, instance.GetName(), err)
+	// ownership. See ensureSeedInstance's own doc for the
+	// create-new-vs-adopt-existing branch (opts.ExistingInstanceName).
+	err = ensureSeedInstance(ctx, hubClient, opts, instance)
+	if err != nil {
+		return nil, err
 	}
 
 	return zoneObj, nil
+}
+
+// ensureSeedInstance ensures newInstance's own identity exists and carries
+// this zone's own region/zone labels — either explicitly, via
+// opts.ExistingInstanceName naming an already-registered Instance to adopt
+// (see adoptInstance's own doc) instead of creating a second one, or
+// implicitly: newInstance.Name is now instancedomain.NameFromAddress(opts.TalosAddress)
+// (see BuildAddObjects' own doc), the exact same name a standalone "Add
+// instance" registration for that same address would also use, so a freshly
+// typed address that happens to already be registered that way — or left
+// over, unclaimed, from a previous zone (see instancepool.Reconciler's own
+// release, which strips only v1alpha2.LabelClaimedBy) — must be adopted the
+// same way an explicit pick would be, not just left unlabeled the way a bare
+// tolerate-AlreadyExists create used to leave it.
+func ensureSeedInstance(
+	ctx context.Context, hubClient client.Client, opts AddOptions, newInstance *v1alpha2.Instance,
+) error {
+	if opts.ExistingInstanceName != "" {
+		return adoptInstance(ctx, hubClient, opts.ExistingInstanceName, newInstance.Labels)
+	}
+
+	err := hubClient.Create(ctx, newInstance)
+	if err == nil {
+		return nil
+	}
+
+	if !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("failed to create %T %q: %w", newInstance, newInstance.GetName(), err)
+	}
+
+	return adoptInstance(ctx, hubClient, newInstance.Name, newInstance.Labels)
+}
+
+// adoptInstance fetches the already-registered Instance named name (in
+// v1alpha2.KontinuumSystemNamespace, where every zone-add Instance lives —
+// see BuildAddObjects' own doc), rejects it if some other pool has already
+// claimed it out from under this submission (errInstanceAlreadyClaimed), and
+// merges labels (region/zone) onto it so the new InstancePool's selector
+// matches it — overwriting any stale region/zone pair left over from a
+// previous zone that has since released it (see instancepool.Reconciler's
+// own release, which strips only v1alpha2.LabelClaimedBy, not region/zone).
+func adoptInstance(ctx context.Context, hubClient client.Client, name string, labels map[string]string) error {
+	var inst v1alpha2.Instance
+
+	key := client.ObjectKey{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace}
+
+	err := hubClient.Get(ctx, key, &inst)
+	if err != nil {
+		return fmt.Errorf("failed to fetch existing instance %q: %w", name, err)
+	}
+
+	if _, claimed := inst.Labels[v1alpha2.LabelClaimedBy]; claimed {
+		return fmt.Errorf("%w: %q", errInstanceAlreadyClaimed, name)
+	}
+
+	if inst.Labels == nil {
+		inst.Labels = map[string]string{}
+	}
+
+	maps.Copy(inst.Labels, labels)
+
+	err = hubClient.Update(ctx, &inst)
+	if err != nil {
+		return fmt.Errorf("failed to label existing instance %q: %w", name, err)
+	}
+
+	return nil
 }
 
 // ensureObject creates obj, or — if it already exists — re-fetches it so

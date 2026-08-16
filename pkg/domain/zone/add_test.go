@@ -1,7 +1,6 @@
 package zone_test
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -15,13 +14,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
+	instancedomain "github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/zone"
 )
 
 // getSeedInstance finds Add's seed Instance by its region/zone labels
-// rather than a precomputed name — the name's hash suffix (see
-// zone.instanceHash) is an implementation detail tests shouldn't need to
-// reproduce.
+// rather than by name — its name is instance.NameFromAddress(TalosAddress)
+// (see BuildAddObjects' own doc), an implementation detail tests shouldn't
+// need to reproduce by hand.
 func getSeedInstance(t *testing.T, hubClient client.Client) v1alpha2.Instance {
 	t.Helper()
 
@@ -52,7 +52,7 @@ func testAddOptions() zone.AddOptions {
 		Region:       testRegion,
 		Zone:         testZone,
 		Domain:       testDomain,
-		TalosAddress: "10.0.0.5",
+		TalosAddress: testTalosAddress,
 	}
 }
 
@@ -64,19 +64,19 @@ func TestBuildAddObjectsSharesNameAcrossZoneInstancePoolAndTalosCluster(t *testi
 	assert.Equal(t, testZoneName, zoneObj.Name)
 	assert.Equal(t, testZoneName, pool.Name)
 	assert.Equal(t, testZoneName, cluster.Name)
-	assert.True(t, strings.HasPrefix(instance.Name, testZoneName+"-"),
-		"instance name %q should be prefixed with %q-", instance.Name, testZoneName)
-	// rand.SafeEncodeString encodes an FNV-32a sum's decimal digits 1:1, so
-	// the suffix is 1-10 chars (a uint32's max decimal width) drawn from its
-	// collision-safe alphabet (no vowels or visually-ambiguous characters).
-	hashSuffix := strings.TrimPrefix(instance.Name, testZoneName+"-")
-	assert.Regexp(t, `^[bcdfghjklmnpqrstvwxz2456789]{1,10}$`, hashSuffix)
+	// The seed Instance's own name is deliberately *not* scoped under
+	// testZoneName — see BuildAddObjects' own doc: it must match whatever
+	// instancedomain.NameFromAddress derives for the same TalosAddress, the
+	// exact same name a standalone "Add instance" registration for that
+	// address would also use, so the two never independently duplicate one
+	// another.
+	assert.Equal(t, instancedomain.NameFromAddress(testTalosAddress), instance.Name)
 
 	assert.Equal(t, testRegion, zoneObj.Spec.Region)
 	assert.Equal(t, testZone, zoneObj.Spec.Zone)
 	assert.Equal(t, testDomain, zoneObj.Spec.Domain)
 
-	assert.Equal(t, []string{"10.0.0.5"}, instance.Spec.Interfaces)
+	assert.Equal(t, []string{testTalosAddress}, instance.Spec.Interfaces)
 	assert.Equal(t, testRegion, instance.Labels[v1alpha2.LabelRegion])
 	assert.Equal(t, testZone, instance.Labels[v1alpha2.LabelZone])
 
@@ -112,13 +112,18 @@ func TestBuildAddObjectsThreadsUnregisterInstancesOnDeleteToClusterSpec(t *testi
 // same address must hash to the same name every time (re-running zone-add
 // is idempotent, see Add's own doc), and a different address must hash to
 // a different name (rather than colliding with, or silently leaving stale,
-// the old Instance).
+// the old Instance) — and, critically, that name must match
+// instancedomain.NameFromAddress's own output for the same address exactly
+// (see BuildAddObjects' own doc), not merely be internally consistent
+// within this package.
 func TestBuildAddObjectsInstanceNameHashesTalosAddress(t *testing.T) {
 	t.Parallel()
 
 	opts := testAddOptions()
 
 	firstZone, firstInstance, firstPool, firstCluster := zone.BuildAddObjects(opts)
+	assert.Equal(t, instancedomain.NameFromAddress(opts.TalosAddress), firstInstance.Name)
+
 	secondZone, secondInstance, secondPool, secondCluster := zone.BuildAddObjects(opts)
 	assert.Equal(t, firstInstance.Name, secondInstance.Name)
 	assert.Equal(t, firstZone.Name, secondZone.Name)
@@ -129,6 +134,7 @@ func TestBuildAddObjectsInstanceNameHashesTalosAddress(t *testing.T) {
 	thirdZone, thirdInstance, thirdPool, thirdCluster := zone.BuildAddObjects(opts)
 	assert.NotEqual(t, firstInstance.Name, thirdInstance.Name,
 		"a different --talos-address must get a new Instance identity")
+	assert.Equal(t, instancedomain.NameFromAddress(opts.TalosAddress), thirdInstance.Name)
 	assert.Equal(t, firstZone.Name, thirdZone.Name, "Zone/InstancePool/TalosCluster names don't depend on the spec hash")
 	assert.Equal(t, firstPool.Name, thirdPool.Name)
 	assert.Equal(t, firstCluster.Name, thirdCluster.Name)
@@ -303,4 +309,150 @@ func TestAddFailsWhenNoKontinuumRegisteredAtAllForDomainInference(t *testing.T) 
 	_, err := zone.Add(t.Context(), hubClient, opts)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no registered kontinuum found")
+}
+
+// preRegisteredInstance is an already-registered, unclaimed Instance in
+// v1alpha2.KontinuumSystemNamespace — the fixture every ExistingInstanceName
+// test below adopts, standing in for one created via instance.Add's own
+// standalone "Add instance" flow (see issue #81).
+func preRegisteredInstance(name string, labels map[string]string) *v1alpha2.Instance {
+	return &v1alpha2.Instance{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace, Labels: labels},
+		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{"10.0.0.9"}},
+	}
+}
+
+func TestAddAdoptsExistingInstanceInsteadOfCreatingANewOne(t *testing.T) {
+	t.Parallel()
+
+	existing := preRegisteredInstance("instance-preexisting", nil)
+	hubClient := newHubFakeClient(t, existing)
+
+	opts := testAddOptions()
+	opts.ExistingInstanceName = existing.Name
+
+	_, err := zone.Add(t.Context(), hubClient, opts)
+	require.NoError(t, err)
+
+	var list v1alpha2.InstanceList
+	require.NoError(t, hubClient.List(t.Context(), &list, client.InNamespace(v1alpha2.KontinuumSystemNamespace)))
+	require.Len(t, list.Items, 1, "adopting an existing instance must not also create a new one")
+
+	assert.Equal(t, existing.Name, list.Items[0].Name)
+	assert.Equal(t, testRegion, list.Items[0].Labels[v1alpha2.LabelRegion])
+	assert.Equal(t, testZone, list.Items[0].Labels[v1alpha2.LabelZone])
+	assert.Equal(t, []string{"10.0.0.9"}, list.Items[0].Spec.Interfaces,
+		"adoption must not touch the existing instance's own discovered address")
+}
+
+// TestAddOverwritesStaleLabelsOnAdoptedInstance covers reusing an Instance
+// released from a since-torn-down zone (see instancepool.Reconciler's own
+// release, which strips v1alpha2.LabelClaimedBy but leaves the old
+// region/zone pair behind) — adopting it into a new zone must relabel it,
+// not leave it pointing at the old one, or the new InstancePool's own
+// selector would never match it.
+func TestAddOverwritesStaleLabelsOnAdoptedInstance(t *testing.T) {
+	t.Parallel()
+
+	existing := preRegisteredInstance("instance-released",
+		map[string]string{v1alpha2.LabelRegion: "old-region", v1alpha2.LabelZone: "old-zone"})
+	hubClient := newHubFakeClient(t, existing)
+
+	opts := testAddOptions()
+	opts.ExistingInstanceName = existing.Name
+
+	_, err := zone.Add(t.Context(), hubClient, opts)
+	require.NoError(t, err)
+
+	var got v1alpha2.Instance
+	require.NoError(t, hubClient.Get(t.Context(),
+		client.ObjectKey{Name: existing.Name, Namespace: v1alpha2.KontinuumSystemNamespace}, &got))
+	assert.Equal(t, testRegion, got.Labels[v1alpha2.LabelRegion])
+	assert.Equal(t, testZone, got.Labels[v1alpha2.LabelZone])
+}
+
+func TestAddRejectsAlreadyClaimedExistingInstance(t *testing.T) {
+	t.Parallel()
+
+	existing := preRegisteredInstance("instance-claimed",
+		map[string]string{v1alpha2.LabelClaimedBy: "some-other-pool"})
+	hubClient := newHubFakeClient(t, existing)
+
+	opts := testAddOptions()
+	opts.ExistingInstanceName = existing.Name
+
+	_, err := zone.Add(t.Context(), hubClient, opts)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already claimed")
+}
+
+func TestAddRejectsMissingExistingInstance(t *testing.T) {
+	t.Parallel()
+
+	hubClient := newHubFakeClient(t)
+
+	opts := testAddOptions()
+	opts.ExistingInstanceName = "does-not-exist"
+
+	_, err := zone.Add(t.Context(), hubClient, opts)
+	require.Error(t, err)
+}
+
+// TestAddAdoptsInstanceRegisteredStandaloneForTheSameAddress covers issue
+// #81's own naming unification end to end: a freshly typed TalosAddress (no
+// ExistingInstanceName — the ordinary "type a new one" path, not the
+// instance-picker) that happens to match an address already registered via
+// instance.Add's own standalone "Add instance" flow must adopt that exact
+// object, not create a byte-for-byte duplicate under a second name — because
+// both now derive an Instance's name from its address identically (see
+// BuildAddObjects' own doc).
+func TestAddAdoptsInstanceRegisteredStandaloneForTheSameAddress(t *testing.T) {
+	t.Parallel()
+
+	existing := &v1alpha2.Instance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: instancedomain.NameFromAddress(testTalosAddress), Namespace: v1alpha2.KontinuumSystemNamespace,
+		},
+		Spec: v1alpha2.InstanceSpec{Interfaces: []string{testTalosAddress}},
+	}
+	hubClient := newHubFakeClient(t, existing)
+
+	opts := testAddOptions()
+	opts.TalosAddress = testTalosAddress
+
+	_, err := zone.Add(t.Context(), hubClient, opts)
+	require.NoError(t, err)
+
+	var list v1alpha2.InstanceList
+	require.NoError(t, hubClient.List(t.Context(), &list, client.InNamespace(v1alpha2.KontinuumSystemNamespace)))
+	require.Len(t, list.Items, 1, "a freeform address matching an already-registered instance must not duplicate it")
+
+	assert.Equal(t, existing.Name, list.Items[0].Name)
+	assert.Equal(t, testRegion, list.Items[0].Labels[v1alpha2.LabelRegion])
+	assert.Equal(t, testZone, list.Items[0].Labels[v1alpha2.LabelZone])
+}
+
+// TestAddRejectsAlreadyClaimedInstanceRegisteredStandaloneForTheSameAddress
+// is TestAddRejectsAlreadyClaimedExistingInstance's own counterpart for the
+// freeform-address collision path above: an already-claimed Instance whose
+// name happens to collide with the typed address must still be rejected,
+// not silently left claimed by whichever pool got there first.
+func TestAddRejectsAlreadyClaimedInstanceRegisteredStandaloneForTheSameAddress(t *testing.T) {
+	t.Parallel()
+
+	existing := &v1alpha2.Instance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: instancedomain.NameFromAddress(testTalosAddress), Namespace: v1alpha2.KontinuumSystemNamespace,
+			Labels: map[string]string{v1alpha2.LabelClaimedBy: "some-other-pool"},
+		},
+		Spec: v1alpha2.InstanceSpec{Interfaces: []string{testTalosAddress}},
+	}
+	hubClient := newHubFakeClient(t, existing)
+
+	opts := testAddOptions()
+	opts.TalosAddress = testTalosAddress
+
+	_, err := zone.Add(t.Context(), hubClient, opts)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already claimed")
 }
