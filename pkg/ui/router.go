@@ -249,7 +249,7 @@ func NewRouter(
 			"templates/components/icon_info.html", "templates/components/icon_download.html",
 			"templates/components/reveal_panel.html", "templates/components/reveal_panel_script.html"),
 		pageInstances: mustParsePage("templates/instances_content.html",
-			"templates/components/icon_ethernet_port.html", "templates/components/instance_add_modal.html"),
+			"templates/components/icon_server_plus.html", "templates/components/instance_add_modal.html"),
 		pageInstanceDetail: mustParsePage("templates/instance_detail_content.html",
 			"templates/components/icon_chevron_left.html", "templates/components/icon_info.html",
 			"templates/components/icon_ethernet_port.html", "templates/components/icon_list_checks.html",
