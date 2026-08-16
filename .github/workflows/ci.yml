@@ -125,12 +125,18 @@ jobs:
       # root-relative paths), so --remap sends them to this same local
       # build instead of the live site, which a PR adding a brand-new page
       # would otherwise 404 against until merged and deployed.
+      #
+      # --max-retries and --retry-wait-time raise lychee's (already-retrying)
+      # defaults of 3 tries / 1s backoff, since transient failures against
+      # external sites (e.g. connection resets) were still slipping through
+      # and failing PR builds. See #98.
       - name: Check for broken links
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
           args: >-
             --no-progress --exclude-loopback --root-dir ${{ github.workspace }}/site
             --remap "https://docs.kontinuum.sh file://${{ github.workspace }}/site"
+            --max-retries 5 --retry-wait-time 5
             site
           token: ${{ secrets.GITHUB_TOKEN }}
           fail: true
