@@ -1795,6 +1795,11 @@ func TestRegistryPageEmbedsAddZoneButtonAndEmptyModal(t *testing.T) {
 	assert.Contains(t, string(body), `id="zone-add-modal"`)
 	assert.Contains(t, string(body), `name="talos-address"`)
 	assert.NotContains(t, string(body), "Cluster provisioning is now underway")
+	// No suggestions (zoneFactory's own empty fake client) means no
+	// listbox is rendered at all — the address input must not declare
+	// combobox semantics pointing at an element that doesn't exist.
+	assert.NotContains(t, string(body), `role="combobox"`)
+	assert.NotContains(t, string(body), `id="zone-add-instance-list"`)
 }
 
 func TestHandleZoneAddCreatesZoneAndReturnsSuccessFragment(t *testing.T) {
@@ -2186,6 +2191,16 @@ func TestRegistryPageRendersInstanceSuggestionsInDropdown(t *testing.T) {
 	assert.Contains(t, string(body), `data-instance-name="instance-unclaimed"`)
 	assert.Contains(t, string(body), `data-instance-address="`+testExistingInstanceAddress+`"`)
 	assert.NotContains(t, string(body), `data-instance-name="instance-claimed"`)
+	// The instance-picker's own accessibility wiring (see zone_add_modal.html's
+	// own doc: DOM focus never leaves the address input — options are
+	// tabindex="-1" so Tab moves to the next form field instead of
+	// stepping through each suggestion — arrow keys highlight a "virtual"
+	// active option via aria-selected/aria-activedescendant instead).
+	assert.Contains(t, string(body), `role="combobox"`)
+	assert.Contains(t, string(body), `aria-controls="zone-add-instance-list"`)
+	assert.Contains(t, string(body), `role="listbox"`)
+	assert.Contains(t, string(body), `role="option"`)
+	assert.Contains(t, string(body), `tabindex="-1"`)
 }
 
 // TestHandleZoneAddAdoptsExistingInstanceInstead covers the "Add zone"
