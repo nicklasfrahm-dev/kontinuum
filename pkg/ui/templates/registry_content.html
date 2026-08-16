@@ -169,6 +169,102 @@
         }
     });
 
+    // Talos address instance-picker (see zone_add_modal.html's own doc) —
+    // delegated off #zone-add-modal itself, which (unlike #zone-add-modal-body)
+    // never gets swapped, so this stays wired across every submission's own
+    // re-render without needing to rebind on each one.
+    (function () {
+        var addModal = document.getElementById('zone-add-modal');
+
+        function instanceList() {
+            return document.getElementById('zone-add-instance-list');
+        }
+
+        // focus doesn't bubble, so this needs the capture phase to observe
+        // it via a single delegated listener rather than binding directly
+        // to an input that gets replaced on every swap.
+        addModal.addEventListener('focus', function (event) {
+            if (event.target && event.target.id === 'zone-add-instance-input') {
+                var list = instanceList();
+                if (list) {
+                    list.classList.remove('hidden');
+                }
+            }
+        }, true);
+
+        addModal.addEventListener('input', function (event) {
+            if (!event.target || event.target.id !== 'zone-add-instance-input') {
+                return;
+            }
+
+            // Any manual keystroke means "type a fresh address" — clear a
+            // previously-picked suggestion so the server creates a new
+            // Instance instead of silently adopting the one last clicked.
+            var ref = document.getElementById('zone-add-instance-ref');
+            if (ref) {
+                ref.value = '';
+            }
+
+            var list = instanceList();
+            if (!list) {
+                return;
+            }
+
+            list.classList.remove('hidden');
+
+            var query = event.target.value.trim().toLowerCase();
+            var options = list.querySelectorAll('[data-instance-option]');
+            var visible = 0;
+
+            options.forEach(function (option) {
+                var haystack = (option.getAttribute('data-instance-address') + ' ' +
+                    option.getAttribute('data-instance-name')).toLowerCase();
+                var match = haystack.indexOf(query) !== -1;
+                option.classList.toggle('hidden', !match);
+                if (match) {
+                    visible++;
+                }
+            });
+
+            var empty = list.querySelector('[data-instance-empty]');
+            if (empty) {
+                empty.classList.toggle('hidden', visible !== 0);
+            }
+        });
+
+        // A single click handler covers both picking a suggestion (setting
+        // the visible input and the hidden existing-instance field
+        // together, since programmatic value assignment fires no further
+        // 'input' event to race against) and dismissing the list on any
+        // other click, so there's no separate blur-vs-click ordering to
+        // get wrong.
+        document.addEventListener('click', function (event) {
+            var list = instanceList();
+            if (!list) {
+                return;
+            }
+
+            var option = event.target.closest('[data-instance-option]');
+            if (option && list.contains(option)) {
+                var input = document.getElementById('zone-add-instance-input');
+                var ref = document.getElementById('zone-add-instance-ref');
+                if (input) {
+                    input.value = option.getAttribute('data-instance-address');
+                }
+                if (ref) {
+                    ref.value = option.getAttribute('data-instance-name');
+                }
+                list.classList.add('hidden');
+
+                return;
+            }
+
+            if (event.target.id !== 'zone-add-instance-input') {
+                list.classList.add('hidden');
+            }
+        });
+    })();
+
     // handleZoneAdd's success response swaps in a hidden
     // [data-toast-prefix] marker rather than a message rendered inline
     // (see zone_add_modal.html) — close the dialog and surface it as a

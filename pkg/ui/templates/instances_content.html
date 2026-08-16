@@ -1,13 +1,20 @@
 {{define "content"}}
 <div id="instances-content" hx-get="/app/kontinuum.sh/namespaces/{{.Namespace}}/instances" hx-trigger="every 15s" hx-select="#instances-content" hx-swap="outerHTML" hx-disinherit="hx-select hx-swap">
-    <div class="mb-6 flex items-center gap-4">
-        <div class="text-accent [&>svg]:h-10 [&>svg]:w-10">
-            {{template "icon-server"}}
+    <div class="mb-6 flex items-center justify-between gap-4">
+        <div class="flex items-center gap-4">
+            <div class="text-accent [&>svg]:h-10 [&>svg]:w-10">
+                {{template "icon-server"}}
+            </div>
+            <div>
+                <h1 class="text-xl font-bold text-white">Instances</h1>
+                <p class="mt-1 text-sm text-neutral-500">Bare-metal and provider-backed machines discovered for InstancePool/TalosCluster to claim, in the <span class="text-neutral-300 font-medium">{{.Namespace}}</span> tenant.</p>
+            </div>
         </div>
-        <div>
-            <h1 class="text-xl font-bold text-white">Instances</h1>
-            <p class="mt-1 text-sm text-neutral-500">Bare-metal and provider-backed machines discovered for InstancePool/TalosCluster to claim, in the <span class="text-neutral-300 font-medium">{{.Namespace}}</span> tenant.</p>
-        </div>
+        <button type="button" onclick="openInstanceAddModal()"
+                class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium uppercase tracking-wider rounded-lg bg-accent text-neutral-950 hover:bg-accent/90 transition-colors">
+            {{template "icon-ethernet-port"}}
+            Add instance
+        </button>
     </div>
 
     <div class="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
@@ -62,4 +69,55 @@
         {{end}}
     </div>
 </div>
+
+<!-- Deliberately outside #instances-content: that div's own 15s poll
+     (hx-swap="outerHTML" above) would otherwise wipe out an open dialog or
+     form the user is mid-typing (the "Add instance" modal), every time the
+     instance list refreshes — see registry_content.html's identical note
+     about its own "Add zone" modal. -->
+{{template "instance-add-modal" .}}
+
+<script>
+    // Captured once, before any submission can mutate
+    // #instance-add-modal-body — restored on every open so a previous
+    // success/error state (or partially-filled form) never lingers into a
+    // fresh "Add instance" attempt — mirrors registry_content.html's
+    // identical zoneAddModalPristineHTML pattern.
+    var instanceAddModalPristineHTML = document.getElementById('instance-add-modal-body').innerHTML;
+
+    function openInstanceAddModal() {
+        var body = document.getElementById('instance-add-modal-body');
+        body.innerHTML = instanceAddModalPristineHTML;
+        // Raw innerHTML assignment doesn't run through htmx's own swap
+        // pipeline, so the freshly-inserted <form>'s hx-post would
+        // otherwise never get bound — htmx.process wires it up exactly as
+        // if this had been a normal htmx-driven swap.
+        htmx.process(body);
+        document.getElementById('instance-add-modal').showModal();
+    }
+
+    // <dialog> has no built-in "click outside to close" — close only when
+    // the click lands on the dialog element itself (the backdrop area), not
+    // when it bubbles up from a click inside the dialog's own content.
+    document.getElementById('instance-add-modal').addEventListener('click', function (event) {
+        if (event.target === this) {
+            this.close();
+        }
+    });
+
+    // handleInstanceAdd's success response swaps in a hidden
+    // [data-toast-prefix] marker rather than a message rendered inline (see
+    // instance_add_modal.html) — close the dialog and surface it as a toast
+    // (see layout.html's showToast) instead of leaving the dialog open
+    // around a static success banner.
+    document.getElementById('instance-add-modal-body').addEventListener('htmx:afterSwap', function (event) {
+        var marker = event.target.querySelector('[data-toast-prefix]');
+        if (!marker) {
+            return;
+        }
+
+        document.getElementById('instance-add-modal').close();
+        showToast(marker.getAttribute('data-toast-prefix'), '', '');
+    });
+</script>
 {{end}}

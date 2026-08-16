@@ -304,3 +304,90 @@ func TestAddFailsWhenNoKontinuumRegisteredAtAllForDomainInference(t *testing.T) 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no registered kontinuum found")
 }
+
+// preRegisteredInstance is an already-registered, unclaimed Instance in
+// v1alpha2.KontinuumSystemNamespace — the fixture every ExistingInstanceName
+// test below adopts, standing in for one created via instance.Add's own
+// standalone "Add instance" flow (see issue #81).
+func preRegisteredInstance(name string, labels map[string]string) *v1alpha2.Instance {
+	return &v1alpha2.Instance{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace, Labels: labels},
+		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{"10.0.0.9"}},
+	}
+}
+
+func TestAddAdoptsExistingInstanceInsteadOfCreatingANewOne(t *testing.T) {
+	t.Parallel()
+
+	existing := preRegisteredInstance("instance-preexisting", nil)
+	hubClient := newHubFakeClient(t, existing)
+
+	opts := testAddOptions()
+	opts.ExistingInstanceName = existing.Name
+
+	_, err := zone.Add(t.Context(), hubClient, opts)
+	require.NoError(t, err)
+
+	var list v1alpha2.InstanceList
+	require.NoError(t, hubClient.List(t.Context(), &list, client.InNamespace(v1alpha2.KontinuumSystemNamespace)))
+	require.Len(t, list.Items, 1, "adopting an existing instance must not also create a new one")
+
+	assert.Equal(t, existing.Name, list.Items[0].Name)
+	assert.Equal(t, testRegion, list.Items[0].Labels[v1alpha2.LabelRegion])
+	assert.Equal(t, testZone, list.Items[0].Labels[v1alpha2.LabelZone])
+	assert.Equal(t, []string{"10.0.0.9"}, list.Items[0].Spec.Interfaces,
+		"adoption must not touch the existing instance's own discovered address")
+}
+
+// TestAddOverwritesStaleLabelsOnAdoptedInstance covers reusing an Instance
+// released from a since-torn-down zone (see instancepool.Reconciler's own
+// release, which strips v1alpha2.LabelClaimedBy but leaves the old
+// region/zone pair behind) — adopting it into a new zone must relabel it,
+// not leave it pointing at the old one, or the new InstancePool's own
+// selector would never match it.
+func TestAddOverwritesStaleLabelsOnAdoptedInstance(t *testing.T) {
+	t.Parallel()
+
+	existing := preRegisteredInstance("instance-released",
+		map[string]string{v1alpha2.LabelRegion: "old-region", v1alpha2.LabelZone: "old-zone"})
+	hubClient := newHubFakeClient(t, existing)
+
+	opts := testAddOptions()
+	opts.ExistingInstanceName = existing.Name
+
+	_, err := zone.Add(t.Context(), hubClient, opts)
+	require.NoError(t, err)
+
+	var got v1alpha2.Instance
+	require.NoError(t, hubClient.Get(t.Context(),
+		client.ObjectKey{Name: existing.Name, Namespace: v1alpha2.KontinuumSystemNamespace}, &got))
+	assert.Equal(t, testRegion, got.Labels[v1alpha2.LabelRegion])
+	assert.Equal(t, testZone, got.Labels[v1alpha2.LabelZone])
+}
+
+func TestAddRejectsAlreadyClaimedExistingInstance(t *testing.T) {
+	t.Parallel()
+
+	existing := preRegisteredInstance("instance-claimed",
+		map[string]string{v1alpha2.LabelClaimedBy: "some-other-pool"})
+	hubClient := newHubFakeClient(t, existing)
+
+	opts := testAddOptions()
+	opts.ExistingInstanceName = existing.Name
+
+	_, err := zone.Add(t.Context(), hubClient, opts)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already claimed")
+}
+
+func TestAddRejectsMissingExistingInstance(t *testing.T) {
+	t.Parallel()
+
+	hubClient := newHubFakeClient(t)
+
+	opts := testAddOptions()
+	opts.ExistingInstanceName = "does-not-exist"
+
+	_, err := zone.Add(t.Context(), hubClient, opts)
+	require.Error(t, err)
+}

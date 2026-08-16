@@ -1,0 +1,66 @@
+{{/*
+    instance-add-modal is the instances page's own "Add instance" dialog —
+    see issue #81: registers a standalone, unclaimed Instance by address,
+    discovered asynchronously the same way zone-add's own seed Instance is
+    (see pkg/domain/instance.Add). A native <dialog> element, opened via the
+    header button's openInstanceAddModal() (see instances_content.html's own
+    script block) and closed via Escape, a backdrop click, or the header's
+    close button — mirrors zone_add_modal.html's own structure exactly,
+    right down to rendering outside #instances-content's own 15s poll so a
+    refresh of the instance list never resets or closes an in-progress
+    submission.
+*/}}
+{{define "instance-add-modal"}}
+<dialog id="instance-add-modal" class="bg-neutral-900 border border-neutral-800 rounded-xl p-0 w-full max-w-lg text-neutral-100 backdrop:bg-black/60">
+    <div class="px-6 py-3 border-b border-neutral-800 flex items-center justify-between gap-2">
+        <h2 class="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+            <span class="text-accent [&>svg]:h-4 [&>svg]:w-4">{{template "icon-ethernet-port"}}</span>
+            Add instance
+        </h2>
+        <button type="button" onclick="this.closest('dialog').close()"
+                class="text-neutral-500 hover:text-white transition-colors text-lg leading-none" aria-label="Close">
+            &times;
+        </button>
+    </div>
+    <div id="instance-add-modal-body" class="p-6">
+        {{template "instance-add-modal-body" .}}
+    </div>
+</dialog>
+{{end}}
+
+{{/*
+    instance-add-modal-body is the swappable part of the dialog above —
+    handleInstanceAdd's POST response replaces just
+    #instance-add-modal-body's innerHTML with this same template, executed
+    directly (see Router.renderInstanceAddModalBody) rather than through
+    layout.html.
+*/}}
+{{define "instance-add-modal-body"}}
+{{if .CreatedInstance}}
+{{/* A hidden marker, not a message rendered inline — instances_content.html's
+     own htmx:afterSwap listener on #instance-add-modal-body reads this,
+     closes the dialog, and surfaces the text as a toast instead — see
+     zone_add_modal.html's identical pattern for why. */}}
+<div data-toast-prefix="Registered instance {{.CreatedInstance}}. It stays unclaimed, discoverable, until a zone claims it." class="hidden"></div>
+{{else}}
+{{if .Error}}
+<div class="mb-4 bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 text-sm text-red-400">
+    {{.Error}}
+</div>
+{{end}}
+<form hx-post="/app/kontinuum.sh/namespaces/{{.Namespace}}/instances/add" hx-target="#instance-add-modal-body" hx-swap="innerHTML" class="space-y-4">
+    <label class="block">
+        <span class="text-xs uppercase tracking-wider text-neutral-500">Address</span>
+        <input type="text" name="address" value="{{.Address}}" required placeholder="10.0.0.5"
+               class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+        <span class="mt-1 block text-xs text-neutral-600">Maintenance-mode address of the candidate node. It will be discovered and registered, left unclaimed.</span>
+    </label>
+    <div class="flex justify-end pt-2">
+        <button type="submit"
+                class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg bg-accent text-neutral-950 hover:bg-accent/90 transition-colors">
+            Add instance
+        </button>
+    </div>
+</form>
+{{end}}
+{{end}}

@@ -248,7 +248,8 @@ func NewRouter(
 			"templates/components/icon_key.html",
 			"templates/components/icon_info.html", "templates/components/icon_download.html",
 			"templates/components/reveal_panel.html", "templates/components/reveal_panel_script.html"),
-		pageInstances: mustParsePage("templates/instances_content.html"),
+		pageInstances: mustParsePage("templates/instances_content.html",
+			"templates/components/icon_ethernet_port.html", "templates/components/instance_add_modal.html"),
 		pageInstanceDetail: mustParsePage("templates/instance_detail_content.html",
 			"templates/components/icon_chevron_left.html", "templates/components/icon_info.html",
 			"templates/components/icon_ethernet_port.html", "templates/components/icon_list_checks.html",
@@ -331,6 +332,7 @@ func (r *Router) RegisterRoutes(
 	mux.HandleFunc("POST /app/zones/add", wrap(r.handleZoneAdd))
 	mux.HandleFunc("DELETE /app/kontinuum.sh/namespaces/{ns}/zones/{name}", wrap(r.handleDeleteZone))
 	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/instances", wrap(r.handleInstances))
+	mux.HandleFunc("POST /app/kontinuum.sh/namespaces/{ns}/instances/add", wrap(r.handleInstanceAdd))
 	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/instances/{name}", wrap(r.handleInstanceDetail))
 	mux.HandleFunc("DELETE /app/kontinuum.sh/namespaces/{ns}/instances/{name}", wrap(r.handleDeleteInstanceObject))
 	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/talosclusters", wrap(r.handleTalosClusters))
@@ -669,9 +671,57 @@ func (r *Router) renderRegistry(writer http.ResponseWriter, request *http.Reques
 	// a preserved/error/success state. Merged in here so the same
 	// "zone-add-modal-body" template works whether it's embedded on
 	// initial page load or swapped in on submit.
-	maps.Copy(data, r.zoneAddFormData(zoneAddFields{}, "", ""))
+	maps.Copy(data, r.zoneAddFormData(zoneAddFields{}, "", "", r.listInstanceSuggestions(request.Context())))
 
 	r.render(writer, request, pageRegistry, data)
+}
+
+// instanceSuggestion is one candidate the "Add zone" modal's own
+// instance-picker offers — an already-registered, unclaimed Instance in
+// v1alpha2.KontinuumSystemNamespace (see zone.AddOptions.ExistingInstanceName's
+// own doc) the user can reuse instead of typing a fresh address.
+type instanceSuggestion struct {
+	Name    string
+	Address string
+}
+
+// listInstanceSuggestions lists every unclaimed Instance with a usable
+// address in v1alpha2.KontinuumSystemNamespace — the same namespace
+// zone.Add always operates in (see BuildAddObjects' own doc) — for the "Add
+// zone" modal's own instance-picker. Best-effort: a list failure (e.g. the
+// signed-in identity can't list Instance) just means no suggestions are
+// offered, not a page-render failure, since typing a fresh address always
+// still works.
+func (r *Router) listInstanceSuggestions(ctx context.Context) []instanceSuggestion {
+	zones, err := r.zonesFor(ctx)
+	if err != nil {
+		return nil
+	}
+
+	var list v1alpha2.InstanceList
+
+	err = zones.List(ctx, &list, client.InNamespace(v1alpha2.KontinuumSystemNamespace))
+	if err != nil {
+		return nil
+	}
+
+	suggestions := make([]instanceSuggestion, 0, len(list.Items))
+
+	for _, item := range list.Items {
+		if _, claimed := item.Labels[v1alpha2.LabelClaimedBy]; claimed {
+			continue
+		}
+
+		if len(item.Spec.Interfaces) == 0 {
+			continue
+		}
+
+		suggestions = append(suggestions, instanceSuggestion{Name: item.Name, Address: item.Spec.Interfaces[0]})
+	}
+
+	sort.Slice(suggestions, func(i, j int) bool { return suggestions[i].Name < suggestions[j].Name })
+
+	return suggestions
 }
 
 // listZoneRows lists Zone objects and maps them to zoneRow, sorted by name
@@ -750,10 +800,14 @@ const maxZoneAddFormBytes = 1 << 16
 
 // zoneAddFormData is the "zone-add-modal-body" fragment's template data —
 // fields is the (possibly just-submitted) form state, createdZone/formErr
-// surface a just-completed submission's outcome. Rendered three times: once
-// embedded in the registry page's own initial render (always empty — see
-// renderRegistry), and again by handleZoneAdd on every submission.
-func (r *Router) zoneAddFormData(fields zoneAddFields, createdZone, formErr string) map[string]any {
+// surface a just-completed submission's outcome, and suggestions is the
+// instance-picker's own candidate list (see listInstanceSuggestions).
+// Rendered three times: once embedded in the registry page's own initial
+// render (always empty — see renderRegistry), and again by handleZoneAdd on
+// every submission.
+func (r *Router) zoneAddFormData(
+	fields zoneAddFields, createdZone, formErr string, suggestions []instanceSuggestion,
+) map[string]any {
 	return map[string]any{
 		"Region":              fields.region,
 		"Zone":                fields.zone,
@@ -761,6 +815,8 @@ func (r *Router) zoneAddFormData(fields zoneAddFields, createdZone, formErr stri
 		dataKeyTalosVersion:   fields.talosVersion,
 		"KubernetesVersion":   fields.kubernetesVersion,
 		"UnregisterInstances": fields.unregisterInstances,
+		"ExistingInstance":    fields.existingInstance,
+		"InstanceSuggestions": suggestions,
 		"CreatedZone":         createdZone,
 		"Error":               formErr,
 	}
@@ -774,6 +830,11 @@ type zoneAddFields struct {
 	talosVersion        string
 	kubernetesVersion   string
 	unregisterInstances bool
+	// existingInstance is the instance-picker's own selection (see
+	// zone.AddOptions.ExistingInstanceName's own doc) — set by the "Add
+	// zone" modal's own combobox script when a suggestion is chosen, empty
+	// when talosAddress was typed freehand instead.
+	existingInstance string
 }
 
 // renderZoneAddModalBody renders just the "zone-add-modal-body" fragment
@@ -824,6 +885,7 @@ func (r *Router) handleZoneAdd(writer http.ResponseWriter, request *http.Request
 		// entirely (rather than submitting "false") — PostFormValue returns
 		// "" either way, same as any other never-submitted field.
 		unregisterInstances: request.PostFormValue("unregister-instances") == "on",
+		existingInstance:    request.PostFormValue("existing-instance"),
 	}
 
 	zones, err := r.zonesFor(request.Context())
@@ -840,6 +902,7 @@ func (r *Router) handleZoneAdd(writer http.ResponseWriter, request *http.Request
 		TalosVersion:                fields.talosVersion,
 		KubernetesVersion:           fields.kubernetesVersion,
 		UnregisterInstancesOnDelete: fields.unregisterInstances,
+		ExistingInstanceName:        fields.existingInstance,
 	})
 	if err != nil {
 		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
@@ -848,12 +911,13 @@ func (r *Router) handleZoneAdd(writer http.ResponseWriter, request *http.Request
 			return
 		}
 
-		r.renderZoneAddModalBody(writer, r.zoneAddFormData(fields, "", err.Error()))
+		r.renderZoneAddModalBody(writer,
+			r.zoneAddFormData(fields, "", err.Error(), r.listInstanceSuggestions(request.Context())))
 
 		return
 	}
 
-	r.renderZoneAddModalBody(writer, r.zoneAddFormData(zoneAddFields{}, createdZone.Name, ""))
+	r.renderZoneAddModalBody(writer, r.zoneAddFormData(zoneAddFields{}, createdZone.Name, "", nil))
 }
 
 // handleKontinuumDetail is GET /app/kontinuums/{name}'s handler — it shows one
@@ -1260,14 +1324,117 @@ func (r *Router) handleInstances(writer http.ResponseWriter, request *http.Reque
 
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 
-	r.render(writer, request, pageInstances, map[string]any{
+	data := map[string]any{
 		dataKeyTitle:       "Instances",
 		dataKeyActiveMenu:  "instances",
 		dataKeyVersion:     r.version,
 		dataKeyAuthEnabled: r.authEnabled,
 		dataKeyNamespace:   namespace,
 		dataKeyInstances:   rows,
+	}
+
+	// The "Add instance" modal's own fragment data — always empty on a
+	// plain page load, since only a submission (see handleInstanceAdd) ever
+	// carries a preserved/error/success state — see renderRegistry's
+	// identical maps.Copy of its own "Add zone" modal data.
+	maps.Copy(data, r.instanceAddFormData(namespace, "", "", ""))
+
+	r.render(writer, request, pageInstances, data)
+}
+
+// maxInstanceAddFormBytes bounds the "Add instance" form's request body —
+// its only field is a short address, never a bulk upload — same rationale
+// as maxZoneAddFormBytes.
+const maxInstanceAddFormBytes = 1 << 16
+
+// instanceAddFormData is the "instance-add-modal-body" fragment's template
+// data — namespace/address is the (possibly just-submitted) form state,
+// createdInstance/formErr surface a just-completed submission's outcome.
+// Rendered twice: once embedded in the instances page's own initial render
+// (always empty — see handleInstances), and again by handleInstanceAdd on
+// every submission.
+func (r *Router) instanceAddFormData(namespace, address, createdInstance, formErr string) map[string]any {
+	return map[string]any{
+		dataKeyNamespace:  namespace,
+		"Address":         address,
+		"CreatedInstance": createdInstance,
+		"Error":           formErr,
+	}
+}
+
+// renderInstanceAddModalBody renders just the "instance-add-modal-body"
+// fragment (not a full page via layout.html) — the instances page's own
+// dialog swaps #instance-add-modal-body's innerHTML with this on every form
+// submission, so the modal never navigates away from the instances page —
+// mirrors renderZoneAddModalBody exactly.
+func (r *Router) renderInstanceAddModalBody(writer http.ResponseWriter, data map[string]any) {
+	var buf bytes.Buffer
+
+	err := r.pages[pageInstances].ExecuteTemplate(&buf, "instance-add-modal-body", data)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = buf.WriteTo(writer)
+}
+
+// handleInstanceAdd is POST
+// /app/kontinuum.sh/namespaces/{ns}/instances/add's handler — it registers
+// a standalone Instance in the {ns} tenant's own namespace via the shared
+// pkg/domain/instance.Add, left unclaimed until something claims it (see
+// issue #81 and zone.AddOptions.ExistingInstanceName's own doc for one such
+// consumer — the "Add zone" modal's own instance-picker). On success it
+// swaps the modal body to a success message; on failure it re-renders the
+// form with the submitted address preserved and an error message. Either
+// way the response stays a fragment — the instances page underneath is
+// never navigated away from — mirrors handleZoneAdd exactly.
+func (r *Router) handleInstanceAdd(writer http.ResponseWriter, request *http.Request) {
+	// Every field here is a short address, never a bulk upload — bound the
+	// body before ParseForm reads it into memory.
+	request.Body = http.MaxBytesReader(writer, request.Body, maxInstanceAddFormBytes)
+
+	err := request.ParseForm()
+	if err != nil {
+		http.Error(writer, "failed to parse form: "+err.Error(), http.StatusBadRequest)
+
+		return
+	}
+
+	namespace := request.PathValue("ns")
+	address := request.PostFormValue("address")
+
+	// zonesFor, despite its name, is just this Router's per-request-identity
+	// factory for a full controller-runtime client.Client — see
+	// ZoneClientFactory's own doc. instancedomain.Add needs Create, which
+	// kontinuumsFor's own narrower KontinuumClient interface doesn't expose,
+	// so this reuses zonesFor exactly as handleZoneAdd does for its own
+	// writes, rather than widening KontinuumClient for one caller.
+	zones, err := r.zonesFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	created, err := instancedomain.Add(request.Context(), zones, instancedomain.AddOptions{
+		Namespace: namespace, Address: address,
 	})
+	if err != nil {
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return
+		}
+
+		r.renderInstanceAddModalBody(writer, r.instanceAddFormData(namespace, address, "", err.Error()))
+
+		return
+	}
+
+	r.renderInstanceAddModalBody(writer, r.instanceAddFormData(namespace, "", created.Name, ""))
 }
 
 // instanceInterfaceRow is one discovered network interface, shown on the

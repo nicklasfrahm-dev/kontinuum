@@ -84,6 +84,16 @@ const (
 	zoneAddFormTalosAddressKey = "talos-address"
 )
 
+// instanceAddFormAddressKey is the "Add instance" form's own field name
+// (see instance_add_modal.html), reused across every url.Values fixture
+// below that submits that form.
+const instanceAddFormAddressKey = "address"
+
+// testExistingInstanceAddress is the shared spec.interfaces[0] fixture value
+// for an already-registered Instance reused across the "Add zone" modal's
+// own instance-picker tests below.
+const testExistingInstanceAddress = "10.0.0.9"
+
 // zoneAddForm builds the "Add zone" form's own minimal valid submission
 // (region/zone/talos-address only) — reused by every test below that
 // doesn't need to vary those three fields.
@@ -2129,6 +2139,275 @@ func TestRegistryPageEmbedsLeaveZoneButtonAndModal(t *testing.T) {
 	assert.Contains(t, string(body), `onclick="openZoneLeaveModal('eu-1a', 'kontinuum-system')"`)
 	assert.Contains(t, string(body), `id="zone-leave-modal"`)
 	assert.Contains(t, string(body), `id="zone-leave-modal-confirm" disabled`)
+}
+
+// TestRegistryPageRendersInstanceSuggestionsInDropdown covers the "Add
+// zone" modal's own instance-picker (see instanceSuggestion's own doc):
+// an unclaimed Instance in v1alpha2.KontinuumSystemNamespace is offered as
+// a suggestion, but one already claimed by some other pool is not.
+func TestRegistryPageRendersInstanceSuggestionsInDropdown(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	unclaimed := &v1alpha2.Instance{
+		ObjectMeta: metav1.ObjectMeta{Name: "instance-unclaimed", Namespace: v1alpha2.KontinuumSystemNamespace},
+		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{testExistingInstanceAddress}},
+	}
+	claimed := &v1alpha2.Instance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "instance-claimed", Namespace: v1alpha2.KontinuumSystemNamespace,
+			Labels: map[string]string{v1alpha2.LabelClaimedBy: "some-pool"},
+		},
+		Spec: v1alpha2.InstanceSpec{Interfaces: []string{"10.0.0.10"}},
+	}
+
+	zoneClient := newTestZoneClient(t, unclaimed, claimed)
+	zonesFactory := func(context.Context) (client.Client, error) { return zoneClient, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `data-instance-name="instance-unclaimed"`)
+	assert.Contains(t, string(body), `data-instance-address="`+testExistingInstanceAddress+`"`)
+	assert.NotContains(t, string(body), `data-instance-name="instance-claimed"`)
+}
+
+// TestHandleZoneAddAdoptsExistingInstanceInstead covers the "Add zone"
+// modal's own instance-picker end to end through the router: submitting
+// "existing-instance" alongside the usual form fields must adopt that
+// already-registered Instance (relabeling it into the new zone) instead of
+// creating a second, brand-new one from talos-address — see
+// zone.AddOptions.ExistingInstanceName's own doc.
+func TestHandleZoneAddAdoptsExistingInstanceInstead(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	existing := &v1alpha2.Instance{
+		ObjectMeta: metav1.ObjectMeta{Name: "instance-preexisting", Namespace: v1alpha2.KontinuumSystemNamespace},
+		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{testExistingInstanceAddress}},
+	}
+
+	zoneClient := newTestZoneClient(t, existing, registeredKontinuumWithDomain("hub", "example.com"))
+	zonesFactory := func(context.Context) (client.Client, error) { return zoneClient, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	form := zoneAddForm()
+	form.Set("existing-instance", existing.Name)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestZoneAddRequest(t, form))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var list v1alpha2.InstanceList
+	require.NoError(t,
+		zoneClient.List(context.Background(), &list, client.InNamespace(v1alpha2.KontinuumSystemNamespace)))
+	require.Len(t, list.Items, 1, "adopting an existing instance must not also create a new one")
+	assert.Equal(t, existing.Name, list.Items[0].Name)
+	assert.Equal(t, "eu", list.Items[0].Labels[v1alpha2.LabelRegion])
+	assert.Equal(t, testZoneValue, list.Items[0].Labels[v1alpha2.LabelZone])
+	assert.Equal(t, []string{testExistingInstanceAddress}, list.Items[0].Spec.Interfaces)
+}
+
+// newTestInstanceAddRequest builds a POST
+// /app/kontinuum.sh/namespaces/{ns}/instances/add request — the "Add
+// instance" form's own submission target (see instance_add_modal.html).
+func newTestInstanceAddRequest(t *testing.T, namespace string, form url.Values) *http.Request {
+	t.Helper()
+
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
+		"/app/kontinuum.sh/namespaces/"+namespace+"/instances/add", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	return request
+}
+
+func TestInstancesPageEmbedsAddInstanceButtonAndEmptyModal(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "openInstanceAddModal()")
+	assert.Contains(t, string(body), `id="instance-add-modal"`)
+	assert.Contains(t, string(body), `name="address"`)
+}
+
+// TestHandleInstanceAddCreatesInstanceAndReturnsSuccessFragment also covers
+// namespace-scoping (see instance.AddOptions.Namespace's own doc: a tenant
+// can bring their own hardware into their own namespace) by submitting
+// against a tenant namespace other than kontinuum-system.
+func TestHandleInstanceAddCreatesInstanceAndReturnsSuccessFragment(t *testing.T) {
+	t.Parallel()
+
+	const tenantNamespace = "acme"
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	instClient := newTestZoneClient(t)
+	zonesFactory := func(context.Context) (client.Client, error) { return instClient, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	form := url.Values{instanceAddFormAddressKey: {testTalosAddress}}
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestInstanceAddRequest(t, tenantNamespace, form))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "Registered instance")
+	// The form itself is gone from a success response — nothing left to
+	// resubmit.
+	assert.NotContains(t, string(body), `name="address"`)
+
+	var list v1alpha2.InstanceList
+	require.NoError(t, instClient.List(context.Background(), &list, client.InNamespace(tenantNamespace)))
+	require.Len(t, list.Items, 1)
+	assert.Equal(t, []string{testTalosAddress}, list.Items[0].Spec.Interfaces)
+	assert.Empty(t, list.Items[0].Labels[v1alpha2.LabelClaimedBy])
+}
+
+func TestHandleInstanceAddRerendersFormOnValidationError(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+	zonesFactory := func(context.Context) (client.Client, error) { return newTestZoneClient(t), nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	// address deliberately omitted — Add's own validation rejects it.
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestInstanceAddRequest(t, "kontinuum-system", url.Values{}))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `name="address"`)
+}
+
+func TestHandleInstanceAddReturnsServerErrorWhenFactoryFails(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+	zonesFactory := func(context.Context) (client.Client, error) { return nil, errFactory }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	form := url.Values{instanceAddFormAddressKey: {testTalosAddress}}
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestInstanceAddRequest(t, "kontinuum-system", form))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+}
+
+func TestHandleInstanceAddInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+	zonesFactory := func(context.Context) (client.Client, error) { return forbiddenZoneClient{}, nil }
+
+	var invalidatedWith string
+
+	invalidateSession := func(writer http.ResponseWriter, _ *http.Request, message string) {
+		invalidatedWith = message
+
+		writer.WriteHeader(http.StatusFound)
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-version",
+		config.Config{}, false, invalidateSession)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	form := url.Values{instanceAddFormAddressKey: {testTalosAddress}}
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestInstanceAddRequest(t, "kontinuum-system", form))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusFound, resp.StatusCode)
+	assert.NotEmpty(t, invalidatedWith)
 }
 
 // discoveredInstance builds a v1alpha2.Instance with the Discovered
