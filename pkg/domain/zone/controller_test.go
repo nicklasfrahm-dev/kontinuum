@@ -32,7 +32,7 @@ const (
 	testDomain        = "kontinuum.example.com"
 	testTalosAddress  = "10.0.0.5"
 	testRetryInterval = 15 * time.Second
-	testImageRepo     = "ghcr.io/nicklasfrahm/kontinuum"
+	testImageRepo     = "ghcr.io/nicklasfrahm-dev/kontinuum"
 	// testHubVersion is newReconciler's own default Version — deliberately
 	// distinct from testKontinuumVersion below, so a test asserting the
 	// deployed image tag can't accidentally pass by resolveImage reading

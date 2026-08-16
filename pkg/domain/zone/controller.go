@@ -133,7 +133,7 @@ type Config struct {
 	Auth AuthConfig
 	// ImageRepo is the kontinuum container image repository this package
 	// deploys onto every joined zone's downstream cluster (e.g.
-	// "ghcr.io/nicklasfrahm/kontinuum") — see pkg/cli/serve.go's
+	// "ghcr.io/nicklasfrahm-dev/kontinuum") — see pkg/cli/serve.go's
 	// zoneOptions. The tag to deploy is resolved separately, at reconcile
 	// time — see resolveImage's own doc for why that can't just be Version
 	// below, baked in once at startup.

@@ -421,7 +421,7 @@ func addonOptions(logger *slog.Logger) []libkapi.Option {
 // deploys onto every joined zone's downstream cluster — matches the image
 // ci.yml pushes (see .github/workflows/ci.yml). Which tag actually gets
 // deployed isn't decided here: see zone.Reconciler.resolveImage's own doc.
-const zoneImageRepo = "ghcr.io/nicklasfrahm/kontinuum"
+const zoneImageRepo = "ghcr.io/nicklasfrahm-dev/kontinuum"
 
 // zoneOptions builds the libkapi options that wire the Zone downstream-
 // install reconciler (see pkg/domain/zone) onto the Server. No
