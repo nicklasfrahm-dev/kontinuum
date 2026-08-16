@@ -858,7 +858,7 @@ func registryKubeconfigBody(t *testing.T, mux *http.ServeMux, host, forwardedPro
 	return string(body)
 }
 
-func TestHandleRegistryShowsOIDCKubeconfigWhenAuthEnabled(t *testing.T) {
+func TestHandleConnectShowsOIDCKubeconfigWhenAuthEnabled(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -880,7 +880,7 @@ func TestHandleRegistryShowsOIDCKubeconfigWhenAuthEnabled(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/connect"))
 
 	resp := recorder.Result()
 
@@ -910,7 +910,7 @@ func TestHandleRegistryShowsOIDCKubeconfigWhenAuthEnabled(t *testing.T) {
 	assert.Contains(t, kubeconfig, "--oidc-client-id="+testOIDCClientID)
 }
 
-func TestHandleRegistryShowsNoAuthKubeconfigWhenOIDCDisabled(t *testing.T) {
+func TestHandleConnectShowsNoAuthKubeconfigWhenOIDCDisabled(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -928,7 +928,7 @@ func TestHandleRegistryShowsNoAuthKubeconfigWhenOIDCDisabled(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/connect"))
 
 	resp := recorder.Result()
 
@@ -951,6 +951,56 @@ func TestHandleRegistryShowsNoAuthKubeconfigWhenOIDCDisabled(t *testing.T) {
 	assert.Contains(t, kubeconfig, "current-context: kontinuum-example.com")
 	assert.NotContains(t, kubeconfig, "oidc-login")
 	assert.NotContains(t, kubeconfig, "users:")
+}
+
+// TestHandleConnectHighlightsConnectNavItem guards issue #89's nav item: a
+// new "Connect" link, using the Unplug icon, sitting above Logout — and
+// confirms the kubectl access card it now owns no longer renders on the
+// registry page it used to live on (see TestHandleRegistryRendersInstances
+// for that page's own remaining content).
+func TestHandleConnectHighlightsConnectNavItem(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	connectRecorder := httptest.NewRecorder()
+	mux.ServeHTTP(connectRecorder, newTestRequest(t, "/app/connect"))
+
+	connectResp := connectRecorder.Result()
+
+	connectBody, err := io.ReadAll(connectResp.Body)
+	require.NoError(t, err)
+	require.NoError(t, connectResp.Body.Close())
+
+	assert.Equal(t, http.StatusOK, connectResp.StatusCode)
+	assert.Contains(t, string(connectBody), `href="/app/connect"`)
+	assert.Contains(t, string(connectBody), "text-accent bg-neutral-800",
+		"the Connect nav link renders active/highlighted on its own page")
+
+	registryRecorder := httptest.NewRecorder()
+	mux.ServeHTTP(registryRecorder,
+		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"))
+
+	registryResp := registryRecorder.Result()
+
+	registryBody, err := io.ReadAll(registryResp.Body)
+	require.NoError(t, err)
+	require.NoError(t, registryResp.Body.Close())
+
+	assert.Equal(t, http.StatusOK, registryResp.StatusCode)
+	assert.NotContains(t, string(registryBody), "kubectl access",
+		"the kubectl access card moved to /app/connect and must not remain on the registry page")
+	assert.Contains(t, string(registryBody), `href="/app/connect"`,
+		"the registry page's own nav must still link to Connect")
 }
 
 func TestHandleRegistryStripsPortFromKubeconfigClusterName(t *testing.T) {
@@ -1287,7 +1337,7 @@ func zoneWithCondition(
 	name, region, zoneName string, status metav1.ConditionStatus, reason, message string,
 ) *v1alpha2.Zone {
 	return &v1alpha2.Zone{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "kontinuum-system"},
 		Spec:       v1alpha2.ZoneSpec{Region: region, Zone: zoneName, Domain: "example.com"},
 		Status: v1alpha2.ZoneStatus{
 			Conditions: []metav1.Condition{
@@ -1388,6 +1438,53 @@ func TestHandleRegistryRendersDeletingForZoneWithDeletionTimestamp(t *testing.T)
 	require.NoError(t, err)
 	assert.Contains(t, string(body), "Deleting")
 	assert.NotContains(t, string(body), "Installed=True")
+}
+
+// TestHandleRegistryOmitsZonesFromOtherTenants guards against the registry
+// page leaking another tenant's Zone objects: Zone is namespace-scoped (see
+// api/v1alpha2/zone_types.go), so listZoneRows must filter by the request's
+// own {ns} path value the same way renderRegistry already does for
+// Kontinuum instances.
+func TestHandleRegistryOmitsZonesFromOtherTenants(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	scheme := apiruntime.NewScheme()
+	require.NoError(t, v1alpha2.AddToScheme(scheme))
+
+	ownZone := zoneWithCondition("eu-eu-1a", "eu", "eu-1a", metav1.ConditionTrue, "Installed",
+		"kontinuum-server installed")
+	ownZone.Namespace = "tenant-a"
+	otherZone := zoneWithCondition("us-us-1a", "us", "us-1a", metav1.ConditionTrue, "Installed",
+		"kontinuum-server installed")
+	otherZone.Namespace = "tenant-b"
+
+	zoneClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ownZone, otherZone).Build()
+	zonesFactory := func(context.Context) (client.Client, error) { return zoneClient, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/tenant-a/kontinuums"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "eu-eu-1a", "tenant-a's own zone must still render")
+	assert.NotContains(t, string(body), "us-us-1a", "tenant-b's zone must never render on tenant-a's page")
 }
 
 func TestHandleRegistryReturnsBadGatewayWhenZoneListFails(t *testing.T) {
