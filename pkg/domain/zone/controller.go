@@ -79,16 +79,6 @@ const (
 	reasonWaitingForRegistry     = "WaitingForRegistry"
 	reasonRegistryJoined         = "RegistryJoined"
 
-	// devVersion mirrors pkg/cli/version.go's own unexported default
-	// ("var version = \"dev\"", left unset unless built with a real
-	// -ldflags -X override) — the signal that this hub process is a local,
-	// unreleased build with no correspondingly real, published container
-	// image of its own. See resolveImage's own doc for what that changes.
-	devVersion = "dev"
-	// latestImageTag is what resolveImage deploys instead of devVersion —
-	// see that function's own doc.
-	latestImageTag = "latest"
-
 	// reasonDownstreamTeardownFailed and reasonTalosClusterDeleteFailed are
 	// teardown.go's own retryable-failure reasons — see reconcileTeardown.
 	reasonDownstreamTeardownFailed = "DownstreamTeardownFailed"
@@ -135,14 +125,9 @@ type Config struct {
 	// deploys onto every joined zone's downstream cluster (e.g.
 	// "ghcr.io/nicklasfrahm-dev/kontinuum") — see pkg/cli/serve.go's
 	// zoneOptions. The tag to deploy is resolved separately, at reconcile
-	// time — see resolveImage's own doc for why that can't just be Version
-	// below, baked in once at startup.
+	// time, from whatever version an already-registered Kontinuum reports —
+	// see resolveImage's own doc.
 	ImageRepo string
-	// Version is this hub process's own build version (e.g. "v1.2.3", or
-	// "dev" for a local, unreleased build — see pkg/cli/version.go). Used
-	// only to detect that dev case; resolveImage otherwise ignores it in
-	// favor of a live lookup — see that function's own doc.
-	Version string
 	// GRPCEndpoint is this hub's own publicly reachable "host:port" for
 	// its etcd gRPC proxy (see pkg/domain/etcdproxy and
 	// v1alpha2.KontinuumGRPCConfigStatus's own doc) — read from the hub's
@@ -223,7 +208,6 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		ACMEServer:              c.Config.ACMEServer,
 		Auth:                    c.Config.Auth,
 		ImageRepo:               c.Config.ImageRepo,
-		Version:                 c.Config.Version,
 		GRPCEndpoint:            c.Config.GRPCEndpoint,
 		RetryInterval:           c.Config.RetryInterval,
 		TeardownTimeout:         c.Config.TeardownTimeout,
@@ -262,7 +246,6 @@ type Reconciler struct {
 	ACMEServer              string
 	Auth                    AuthConfig
 	ImageRepo               string
-	Version                 string
 	GRPCEndpoint            string
 	RetryInterval           time.Duration
 	TeardownTimeout         time.Duration
@@ -490,30 +473,24 @@ func (r *Reconciler) reconcileRegistryJoin(ctx context.Context, zoneObj *v1alpha
 }
 
 // resolveImage returns the full container image (r.ImageRepo:tag) to
-// deploy onto a newly joined zone's downstream cluster.
-//
-// When r.Version is devVersion, this hub process is a local, unreleased
-// build with no correspondingly real, published image of its own —
-// r.ImageRepo:latest is deployed instead of a nonexistent "...:dev" tag,
-// which used to leave a freshly joined zone stuck in ImagePullBackOff
-// whenever a zone was joined from a local `make dev` hub (see issue #95's
-// own manual verification, which hit exactly this once the registry-join
-// gate above actually surfaced it as a visible failure instead of a silent
-// one).
-//
-// Otherwise, the version to deploy is read live off any already-registered
-// Kontinuum's own status.version (see findKontinuumVersion) rather than
-// r.Version itself — mirroring findKontinuumStorage/findKontinuumDomain's
+// deploy onto a newly joined zone's downstream cluster — always read live
+// off any already-registered Kontinuum's own status.version (see
+// findKontinuumVersion), mirroring findKontinuumStorage/findKontinuumDomain's
 // identical "a property of the deployment, not of whichever specific
 // process happens to run this reconcile" reasoning: the fleet's actually
 // running version self-heals across a rolling upgrade this way, where
-// trusting r.Version could deploy a stale or ahead-of-the-fleet tag
-// depending on which hub replica's reconcile happened to win.
+// trusting this reconciling process's own build version could deploy a
+// stale or ahead-of-the-fleet tag depending on which hub replica's
+// reconcile happened to win.
+//
+// This includes a hub that's itself a local, unreleased build (reporting
+// "dev" as its own status.version, from pkg/cli/version.go's default) —
+// resolveImage deploys ImageRepo:dev in that case just like any other tag,
+// trusting it to be a real, pullable image: CI keeps that tag in sync with
+// main on every push, and `make image-push` publishes the working tree's
+// own build under it for local zone-join testing (see the Makefile's own
+// doc and docs/local-setup.md).
 func (r *Reconciler) resolveImage(ctx context.Context) (string, error) {
-	if r.Version == devVersion {
-		return r.ImageRepo + ":" + latestImageTag, nil
-	}
-
 	tag, err := findKontinuumVersion(ctx, r.Client)
 	if err != nil {
 		return "", err

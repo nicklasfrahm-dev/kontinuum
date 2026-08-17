@@ -545,7 +545,6 @@ func zoneOptions(cfg *config.Config, logger *slog.Logger) []libkapi.Option {
 			OIDCAdminGroups:        cfg.OIDC.AdminGroups,
 		},
 		ImageRepo:    zoneImageRepo,
-		Version:      version,
 		GRPCEndpoint: cfg.Server.GRPC.Endpoint,
 	})
 

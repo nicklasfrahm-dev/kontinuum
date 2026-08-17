@@ -92,7 +92,6 @@ func TestReconcileTeardownDeletesDownstreamAndTalosCluster(t *testing.T) {
 		ACMEEmail:               "ops@example.com",
 		ACMEServer:              "https://acme-v02.api.letsencrypt.org/directory",
 		ImageRepo:               testImageRepo,
-		Version:                 testHubVersion,
 		GRPCEndpoint:            testGRPCEndpoint,
 		RetryInterval:           testRetryInterval,
 		TeardownTimeout:         testTeardownTimeout,

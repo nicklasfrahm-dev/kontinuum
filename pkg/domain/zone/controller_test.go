@@ -37,18 +37,12 @@ const (
 	testTalosAddress  = "10.0.0.5"
 	testRetryInterval = 15 * time.Second
 	testImageRepo     = "ghcr.io/nicklasfrahm-dev/kontinuum"
-	// testHubVersion is newReconciler's own default Version — deliberately
-	// distinct from testKontinuumVersion below, so a test asserting the
-	// deployed image tag can't accidentally pass by resolveImage reading
-	// r.Version directly instead of actually looking the version up off a
-	// registered Kontinuum (see resolveImage's own doc for why it must).
-	testHubVersion = "v0.0.0-hub"
 	// testKontinuumVersion is registeredKontinuum's own fixture status.version
-	// — what resolveImage is expected to find and deploy.
+	// — what resolveImage always reads off a registered Kontinuum and
+	// deploys (see that function's own doc).
 	testKontinuumVersion = "v1.2.3"
 	// testImage is what resolveImage resolves to across most of this file's
-	// tests: testHubVersion is never "dev", so resolveImage reads the tag
-	// off a registered Kontinuum instead — see registeredKontinuum.
+	// tests — see registeredKontinuum/testKontinuumVersion.
 	testImage = testImageRepo + ":" + testKontinuumVersion
 	// testGRPCEndpoint is newReconciler's own Reconciler.GRPCEndpoint —
 	// zoneStorageDSN's own KONTINUUM_SERVER_GRPC_ENDPOINT stand-in.
@@ -247,7 +241,6 @@ func newReconciler(hubClient client.Client, downstreamBuilder zone.DownstreamCli
 		ACMEServer:              "https://acme-v02.api.letsencrypt.org/directory",
 		Auth:                    zone.AuthConfig{InsecureAllowAnonymous: "true"},
 		ImageRepo:               testImageRepo,
-		Version:                 testHubVersion,
 		GRPCEndpoint:            testGRPCEndpoint,
 		RetryInterval:           testRetryInterval,
 		Logger:                  slog.Default(),
@@ -433,23 +426,27 @@ func TestReconcileSkipsNetworkInstallWhenDomainUnset(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(err), "no certificate without a domain to issue one for")
 }
 
-// TestReconcileDevVersionDeploysLatestTag covers resolveImage's own
-// devVersion branch: a hub process built without a real -ldflags -X
-// version override (the default local `make dev`/`make build` case — see
-// pkg/cli/version.go) has no correspondingly real, published image of its
-// own to deploy, so this asserts ImageRepo:latest is deployed instead of a
-// nonexistent "...:dev" tag — see issue #95's own manual verification,
-// which hit exactly that against a real downstream cluster.
-func TestReconcileDevVersionDeploysLatestTag(t *testing.T) {
+// TestReconcileInheritsDevVersionFromRegisteredKontinuum covers resolveImage
+// deploying ImageRepo:dev when that's literally what a registered
+// Kontinuum reports on its own status.version — the case a local
+// `make dev` hub's own self-registration produces (pkg/cli/version.go's
+// default, unless built with a real -ldflags -X override). resolveImage no
+// longer special-cases this: it always inherits whatever version is
+// registered, the same as any other tag, trusting it to be real and
+// pullable — CI keeps ImageRepo:dev in sync with main on every push, and
+// `make image-push` (see the Makefile) publishes the working tree's own
+// build under it for exactly this local zone-join scenario.
+func TestReconcileInheritsDevVersionFromRegisteredKontinuum(t *testing.T) {
 	t.Parallel()
 
 	kontinuum, kontinuumSecret := registeredKontinuum("hub")
+	kontinuum.Status.Version = "dev"
+
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
 		kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)
 
 	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: downstream})
-	reconciler.Version = "dev"
 
 	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
@@ -457,7 +454,7 @@ func TestReconcileDevVersionDeploysLatestTag(t *testing.T) {
 	var deployment appsv1.Deployment
 	require.NoError(t, downstream.Get(t.Context(),
 		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &deployment))
-	assert.Equal(t, testImageRepo+":latest", deployment.Spec.Template.Spec.Containers[0].Image)
+	assert.Equal(t, testImageRepo+":dev", deployment.Spec.Template.Spec.Containers[0].Image)
 }
 
 // TestReconcileReportsNoVersionFoundWhenRegisteredKontinuumHasNoVersion
