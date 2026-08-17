@@ -89,8 +89,15 @@ dev-clean: ## Stop development environment and remove volumes
 	docker compose --profile dev down -v
 
 .PHONY: image
+# --build-arg VERSION is load-bearing, not just the -t tag: the
+# Containerfile's own ARG VERSION has no default, so without this the
+# binary embeds an empty pkg/cli.version regardless of what the image
+# itself is tagged/pushed as — the registry tag and the running process's
+# own reported version (registry.Heartbeat's status.version, "kontinuum
+# version") silently drift apart otherwise. Mirrors .github/workflows/
+# ci.yml's own "Build container image" step.
 image: ## Build the container image
-	docker buildx build -f Containerfile -t kontinuum:$(VERSION) --load .
+	docker buildx build -f Containerfile -t kontinuum:$(VERSION) --build-arg VERSION=$(VERSION) --load .
 
 .PHONY: image-push
 image-push: image ## Build and push the working tree's image to ghcr.io under VERSION (see CONTAINER_IMAGE_REPO's own doc above; requires docker login ghcr.io first)
