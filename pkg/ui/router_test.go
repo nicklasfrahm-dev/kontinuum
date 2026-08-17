@@ -561,7 +561,8 @@ func TestHandleKontinuumDetailRendersInstanceSettings(t *testing.T) {
 	item := kontinuumWithConfig(v1alpha2.KontinuumConfigStatus{
 		Server: v1alpha2.KontinuumServerConfigStatus{
 			Addr: ":8080", Storage: "postgres://db.internal:5432/kontinuum",
-			DNS: v1alpha2.KontinuumDNSConfigStatus{Domain: "kontinuum.example.com"},
+			DNS:  v1alpha2.KontinuumDNSConfigStatus{Domain: "kontinuum.example.com"},
+			GRPC: v1alpha2.KontinuumGRPCConfigStatus{Endpoint: "proxy:8443", InsecureTLSSkipVerify: "true"},
 		},
 		Log: v1alpha2.KontinuumLogConfigStatus{Level: "info", Format: "json"},
 		OIDC: v1alpha2.KontinuumOIDCConfigStatus{
@@ -596,14 +597,17 @@ func TestHandleKontinuumDetailRendersInstanceSettings(t *testing.T) {
 	assert.Contains(t, string(body), testOIDCIssuerURL)
 	assert.Contains(t, string(body), "platform-team")
 	assert.Contains(t, string(body), "kontinuum.example.com")
+	assert.Contains(t, string(body), "proxy:8443")
+	assert.Contains(t, string(body), "Insecure TLS skip verify")
 }
 
-// TestHandleKontinuumDetailShowsDNSDomainNotConfiguredWhenUnset covers
-// issue #98's own case: a Kontinuum with no KONTINUUM_SERVER_DNS_DOMAIN
-// configured (the default for a local Talos dev zone — see
-// docs/local-setup.md) must show "Not configured" in the DNS section, not
-// a blank domain.
-func TestHandleKontinuumDetailShowsDNSDomainNotConfiguredWhenUnset(t *testing.T) {
+// TestHandleKontinuumDetailShowsNotConfiguredWhenDNSAndGRPCUnset covers
+// issue #98's own case: a Kontinuum with no KONTINUUM_SERVER_DNS_DOMAIN or
+// KONTINUUM_SERVER_GRPC_ENDPOINT configured (the default for a local Talos
+// dev zone — see docs/local-setup.md) must show "Not configured" in both
+// the DNS and gRPC sections, not a blank value, and gRPC's own insecure
+// TLS skip verify must read "Disabled".
+func TestHandleKontinuumDetailShowsNotConfiguredWhenDNSAndGRPCUnset(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -635,7 +639,9 @@ func TestHandleKontinuumDetailShowsDNSDomainNotConfiguredWhenUnset(t *testing.T)
 
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	assert.Contains(t, string(body), "Not configured")
+	assert.Equal(t, 2, strings.Count(string(body), "Not configured"),
+		"both DNS domain and gRPC endpoint must show their own \"Not configured\" state")
+	assert.Contains(t, string(body), "text-neutral-400\">Disabled<")
 }
 
 func TestHandleKontinuumDetailHidesOIDCDetailsWhenInstanceOIDCDisabled(t *testing.T) {

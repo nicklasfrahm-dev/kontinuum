@@ -97,6 +97,35 @@
 
     <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
         <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
+            {{template "icon-unplug"}}
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider">gRPC</h2>
+        </div>
+        <dl class="divide-y divide-neutral-800">
+            <div class="px-6 py-3 flex items-center justify-between gap-4">
+                <dt class="text-sm text-neutral-500">Endpoint</dt>
+                <dd class="text-sm font-medium text-white break-all text-right">
+                    {{if .GRPCEndpoint}}
+                    {{.GRPCEndpoint}}
+                    {{else}}
+                    <span class="text-neutral-500">Not configured</span>
+                    {{end}}
+                </dd>
+            </div>
+            <div class="px-6 py-3 flex items-center justify-between gap-4">
+                <dt class="text-sm text-neutral-500">Insecure TLS skip verify</dt>
+                <dd class="text-sm font-medium text-white">
+                    {{if eq .GRPCInsecureTLSSkipVerify "true"}}
+                    <span class="inline-flex items-center gap-1.5 bg-amber-900/40 border border-amber-700 rounded-full px-2.5 py-1 text-xs font-medium text-amber-300">Enabled</span>
+                    {{else}}
+                    <span class="inline-flex items-center gap-1.5 bg-neutral-800 border border-neutral-700 rounded-full px-2.5 py-1 text-xs font-medium text-neutral-400">Disabled</span>
+                    {{end}}
+                </dd>
+            </div>
+        </dl>
+    </div>
+
+    <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+        <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
             {{template "icon-shield"}}
             <h2 class="text-sm font-bold text-white uppercase tracking-wider">Authentication</h2>
         </div>
