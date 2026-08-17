@@ -48,14 +48,14 @@ For local development, copy `.env.example` to `.env` and adjust as needed — `m
 
 `make dev`'s `talos` service is a real single-node Talos "cluster" — actual Talos OS running in container mode (not a VM), the same shape [`pkg/domain/taloscluster`'s own e2e tests](https://github.com/nicklasfrahm-dev/kontinuum/blob/main/pkg/domain/taloscluster/e2e_test.go) boot — so you can exercise [Add zone](workflows/zone-add.md)'s entire flow end to end without any real hardware.
 
-Once it's up, add the zone the same way you would against real hardware — just point `--talos-address` at the `talos` service's own static IP (`172.28.0.20`, fixed in `compose.yaml`) instead of a real machine's IP:
+Once it's up, add the zone the same way you would against real hardware — just point `--talos-address` at the `talos` service's own Compose DNS name instead of a real machine's IP:
 
 ```sh
 export KUBECONFIG=kontinuum.yaml
-kontinuum zone add --region local --zone a --talos-address 172.28.0.20
+kontinuum zone add --region local --zone a --talos-address talos
 ```
 
-Use the IP, not the Compose service name (`talos`): once the node moves past maintenance mode, Talos issues its own server certificate scoped to its detected hostname and addresses, not to whatever name it happened to be dialed by, so addressing it as `talos` fails TLS hostname verification the moment bootstrap starts applying its real machine config.
+`zone add` resolves `talos` to its container's own IP before ever storing it (see `instance.ResolveAddress`), and the taloscluster controller always dials the node's real discovered IP from then on, never the hostname — so this works even though, once the node moves past maintenance mode, Talos issues its own server certificate scoped to its detected hostname and addresses, not to whatever name it happened to originally be dialed by.
 
 Skip `--wait` here — see below for why this setup never reaches `Installed`. Watch progress with `kubectl get zone,taloscluster,addon -n kontinuum-system` instead: `TalosCluster` should reach `Ready`/`AddonsInstalled` (a real Cilium + cert-manager install, on a real control-plane node) within a few minutes, at which point kontinuum's own downstream footprint — namespace, `kontinuum-env`, Deployment/Service, `ClusterIssuer`/`Gateway`/`Certificate` — gets installed, including the hub issuing and rotating this zone's own etcd-proxy credential (`kubectl get secret -n kontinuum-system local-a-etcd-auth`) and building its `KONTINUUM_SERVER_STORAGE` DSN, dialing back through the hub's etcd gRPC proxy for shared storage (see [Architecture](architecture.md#storage)) — the same path a real remote zone uses.
 

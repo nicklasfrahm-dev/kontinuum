@@ -166,6 +166,16 @@ type KontinuumGRPCConfigStatus struct {
 	// zone's own KONTINUUM_SERVER_STORAGE.
 	// +optional
 	Endpoint string `default:"" json:"endpoint"`
+	// InsecureTLSSkipVerify skips TLS certificate verification on the
+	// connection a joined zone's own etcdproxy.Relay makes back to
+	// Endpoint — for local development only, where Endpoint terminates TLS
+	// with a self-signed certificate no client trusts by default (see
+	// compose.yaml's own proxy service). A real deployment's Endpoint is
+	// expected to present a certificate the zone's own root CA set already
+	// trusts, the same as every other kind of traffic the hub serves.
+	// +optional
+	//nolint:tagliatelle // "TLS" (acronym kept uppercase) matches this type's own IssuerURL/ClientID convention
+	InsecureTLSSkipVerify string `default:"false" json:"insecureTLSSkipVerify"`
 }
 
 // KontinuumLogConfigStatus is pkg/config.LogConfig, referenced directly by

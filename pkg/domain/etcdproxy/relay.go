@@ -62,11 +62,19 @@ type RelayConfig struct {
 	// pkg/domain/zone's reconcileAuthKeys).
 	Zone string
 	Key  string
-	// Insecure skips TLS on the connection to HubEndpoint — for local
-	// development only; a real deployment's HubEndpoint is expected to
-	// terminate TLS, the same as every other kind of traffic the hub
+	// Insecure skips TLS entirely on the connection to HubEndpoint — for
+	// local development only; a real deployment's HubEndpoint is expected
+	// to terminate TLS, the same as every other kind of traffic the hub
 	// serves.
 	Insecure bool
+	// InsecureSkipVerify keeps TLS but skips certificate verification —
+	// for local development against a HubEndpoint terminating TLS with a
+	// self-signed certificate (see compose.yaml's own proxy service), where
+	// Insecure above would be a step too far: the connection still needs
+	// real TLS framing (HTTP/2 over plaintext isn't what a TLS-terminating
+	// proxy speaks), just not certificate validation against this
+	// process's own root CA set. Ignored when Insecure is true.
+	InsecureSkipVerify bool
 }
 
 // StartRelay starts a Relay per cfg, listening immediately — a returned
@@ -90,7 +98,11 @@ func StartRelay(cfg RelayConfig) (*Relay, error) {
 		return nil, fmt.Errorf("failed to listen on %q: %w", cfg.SocketPath, err)
 	}
 
-	transportCreds := credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12})
+	//nolint:gosec // opt-in, dev-only — see RelayConfig.InsecureSkipVerify's own doc
+	transportCreds := credentials.NewTLS(&tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: cfg.InsecureSkipVerify,
+	})
 	if cfg.Insecure {
 		transportCreds = insecure.NewCredentials()
 	}

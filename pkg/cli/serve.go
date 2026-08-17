@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -303,7 +304,7 @@ func buildServer(
 		return nil, nil, nil, err
 	}
 
-	storage, relayCleanup, err := resolveStorageDSN(cfg.Server.Storage)
+	storage, relayCleanup, err := resolveStorageDSN(cfg.Server.Storage, cfg.Server.GRPC.InsecureTLSSkipVerify)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -372,8 +373,12 @@ const storageRelaySocketPath = "/tmp/kontinuum-storage-relay.sock"
 // "unix://" DSN pointed at it instead, which libkapi's own storage
 // resolution already knows how to handle unchanged. The returned cleanup
 // func is always safe to call — a no-op unless a Relay was actually
-// started — so callers never need to nil-check it first.
-func resolveStorageDSN(configured string) (string, func(), error) {
+// started — so callers never need to nil-check it first. insecureSkipVerify
+// is cfg.Server.GRPC.InsecureTLSSkipVerify's raw string value — see
+// etcdproxy.RelayConfig.InsecureSkipVerify's own doc for what it does;
+// parsed here rather than in Config itself since it's meaningless outside
+// this one call.
+func resolveStorageDSN(configured, insecureSkipVerify string) (string, func(), error) {
 	noopCleanup := func() {}
 
 	zoneName, key, hubEndpoint, ok := etcdproxy.ParseRelayDSN(configured)
@@ -381,11 +386,18 @@ func resolveStorageDSN(configured string) (string, func(), error) {
 		return configured, noopCleanup, nil
 	}
 
+	skipVerify, err := strconv.ParseBool(insecureSkipVerify)
+	if err != nil {
+		return "", noopCleanup,
+			fmt.Errorf("failed to parse KONTINUUM_SERVER_GRPC_INSECURE_TLS_SKIP_VERIFY: %w", err)
+	}
+
 	relay, err := etcdproxy.StartRelay(etcdproxy.RelayConfig{
-		SocketPath:  storageRelaySocketPath,
-		HubEndpoint: hubEndpoint,
-		Zone:        zoneName,
-		Key:         key,
+		SocketPath:         storageRelaySocketPath,
+		HubEndpoint:        hubEndpoint,
+		Zone:               zoneName,
+		Key:                key,
+		InsecureSkipVerify: skipVerify,
 	})
 	if err != nil {
 		return "", noopCleanup, fmt.Errorf("failed to start storage relay: %w", err)
