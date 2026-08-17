@@ -10,20 +10,27 @@ import (
 // region/zone rule.
 //
 //nolint:lll
-// +kubebuilder:validation:XValidation:rule="size(self.region) > 0 && size(self.zone) > 0 && size(self.domain) > 0",message="region, zone, and domain are all required"
+// +kubebuilder:validation:XValidation:rule="size(self.region) > 0 && size(self.zone) > 0",message="region and zone are both required"
 
 // ZoneSpec identifies a single availability zone: the region it belongs to,
-// and the DNS domain its own kontinuum-server is published under
-// (<zone>.<region>.<domain>). Unlike KontinuumSpec's region/zone — where
-// both empty means control-plane — a Zone object only ever describes a
-// real zone, so all three fields are required together.
+// and — optionally — the DNS domain its own kontinuum-server is published
+// under (<zone>.<region>.<domain>). Unlike KontinuumSpec's region/zone —
+// where both empty means control-plane — a Zone object only ever describes
+// a real zone, so those two fields are required together. Domain is not:
+// left empty, this zone's kontinuum-server installs with no network layer
+// at all — no ClusterIssuer/Gateway/Certificate/HTTPRoute (see
+// pkg/domain/zone's own installNetwork doc) — a legitimate, supported
+// choice, e.g. a local Talos dev zone with no public DNS to satisfy ACME's
+// own HTTP-01 challenge (see docs/local-setup.md).
 type ZoneSpec struct {
 	// Region is the region this zone belongs to.
 	Region string `json:"region"`
 	// Zone is this zone's own name within Region.
 	Zone string `json:"zone"`
 	// Domain is the DNS domain this zone's kontinuum-server is published
-	// under.
+	// under. Leave empty to install with no network layer — see this
+	// type's own doc.
+	// +optional
 	Domain string `json:"domain"`
 }
 

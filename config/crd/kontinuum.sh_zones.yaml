@@ -58,15 +58,21 @@ spec:
           spec:
             description: |-
               ZoneSpec identifies a single availability zone: the region it belongs to,
-              and the DNS domain its own kontinuum-server is published under
-              (<zone>.<region>.<domain>). Unlike KontinuumSpec's region/zone — where
-              both empty means control-plane — a Zone object only ever describes a
-              real zone, so all three fields are required together.
+              and — optionally — the DNS domain its own kontinuum-server is published
+              under (<zone>.<region>.<domain>). Unlike KontinuumSpec's region/zone —
+              where both empty means control-plane — a Zone object only ever describes
+              a real zone, so those two fields are required together. Domain is not:
+              left empty, this zone's kontinuum-server installs with no network layer
+              at all — no ClusterIssuer/Gateway/Certificate/HTTPRoute (see
+              pkg/domain/zone's own installNetwork doc) — a legitimate, supported
+              choice, e.g. a local Talos dev zone with no public DNS to satisfy ACME's
+              own HTTP-01 challenge (see docs/local-setup.md).
             properties:
               domain:
                 description: |-
                   Domain is the DNS domain this zone's kontinuum-server is published
-                  under.
+                  under. Leave empty to install with no network layer — see this
+                  type's own doc.
                 type: string
               region:
                 description: Region is the region this zone belongs to.
@@ -75,14 +81,12 @@ spec:
                 description: Zone is this zone's own name within Region.
                 type: string
             required:
-            - domain
             - region
             - zone
             type: object
             x-kubernetes-validations:
-            - message: region, zone, and domain are all required
-              rule: size(self.region) > 0 && size(self.zone) > 0 && size(self.domain)
-                > 0
+            - message: region and zone are both required
+              rule: size(self.region) > 0 && size(self.zone) > 0
           status:
             description: |-
               ZoneStatus reports this zone's readiness. Deliberately minimal — issue
