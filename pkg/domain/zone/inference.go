@@ -128,6 +128,28 @@ func findKontinuumDomain(ctx context.Context, hubClient client.Client) (string, 
 	return domain, nil
 }
 
+// inferDomain returns findKontinuumDomain's result, but treats there being
+// nothing to infer from (no registered Kontinuum at all, or one exists but
+// publishes no domain) as a soft "" rather than an error: a zone's own
+// hostname has no reason to match whatever domain the hub happens to
+// publish, and a Zone with no domain configured at all is a legitimate,
+// supported choice (see controller.go's reconcileInstall — it just skips
+// installing a network layer for one). Any other error — the List call
+// itself failing — still surfaces, since that's a real problem distinct
+// from having nothing to infer.
+func inferDomain(ctx context.Context, hubClient client.Client) (string, error) {
+	domain, err := findKontinuumDomain(ctx, hubClient)
+
+	switch {
+	case err == nil:
+		return domain, nil
+	case errors.Is(err, errNoRegisteredKontinuum), errors.Is(err, errNoKontinuumDNSDomain):
+		return "", nil
+	default:
+		return "", fmt.Errorf("failed to infer domain: %w", err)
+	}
+}
+
 // errNoKontinuumVersion is findKontinuumVersion's own sentinel — a static
 // error for the same err113 reason as errNoRegisteredKontinuum/
 // errNoKontinuumDNSDomain above.

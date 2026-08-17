@@ -374,23 +374,31 @@ func TestAddPrefersExplicitDomainOverInference(t *testing.T) {
 	assert.Equal(t, "explicit.example.com", got.Spec.Domain)
 }
 
-func TestAddFailsWhenNoRegisteredKontinuumPublishesDomain(t *testing.T) {
+// TestAddLeavesDomainEmptyWhenNoRegisteredKontinuumPublishesOne covers
+// issue #98's own gap: a Kontinuum is registered, but hasn't set
+// KONTINUUM_SERVER_DNS_DOMAIN — nothing for inference to find. This must
+// not fail zone-add: a zone's own hostname has no reason to match whatever
+// domain the hub happens to publish, and a Zone with no domain at all is a
+// supported choice (see controller.go's reconcileInstall, which just skips
+// installing a network layer for one).
+func TestAddLeavesDomainEmptyWhenNoRegisteredKontinuumPublishesOne(t *testing.T) {
 	t.Parallel()
 
-	// A Kontinuum is registered, but hasn't set KONTINUUM_SERVER_DNS_DOMAIN
-	// — nothing for inference to find.
 	kontinuum, kontinuumSecret := registeredKontinuum("hub")
 	hubClient := newHubFakeClient(t, kontinuum, kontinuumSecret)
 
 	opts := testAddOptions()
 	opts.Domain = ""
 
-	_, err := zone.Add(t.Context(), hubClient, opts)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no registered kontinuum publishes a DNS domain")
+	got, err := zone.Add(t.Context(), hubClient, opts)
+	require.NoError(t, err)
+	assert.Empty(t, got.Spec.Domain)
 }
 
-func TestAddFailsWhenNoKontinuumRegisteredAtAllForDomainInference(t *testing.T) {
+// TestAddLeavesDomainEmptyWhenNoKontinuumRegisteredAtAllForDomainInference
+// is the same case one step earlier: no Kontinuum registered at all, not
+// even one with an empty domain to find.
+func TestAddLeavesDomainEmptyWhenNoKontinuumRegisteredAtAllForDomainInference(t *testing.T) {
 	t.Parallel()
 
 	hubClient := newHubFakeClient(t)
@@ -398,9 +406,9 @@ func TestAddFailsWhenNoKontinuumRegisteredAtAllForDomainInference(t *testing.T) 
 	opts := testAddOptions()
 	opts.Domain = ""
 
-	_, err := zone.Add(t.Context(), hubClient, opts)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no registered kontinuum found")
+	got, err := zone.Add(t.Context(), hubClient, opts)
+	require.NoError(t, err)
+	assert.Empty(t, got.Spec.Domain)
 }
 
 // preRegisteredInstance is an already-registered, unclaimed Instance in

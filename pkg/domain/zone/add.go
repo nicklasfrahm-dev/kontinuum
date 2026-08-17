@@ -27,9 +27,14 @@ type AddOptions struct {
 	// ZoneSpec.Domain's own doc for the <zone>.<region>.<domain> format.
 	// Optional: left empty, Add infers it from any already-registered
 	// Kontinuum's own published KONTINUUM_SERVER_DNS_DOMAIN (see
-	// findKontinuumDomain) — exactly mirroring how the zone controller
-	// itself infers the downstream storage connection string, rather than
-	// requiring every caller to know or supply it.
+	// inferDomain) — exactly mirroring how the zone controller itself
+	// infers the downstream storage connection string, rather than
+	// requiring every caller to know or supply it. Staying empty (nothing
+	// registered publishes one) is not an error: this zone's own hostname
+	// has no reason to match whatever domain the hub happens to publish,
+	// and a Zone with no domain at all is a supported choice — see
+	// controller.go's reconcileInstall for what that means at reconcile
+	// time.
 	Domain string
 	// TalosAddress is the seed Instance's candidate address (IP or
 	// hostname) — the address the instance discovery controller dials in
@@ -232,12 +237,10 @@ func Add(ctx context.Context, hubClient client.Client, opts AddOptions) (*v1alph
 	}
 
 	if opts.Domain == "" {
-		domain, err := findKontinuumDomain(ctx, hubClient)
+		opts.Domain, err = inferDomain(ctx, hubClient)
 		if err != nil {
-			return nil, fmt.Errorf("failed to infer domain: %w", err)
+			return nil, err
 		}
-
-		opts.Domain = domain
 	}
 
 	opts, hostname, err := resolveTalosAddress(ctx, opts)
