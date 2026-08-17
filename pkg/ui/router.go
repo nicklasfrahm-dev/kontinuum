@@ -1580,6 +1580,7 @@ func instanceDetailData(item v1alpha2.Instance, version string, authEnabled bool
 		dataKeyAge:          formatAge(item.CreationTimestamp.Time),
 		dataKeyTalosVersion: item.Status.Talos.Version,
 		"DiscoverySource":   discoverySource,
+		"Hostname":          item.Annotations[instancedomain.AnnotationHostname],
 		"ClaimedBy":         item.Labels[v1alpha2.LabelClaimedBy],
 		"Interfaces":        interfaces,
 		"Conditions":        conditions,

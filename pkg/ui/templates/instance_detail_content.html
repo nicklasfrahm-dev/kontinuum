@@ -44,6 +44,12 @@
                 <dt class="text-sm text-neutral-500">Discovery source</dt>
                 <dd class="text-sm font-medium text-white break-all text-right">{{.DiscoverySource}}</dd>
             </div>
+            {{if .Hostname}}
+            <div class="px-6 py-3 flex items-center justify-between gap-4">
+                <dt class="text-sm text-neutral-500">Hostname</dt>
+                <dd class="text-sm font-medium text-white break-all text-right">{{.Hostname}}</dd>
+            </div>
+            {{end}}
             <div class="px-6 py-3 flex items-center justify-between gap-4">
                 <dt class="text-sm text-neutral-500">Claimed by</dt>
                 <dd class="text-sm font-medium text-white">

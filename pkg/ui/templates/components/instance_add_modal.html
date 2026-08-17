@@ -51,9 +51,9 @@
 <form hx-post="/app/kontinuum.sh/namespaces/{{.Namespace}}/instances/add" hx-target="#instance-add-modal-body" hx-swap="innerHTML" class="space-y-4">
     <label class="block">
         <span class="text-xs uppercase tracking-wider text-neutral-500">Address</span>
-        <input type="text" name="address" value="{{.Address}}" required placeholder="10.0.0.5"
+        <input type="text" name="address" value="{{.Address}}" required placeholder="10.0.0.5 or node1.example.com"
                class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
-        <span class="mt-1 block text-xs text-neutral-600">Maintenance-mode address of the candidate node. It will be discovered and registered, left unclaimed.</span>
+        <span class="mt-1 block text-xs text-neutral-600">Maintenance-mode IP address or hostname of the candidate node. A hostname is resolved to its IP before the instance is registered, so it behaves identically to typing that IP directly. It will be discovered and registered, left unclaimed.</span>
     </label>
     <div class="flex justify-end pt-2">
         <!--
