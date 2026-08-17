@@ -35,7 +35,6 @@ services:
       KONTINUUM_SERVER_STORAGE: "postgres://kontinuum:kontinuum@postgres:5432/kontinuum?sslmode=disable"
       KONTINUUM_LOG_LEVEL: "info"
       KONTINUUM_LOG_FORMAT: "console"
-      KONTINUUM_SERVER_DNS_DOMAIN: "kontinuum.localhost"
       # A joined zone's own kontinuum-server (running inside the "talos"
       # profile's downstream cluster's pod network, which sits on this same
       # Docker bridge) reaches this hub's etcd gRPC proxy through this
