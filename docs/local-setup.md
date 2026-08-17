@@ -31,10 +31,10 @@ See [Configuration](reference.md#configuration) for the full list of `KONTINUUM_
 
 ## Hot-reload development environment
 
-`make dev` starts PostgreSQL, [air](https://github.com/air-verse/air) hot-reload, and a Caddy proxy that terminates TLS with a self-signed certificate on `https://localhost:8443` (in front of the plain-HTTP `http://localhost:8080` air serves), all via Docker Compose:
+`make dev` starts PostgreSQL, [air](https://github.com/air-verse/air) hot-reload, a Caddy proxy that terminates TLS with a self-signed certificate on `https://localhost:8443` (in front of the plain-HTTP `http://localhost:8080` air serves), and a single-node Talos "cluster" for exercising the full zone-join flow (see below), all via Docker Compose:
 
 ```sh
-# start dev environment (air + postgres + proxy)
+# start dev environment (air + postgres + proxy + talos)
 make dev
 # stop dev environment
 make dev-down
@@ -46,17 +46,7 @@ For local development, copy `.env.example` to `.env` and adjust as needed — `m
 
 ## Trying the full zone flow locally
 
-`make dev-talos` starts the same environment as `make dev`, plus a real single-node Talos "cluster" — actual Talos OS running in container mode (not a VM), the same shape [`pkg/domain/taloscluster`'s own e2e tests](https://github.com/nicklasfrahm-dev/kontinuum/blob/main/pkg/domain/taloscluster/e2e_test.go) boot — so you can exercise [Add zone](workflows/zone-add.md)'s entire flow end to end without any real hardware:
-
-```sh
-make dev-talos
-# stop
-make dev-talos-down
-# stop and remove volumes (including the Talos node's own state)
-make dev-talos-clean
-```
-
-It's a separate profile from plain `make dev` on purpose: it needs privileged/host-cgroup container access and actually boots a kubelet, etcd, and an API server, a real (if modest) resource cost `make dev` alone shouldn't pay.
+`make dev`'s `talos` service is a real single-node Talos "cluster" — actual Talos OS running in container mode (not a VM), the same shape [`pkg/domain/taloscluster`'s own e2e tests](https://github.com/nicklasfrahm-dev/kontinuum/blob/main/pkg/domain/taloscluster/e2e_test.go) boot — so you can exercise [Add zone](workflows/zone-add.md)'s entire flow end to end without any real hardware.
 
 Once it's up, add the zone the same way you would against real hardware — just point `--talos-address` at the `talos` service's own static IP (`172.28.0.20`, fixed in `compose.yaml`) instead of a real machine's IP:
 

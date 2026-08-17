@@ -62,12 +62,9 @@ services:
   # (privileged, host cgroup namespace, tmpfs for /run|/system|/tmp,
   # anonymous volumes for the directories Talos's container-mode init
   # expects writable) mirrors
-  # pkg/domain/taloscluster/e2e_test.go's startTalosContainer. Kept on its
-  # own profile, separate from "dev": it needs privileged access and
-  # actually boots a kubelet/etcd/apiserver, a cost `make dev` alone
-  # shouldn't pay.
+  # pkg/domain/taloscluster/e2e_test.go's startTalosContainer.
   talos:
-    profiles: ["talos"]
+    profiles: ["dev"]
     image: ghcr.io/siderolabs/talos:v1.13.0
     privileged: true
     cgroup: host
