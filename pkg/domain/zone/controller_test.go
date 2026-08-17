@@ -524,6 +524,8 @@ func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) 
 	require.NoError(t, downstream.Get(t.Context(),
 		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &deployment))
 	assert.Equal(t, testImage, deployment.Spec.Template.Spec.Containers[0].Image)
+	assert.Equal(t, corev1.PullIfNotPresent, deployment.Spec.Template.Spec.Containers[0].ImagePullPolicy,
+		"a real semver tag is immutable once published — safe to cache")
 
 	var service corev1.Service
 	assert.NoError(t, downstream.Get(t.Context(),

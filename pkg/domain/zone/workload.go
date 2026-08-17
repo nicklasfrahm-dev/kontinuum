@@ -3,7 +3,9 @@ package zone
 import (
 	"context"
 	"fmt"
+	"strings"
 
+	"golang.org/x/mod/semver"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -205,6 +207,26 @@ func containerSecurityContext() *corev1.SecurityContext {
 	}
 }
 
+// imagePullPolicy returns corev1.PullAlways for image when its tag isn't
+// valid semver — "dev" or "latest", the two mutable, floating tags CI and
+// `make image-push` (see the Makefile) both keep overwriting in place —
+// and corev1.PullIfNotPresent otherwise, since a real semver-tagged
+// release is immutable once published and safe to cache. Kubernetes'
+// own default pull policy only special-cases the literal tag "latest"
+// this way; that's no longer enough now that resolveImage deploys
+// ImageRepo:dev just as often as a real version (see that function's own
+// doc) — without this, a node that already cached an older :dev layer
+// would never re-pull a newer one pushed under the same tag.
+func imagePullPolicy(image string) corev1.PullPolicy {
+	tag := image[strings.LastIndex(image, ":")+1:]
+
+	if semver.IsValid(tag) {
+		return corev1.PullIfNotPresent
+	}
+
+	return corev1.PullAlways
+}
+
 // buildDeployment returns the desired kontinuum Deployment — a single
 // replica running image, with no command/args override (Containerfile's own
 // ENTRYPOINT already runs `serve`), sourcing all of its configuration from
@@ -227,6 +249,7 @@ func buildDeployment(namespace, image string) *appsv1.Deployment {
 					Containers: []corev1.Container{{
 						Name:            deploymentName,
 						Image:           image,
+						ImagePullPolicy: imagePullPolicy(image),
 						Ports:           []corev1.ContainerPort{{Name: portName, ContainerPort: containerPort}},
 						SecurityContext: containerSecurityContext(),
 						EnvFrom: []corev1.EnvFromSource{
