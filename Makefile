@@ -15,6 +15,19 @@ INSTALLDIR ?= $(HOME)/.local/bin
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -ldflags "-s -w -X github.com/nicklasfrahm/kontinuum/pkg/cli.version=$(VERSION)"
 
+# GHCR_REPO mirrors pkg/cli/serve.go's own zoneImageRepo constant — the
+# registry zone.Reconciler.resolveImage deploys onto every joined zone's
+# downstream cluster. IMAGE_TAG deliberately defaults to "dev", not
+# $(VERSION): once this repo has real release tags, git describe no longer
+# resolves to "dev" even for an uncommitted local build (VERSION would be
+# something like "v1.2.3-4-gabcdef-dirty" instead), but resolveImage only
+# ever deploys ImageRepo:dev for the "dev" case (a hub with no real version
+# override — see that function's own doc) — the same literal value
+# air.toml's own build command already hardcodes for `make dev`. Override
+# to push a specific version instead: `make image-push IMAGE_TAG=v1.2.3`.
+GHCR_REPO := ghcr.io/nicklasfrahm-dev/kontinuum
+IMAGE_TAG ?= dev
+
 # Go commands
 GOCMD := go
 # -trimpath and the linker's -s -w (stripped symbol table/DWARF) apply to
@@ -82,6 +95,11 @@ dev-clean: ## Stop development environment and remove volumes
 .PHONY: image
 image: ## Build the container image
 	docker buildx build -f Containerfile -t kontinuum:$(VERSION) --load .
+
+.PHONY: image-push
+image-push: ## Build and push the working tree's image to ghcr.io (defaults to :dev — see IMAGE_TAG's own doc above; requires docker login ghcr.io first)
+	@printf '$(CYAN)Pushing $(GHCR_REPO):$(IMAGE_TAG)...$(RESET)\n'
+	docker buildx build -f Containerfile -t $(GHCR_REPO):$(IMAGE_TAG) --build-arg VERSION=$(IMAGE_TAG) --push .
 
 ##@ Quality
 
