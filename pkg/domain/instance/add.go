@@ -30,10 +30,15 @@ type AddOptions struct {
 	// specifically so a tenant can bring their own hardware into their own
 	// namespace, the same namespace handleInstances already lists it from.
 	Namespace string
-	// Address is the candidate's maintenance-mode address (IP or hostname)
-	// — becomes spec.interfaces[0], the same field instance.Reconciler's own
-	// discovery probing dials (see Reconciler.Reconcile).
+	// Address is the candidate's maintenance-mode address (IP or hostname).
+	// A hostname is resolved before it ever reaches spec.interfaces[0] — see
+	// resolveAddress and Add's own doc.
 	Address string
+	// Resolver resolves Address when it isn't already an IP literal — see
+	// resolveAddress. Left nil (always the case for pkg/ui's own form
+	// parse), Add uses net.DefaultResolver; tests inject a stub instead of
+	// making real DNS queries.
+	Resolver Resolver
 }
 
 // NameFromAddress derives an Instance's name deterministically from address
@@ -51,7 +56,13 @@ func NameFromAddress(address string) string {
 // Add creates a standalone, unclaimed Instance object for opts.Address in
 // opts.Namespace — discovered asynchronously by Reconciler's own
 // maintenance-mode probing, exactly like zone.Add's own seed Instance, but
-// fanning out no other objects around it. Tolerates AlreadyExists —
+// fanning out no other objects around it. When opts.Address is a DNS
+// hostname rather than an IP literal, it's resolved first (see
+// resolveAddress): spec.interfaces[0] always ends up holding the resolved
+// IP, with the hostname that was actually typed in preserved instead on the
+// Instance's own AnnotationHostname annotation — so an Instance registered
+// by hostname comes out byte-for-byte identical (same Name, same Spec) to
+// one registered directly by that same IP. Tolerates AlreadyExists —
 // re-submitting the same address is a safe no-op, returning the
 // already-registered Instance rather than erroring or creating a duplicate.
 func Add(ctx context.Context, hubClient client.Client, opts AddOptions) (*v1alpha2.Instance, error) {
@@ -61,12 +72,21 @@ func Add(ctx context.Context, hubClient client.Client, opts AddOptions) (*v1alph
 		return nil, fmt.Errorf("%w: namespace and address are required", errAddOptionsMissingField)
 	}
 
-	inst := &v1alpha2.Instance{
-		ObjectMeta: metav1.ObjectMeta{Name: NameFromAddress(address), Namespace: opts.Namespace},
-		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{address}},
+	resolvedAddress, hostname, err := resolveAddress(ctx, opts.Resolver, address)
+	if err != nil {
+		return nil, err
 	}
 
-	err := hubClient.Create(ctx, inst)
+	inst := &v1alpha2.Instance{
+		ObjectMeta: metav1.ObjectMeta{Name: NameFromAddress(resolvedAddress), Namespace: opts.Namespace},
+		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{resolvedAddress}},
+	}
+
+	if hostname != "" {
+		inst.Annotations = map[string]string{AnnotationHostname: hostname}
+	}
+
+	err = hubClient.Create(ctx, inst)
 	if err == nil {
 		return inst, nil
 	}

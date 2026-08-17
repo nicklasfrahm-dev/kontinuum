@@ -1,6 +1,8 @@
 package instance_test
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,7 +16,25 @@ import (
 const (
 	testNamespace = "acme"
 	testAddress   = "10.0.0.5"
+	testHostname  = "node1.example.com"
 )
+
+// stubResolver is a test-only instance.Resolver that never touches the
+// network — LookupHost either returns addrs or, when addrs is empty,
+// errLookupFailed.
+type stubResolver struct {
+	addrs []string
+}
+
+var errLookupFailed = errors.New("stub resolver: lookup failed")
+
+func (s stubResolver) LookupHost(_ context.Context, _ string) ([]string, error) {
+	if len(s.addrs) == 0 {
+		return nil, errLookupFailed
+	}
+
+	return s.addrs, nil
+}
 
 func TestAddCreatesUnclaimedInstance(t *testing.T) {
 	t.Parallel()
@@ -112,6 +132,65 @@ func TestAddRejectsBlankAddress(t *testing.T) {
 
 	_, err := instance.Add(t.Context(), newFakeClient(t), instance.AddOptions{
 		Namespace: testNamespace, Address: "   ",
+	})
+	require.Error(t, err)
+}
+
+func TestAddResolvesHostnameToIP(t *testing.T) {
+	t.Parallel()
+
+	hubClient := newFakeClient(t)
+
+	got, err := instance.Add(t.Context(), hubClient, instance.AddOptions{
+		Namespace: testNamespace, Address: testHostname,
+		Resolver: stubResolver{addrs: []string{testAddress}},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{testAddress}, got.Spec.Interfaces, "spec must carry the resolved IP, not the hostname")
+	assert.Equal(t, testHostname, got.Annotations[instance.AnnotationHostname])
+}
+
+func TestAddByHostnameMatchesAddByResolvedIP(t *testing.T) {
+	t.Parallel()
+
+	hubClient := newFakeClient(t)
+
+	byHostname, err := instance.Add(t.Context(), hubClient, instance.AddOptions{
+		Namespace: testNamespace, Address: testHostname,
+		Resolver: stubResolver{addrs: []string{testAddress}},
+	})
+	require.NoError(t, err)
+
+	byIP, err := instance.Add(t.Context(), hubClient, instance.AddOptions{
+		Namespace: testNamespace, Address: testAddress,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, byIP.Name, byHostname.Name, "hostname and its resolved IP must converge on one Instance")
+
+	var list v1alpha2.InstanceList
+	require.NoError(t, hubClient.List(t.Context(), &list, client.InNamespace(testNamespace)))
+	assert.Len(t, list.Items, 1, "hostname and its resolved IP must not create two separate Instances")
+}
+
+func TestAddDoesNotAnnotateIPLiteral(t *testing.T) {
+	t.Parallel()
+
+	got, err := instance.Add(t.Context(), newFakeClient(t), instance.AddOptions{
+		Namespace: testNamespace, Address: testAddress,
+	})
+	require.NoError(t, err)
+
+	assert.NotContains(t, got.Annotations, instance.AnnotationHostname)
+}
+
+func TestAddSurfacesResolveFailure(t *testing.T) {
+	t.Parallel()
+
+	_, err := instance.Add(t.Context(), newFakeClient(t), instance.AddOptions{
+		Namespace: testNamespace, Address: testHostname,
+		Resolver: stubResolver{},
 	})
 	require.Error(t, err)
 }
