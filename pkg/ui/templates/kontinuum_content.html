@@ -78,6 +78,25 @@
 
     <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
         <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
+            {{template "icon-globe"}}
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider">DNS</h2>
+        </div>
+        <dl class="divide-y divide-neutral-800">
+            <div class="px-6 py-3 flex items-center justify-between gap-4">
+                <dt class="text-sm text-neutral-500">Domain</dt>
+                <dd class="text-sm font-medium text-white break-all text-right">
+                    {{if .DNSDomain}}
+                    {{.DNSDomain}}
+                    {{else}}
+                    <span class="text-neutral-500">Not configured</span>
+                    {{end}}
+                </dd>
+            </div>
+        </dl>
+    </div>
+
+    <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+        <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
             {{template "icon-shield"}}
             <h2 class="text-sm font-bold text-white uppercase tracking-wider">Authentication</h2>
         </div>

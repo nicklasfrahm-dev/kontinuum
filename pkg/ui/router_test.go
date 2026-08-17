@@ -559,8 +559,11 @@ func TestHandleKontinuumDetailRendersInstanceSettings(t *testing.T) {
 	}
 
 	item := kontinuumWithConfig(v1alpha2.KontinuumConfigStatus{
-		Server: v1alpha2.KontinuumServerConfigStatus{Addr: ":8080", Storage: "postgres://db.internal:5432/kontinuum"},
-		Log:    v1alpha2.KontinuumLogConfigStatus{Level: "info", Format: "json"},
+		Server: v1alpha2.KontinuumServerConfigStatus{
+			Addr: ":8080", Storage: "postgres://db.internal:5432/kontinuum",
+			DNS: v1alpha2.KontinuumDNSConfigStatus{Domain: "kontinuum.example.com"},
+		},
+		Log: v1alpha2.KontinuumLogConfigStatus{Level: "info", Format: "json"},
 		OIDC: v1alpha2.KontinuumOIDCConfigStatus{
 			Enabled: true, IssuerURL: testOIDCIssuerURL, ClientID: testOIDCClientID, AdminGroups: "platform-team",
 		},
@@ -592,6 +595,47 @@ func TestHandleKontinuumDetailRendersInstanceSettings(t *testing.T) {
 	assert.Contains(t, string(body), "kontinuum-system/worker-1")
 	assert.Contains(t, string(body), testOIDCIssuerURL)
 	assert.Contains(t, string(body), "platform-team")
+	assert.Contains(t, string(body), "kontinuum.example.com")
+}
+
+// TestHandleKontinuumDetailShowsDNSDomainNotConfiguredWhenUnset covers
+// issue #98's own case: a Kontinuum with no KONTINUUM_SERVER_DNS_DOMAIN
+// configured (the default for a local Talos dev zone — see
+// docs/local-setup.md) must show "Not configured" in the DNS section, not
+// a blank domain.
+func TestHandleKontinuumDetailShowsDNSDomainNotConfiguredWhenUnset(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	item := kontinuumWithConfig(v1alpha2.KontinuumConfigStatus{
+		Server: v1alpha2.KontinuumServerConfigStatus{Addr: ":8080", Storage: "postgres://db.internal:5432/kontinuum"},
+	})
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{items: []v1alpha2.Kontinuum{item}}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-1"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "Not configured")
 }
 
 func TestHandleKontinuumDetailHidesOIDCDetailsWhenInstanceOIDCDisabled(t *testing.T) {
