@@ -253,7 +253,7 @@ func TestAddPropagatesUnexpectedCreateError(t *testing.T) {
 func TestAddInfersDomainFromRegisteredKontinuumWhenUnset(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuum("hub", testStorage)
+	kontinuum, kontinuumSecret := registeredKontinuum("hub")
 	kontinuum.Status.Config.Server.DNS.Domain = testDomain
 
 	hubClient := newHubFakeClient(t, kontinuum, kontinuumSecret)
@@ -269,7 +269,7 @@ func TestAddInfersDomainFromRegisteredKontinuumWhenUnset(t *testing.T) {
 func TestAddPrefersExplicitDomainOverInference(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuum("hub", testStorage)
+	kontinuum, kontinuumSecret := registeredKontinuum("hub")
 	kontinuum.Status.Config.Server.DNS.Domain = "inferred.example.com"
 
 	hubClient := newHubFakeClient(t, kontinuum, kontinuumSecret)
@@ -287,7 +287,7 @@ func TestAddFailsWhenNoRegisteredKontinuumPublishesDomain(t *testing.T) {
 
 	// A Kontinuum is registered, but hasn't set KONTINUUM_SERVER_DNS_DOMAIN
 	// — nothing for inference to find.
-	kontinuum, kontinuumSecret := registeredKontinuum("hub", testStorage)
+	kontinuum, kontinuumSecret := registeredKontinuum("hub")
 	hubClient := newHubFakeClient(t, kontinuum, kontinuumSecret)
 
 	opts := testAddOptions()

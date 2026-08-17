@@ -143,6 +143,12 @@ type Config struct {
 	// only to detect that dev case; resolveImage otherwise ignores it in
 	// favor of a live lookup — see that function's own doc.
 	Version string
+	// GRPCEndpoint is this hub's own publicly reachable "host:port" for
+	// its etcd gRPC proxy (see pkg/domain/etcdproxy and
+	// v1alpha2.KontinuumGRPCConfigStatus's own doc) — read from the hub's
+	// own KONTINUUM_SERVER_GRPC_ENDPOINT, and used by zoneStorageDSN to
+	// build every newly joined zone's own KONTINUUM_SERVER_STORAGE.
+	GRPCEndpoint string
 	// RetryInterval is how long Reconcile waits before retrying a step that
 	// hasn't converged yet. Defaults to fifteen seconds when zero.
 	RetryInterval time.Duration
@@ -218,6 +224,7 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		Auth:                    c.Config.Auth,
 		ImageRepo:               c.Config.ImageRepo,
 		Version:                 c.Config.Version,
+		GRPCEndpoint:            c.Config.GRPCEndpoint,
 		RetryInterval:           c.Config.RetryInterval,
 		TeardownTimeout:         c.Config.TeardownTimeout,
 		Logger:                  c.Config.Logger,
@@ -256,6 +263,7 @@ type Reconciler struct {
 	Auth                    AuthConfig
 	ImageRepo               string
 	Version                 string
+	GRPCEndpoint            string
 	RetryInterval           time.Duration
 	TeardownTimeout         time.Duration
 	Logger                  *slog.Logger
@@ -285,11 +293,32 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
+	// Ensured/rotated regardless of install progress — a zone's own auth
+	// credential needs to exist (and later, keep rotating) for the whole
+	// lifetime of the Zone, not just while it's still being brought up. Its
+	// own requeue deadline is folded into whatever the rest of Reconcile
+	// decides below (see earliestRequeue), including once everything else
+	// is fully Ready and would otherwise stop requeuing altogether.
+	authRequeue, err := r.reconcileAuthKeys(ctx, &zoneObj)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to reconcile auth keys for zone %q: %w", zoneObj.Name, err)
+	}
+
+	result, err := r.reconcileClusterAndInstall(ctx, &zoneObj)
+
+	return earliestRequeue(result, authRequeue), err
+}
+
+// reconcileClusterAndInstall is Reconcile's own former body, factored out
+// so reconcileAuthKeys' own requeue deadline (see Reconcile) can be folded
+// into whatever this decides without every early return inside it needing
+// to know about that separately.
+func (r *Reconciler) reconcileClusterAndInstall(ctx context.Context, zoneObj *v1alpha2.Zone) (ctrl.Result, error) {
 	var cluster v1alpha2.TalosCluster
 
-	err = r.Client.Get(ctx, client.ObjectKey{Name: zoneObj.Name, Namespace: zoneObj.Namespace}, &cluster)
+	err := r.Client.Get(ctx, client.ObjectKey{Name: zoneObj.Name, Namespace: zoneObj.Namespace}, &cluster)
 	if apierrors.IsNotFound(err) {
-		return r.setClusterReadyCondition(ctx, &zoneObj, metav1.ConditionFalse, reasonTalosClusterNotFound,
+		return r.setClusterReadyCondition(ctx, zoneObj, metav1.ConditionFalse, reasonTalosClusterNotFound,
 			fmt.Sprintf("no talos cluster named %q found yet", zoneObj.Name))
 	}
 
@@ -298,17 +327,33 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	if !meta.IsStatusConditionTrue(cluster.Status.Conditions, taloscluster.ReadyConditionType) {
-		return r.setClusterReadyCondition(ctx, &zoneObj, metav1.ConditionFalse, reasonWaitingForTalosCluster,
+		return r.setClusterReadyCondition(ctx, zoneObj, metav1.ConditionFalse, reasonWaitingForTalosCluster,
 			fmt.Sprintf("waiting for talos cluster %q to become ready", cluster.Name))
 	}
 
-	result, err := r.setClusterReadyCondition(ctx, &zoneObj, metav1.ConditionTrue, reasonClusterReady,
+	result, err := r.setClusterReadyCondition(ctx, zoneObj, metav1.ConditionTrue, reasonClusterReady,
 		"talos cluster is ready")
 	if err != nil {
 		return result, err
 	}
 
-	return r.reconcileInstall(ctx, &zoneObj, &cluster)
+	return r.reconcileInstall(ctx, zoneObj, &cluster)
+}
+
+// earliestRequeue folds authRequeue (see reconcileAuthKeys) into result,
+// keeping whichever of the two would fire sooner. A zero authRequeue means
+// "no preference" (reconcileAuthKeys hit an error, already surfaced by its
+// own caller) and leaves result untouched.
+func earliestRequeue(result ctrl.Result, authRequeue time.Duration) ctrl.Result {
+	if authRequeue <= 0 {
+		return result
+	}
+
+	if result.RequeueAfter == 0 || authRequeue < result.RequeueAfter {
+		result.RequeueAfter = authRequeue
+	}
+
+	return result
 }
 
 // reconcileInstall installs kontinuum's downstream footprint onto zoneObj's own
@@ -336,7 +381,7 @@ func (r *Reconciler) reconcileInstall(
 		return ctrl.Result{}, fmt.Errorf("failed to build downstream client for %q: %w", zoneObj.Name, err)
 	}
 
-	storage, err := findKontinuumStorage(ctx, r.Client)
+	storage, err := r.zoneStorageDSN(ctx, zoneObj)
 	if err != nil {
 		r.Logger.Warn("no storage credentials to propagate yet", "zone", zoneObj.Name, "error", err)
 

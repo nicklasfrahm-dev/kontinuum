@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"sort"
 
-	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
@@ -63,33 +62,6 @@ func anyRegisteredKontinuum(ctx context.Context, hubClient client.Client) (*v1al
 	sort.Slice(list.Items, func(i, j int) bool { return list.Items[i].Name < list.Items[j].Name })
 
 	return &list.Items[0], nil
-}
-
-// findKontinuumStorage returns the raw, credential-bearing storage
-// connection string from any registered Kontinuum's own Secret — every
-// Kontinuum upserts this on every heartbeat (see
-// pkg/domain/registry/heartbeat.go's ensureSecret).
-func findKontinuumStorage(ctx context.Context, hubClient client.Client) (string, error) {
-	kontinuum, err := anyRegisteredKontinuum(ctx, hubClient)
-	if err != nil {
-		return "", err
-	}
-
-	ref := kontinuum.Status.SecretRef
-
-	var secret corev1.Secret
-
-	err = hubClient.Get(ctx, client.ObjectKey{Name: ref.Name, Namespace: ref.Namespace}, &secret)
-	if err != nil {
-		return "", fmt.Errorf("failed to fetch %q secret to load storage credentials: %w", ref.Name, err)
-	}
-
-	storage, ok := secret.Data[storageSecretKey]
-	if !ok {
-		return "", fmt.Errorf("%w: %q has no stored storage key yet", errNoRegisteredKontinuum, ref.Name)
-	}
-
-	return string(storage), nil
 }
 
 // FindJoinedKontinuum returns the Kontinuum registered for the given

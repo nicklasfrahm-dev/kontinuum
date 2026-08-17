@@ -79,7 +79,7 @@ func TestIgnoreNotFoundOrNoMatch(t *testing.T) {
 func TestReconcileTeardownDeletesDownstreamAndTalosCluster(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuum("hub", testStorage)
+	kontinuum, kontinuumSecret := registeredKontinuum("hub")
 	cluster := readyTalosCluster()
 	secret := kubeconfigSecret()
 
@@ -93,6 +93,7 @@ func TestReconcileTeardownDeletesDownstreamAndTalosCluster(t *testing.T) {
 		ACMEServer:              "https://acme-v02.api.letsencrypt.org/directory",
 		ImageRepo:               testImageRepo,
 		Version:                 testHubVersion,
+		GRPCEndpoint:            testGRPCEndpoint,
 		RetryInterval:           testRetryInterval,
 		TeardownTimeout:         testTeardownTimeout,
 		Logger:                  slog.Default(),

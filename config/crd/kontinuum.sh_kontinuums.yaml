@@ -278,6 +278,28 @@ spec:
                               mirroring how it infers Storage from that Secret.
                             type: string
                         type: object
+                      grpc:
+                        description: |-
+                          KontinuumGRPCConfigStatus groups this process's own etcd gRPC proxy
+                          config (see pkg/domain/etcdproxy) under its own namespace, same
+                          rationale as KontinuumDNSConfigStatus.
+                        properties:
+                          endpoint:
+                            description: |-
+                              Endpoint is this hub's own publicly reachable "host:port" for its
+                              etcd gRPC proxy (see pkg/domain/etcdproxy.RegisterHub) — multiplexed
+                              onto the same port as everything else this process serves, so this
+                              is normally the same host:port a browser reaches /app on. Not
+                              confidential, so — like DNS.Domain — it's published here directly:
+                              pkg/domain/zone's own Reconciler reads this off the hub's own
+                              config (not by inferring it from another registered Kontinuum, the
+                              way Storage/DNS.Domain are — every registered Kontinuum could be a
+                              different zone's own downstream instance, each reachable at a
+                              different address, so only the operator-configured value on this
+                              specific hub process is trustworthy here) to build a newly joined
+                              zone's own KONTINUUM_SERVER_STORAGE.
+                            type: string
+                        type: object
                       region:
                         description: Region duplicates spec.region — see this type's
                           own doc.

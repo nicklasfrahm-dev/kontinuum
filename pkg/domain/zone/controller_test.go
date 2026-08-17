@@ -1,6 +1,8 @@
 package zone_test
 
 import (
+	"context"
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
@@ -21,6 +23,7 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/etcdproxy"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/taloscluster"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/zone"
 )
@@ -46,6 +49,9 @@ const (
 	// tests: testHubVersion is never "dev", so resolveImage reads the tag
 	// off a registered Kontinuum instead — see registeredKontinuum.
 	testImage = testImageRepo + ":" + testKontinuumVersion
+	// testGRPCEndpoint is newReconciler's own Reconciler.GRPCEndpoint —
+	// zoneStorageDSN's own KONTINUUM_SERVER_GRPC_ENDPOINT stand-in.
+	testGRPCEndpoint = "hub.example.com:8080"
 
 	// testDownstreamNamespace/testDownstreamResourceName mirror
 	// pkg/domain/zone's own unexported downstreamNamespace/deploymentName
@@ -86,6 +92,58 @@ func (f fakeDownstreamClientBuilder) Build(_ []byte) (client.Client, error) {
 	return f.client, nil
 }
 
+// secretAdmissionClient wraps a client.Client, converting a corev1.Secret's
+// StringData into Data on Create/Update — mirroring what a real
+// apiserver's admission does, which the fake client doesn't replicate on
+// its own. Without this, a test (or, for that matter, production
+// reconcile logic — see reconcileAuthKeys followed later in the same
+// Reconcile pass by zoneStorageDSN's own Get) that writes a Secret via
+// StringData and reads it back via Data in the same test would see an
+// apparently-empty object, even though that exact sequence works
+// correctly against a real cluster.
+type secretAdmissionClient struct {
+	client.Client
+}
+
+func (c secretAdmissionClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	admitSecret(obj)
+
+	err := c.Client.Create(ctx, obj, opts...)
+	if err != nil {
+		return fmt.Errorf("failed to create object: %w", err)
+	}
+
+	return nil
+}
+
+func (c secretAdmissionClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	admitSecret(obj)
+
+	err := c.Client.Update(ctx, obj, opts...)
+	if err != nil {
+		return fmt.Errorf("failed to update object: %w", err)
+	}
+
+	return nil
+}
+
+func admitSecret(obj client.Object) {
+	secret, ok := obj.(*corev1.Secret)
+	if !ok || len(secret.StringData) == 0 {
+		return
+	}
+
+	if secret.Data == nil {
+		secret.Data = map[string][]byte{}
+	}
+
+	for k, v := range secret.StringData {
+		secret.Data[k] = []byte(v)
+	}
+
+	secret.StringData = nil
+}
+
 func newHubFakeClient(t *testing.T, objects ...client.Object) client.Client {
 	t.Helper()
 
@@ -94,11 +152,11 @@ func newHubFakeClient(t *testing.T, objects ...client.Object) client.Client {
 	require.NoError(t, v1alpha2.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 
-	return fake.NewClientBuilder().
+	return secretAdmissionClient{fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&v1alpha2.Zone{}, &v1alpha2.TalosCluster{}).
 		WithObjects(objects...).
-		Build()
+		Build()}
 }
 
 func newDownstreamFakeClient(t *testing.T) client.Client {
@@ -143,7 +201,7 @@ func kubeconfigSecret() *corev1.Secret {
 	}
 }
 
-func registeredKontinuum(name, storage string) (*v1alpha2.Kontinuum, *corev1.Secret) {
+func registeredKontinuum(name string) (*v1alpha2.Kontinuum, *corev1.Secret) {
 	secretName := "kontinuum-" + name
 
 	kontinuum := &v1alpha2.Kontinuum{
@@ -156,7 +214,7 @@ func registeredKontinuum(name, storage string) (*v1alpha2.Kontinuum, *corev1.Sec
 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: testDownstreamNamespace},
-		Data:       map[string][]byte{"KONTINUUM_SERVER_STORAGE": []byte(storage)},
+		Data:       map[string][]byte{"KONTINUUM_SERVER_STORAGE": []byte(testStorage)},
 	}
 
 	return kontinuum, secret
@@ -173,7 +231,7 @@ func registeredKontinuum(name, storage string) (*v1alpha2.Kontinuum, *corev1.Sec
 // to what this helper is testing — keeps landing on a Kontinuum whose
 // Secret actually holds a storage connection string.
 func joinedKontinuum(name string) (*v1alpha2.Kontinuum, *corev1.Secret) {
-	kontinuum, secret := registeredKontinuum(name, testStorage)
+	kontinuum, secret := registeredKontinuum(name)
 	kontinuum.Spec = v1alpha2.KontinuumSpec{Region: testRegion, Zone: testZone}
 	kontinuum.Status.LastHeartbeatTime = metav1.Now()
 
@@ -189,6 +247,7 @@ func newReconciler(hubClient client.Client, downstreamBuilder zone.DownstreamCli
 		Auth:                    zone.AuthConfig{InsecureAllowAnonymous: "true"},
 		ImageRepo:               testImageRepo,
 		Version:                 testHubVersion,
+		GRPCEndpoint:            testGRPCEndpoint,
 		RetryInterval:           testRetryInterval,
 		Logger:                  slog.Default(),
 	}
@@ -257,11 +316,17 @@ func TestReconcileWaitsForTalosClusterReady(t *testing.T) {
 	assertReadyMirrors(t, got, metav1.ConditionFalse, "WaitingForTalosCluster")
 }
 
+// TestReconcileReportsNoStorageSecretFound covers zoneStorageDSN's own
+// errGRPCEndpointNotConfigured path: an operator who hasn't set
+// KONTINUUM_SERVER_GRPC_ENDPOINT on the hub has nothing to point a newly
+// joined zone's own storage at, even though its auth keys (see
+// reconcileAuthKeys, which runs regardless) are already in place.
 func TestReconcileReportsNoStorageSecretFound(t *testing.T) {
 	t.Parallel()
 
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret())
 	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: newDownstreamFakeClient(t)})
+	reconciler.GRPCEndpoint = ""
 
 	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
@@ -279,7 +344,7 @@ func TestReconcileReportsNoStorageSecretFound(t *testing.T) {
 func TestReconcileInstallsDownstreamObjectsAndWaitsForCertificate(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuum("hub", testStorage)
+	kontinuum, kontinuumSecret := registeredKontinuum("hub")
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
 		kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)
@@ -315,7 +380,7 @@ func TestReconcileInstallsDownstreamObjectsAndWaitsForCertificate(t *testing.T) 
 func TestReconcileDevVersionDeploysLatestTag(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuum("hub", testStorage)
+	kontinuum, kontinuumSecret := registeredKontinuum("hub")
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
 		kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)
@@ -342,7 +407,7 @@ func TestReconcileDevVersionDeploysLatestTag(t *testing.T) {
 func TestReconcileReportsNoVersionFoundWhenRegisteredKontinuumHasNoVersion(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuum("hub", testStorage)
+	kontinuum, kontinuumSecret := registeredKontinuum("hub")
 	kontinuum.Status.Version = ""
 
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
@@ -375,10 +440,15 @@ func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) 
 	var secret corev1.Secret
 	require.NoError(t, downstream.Get(t.Context(),
 		client.ObjectKey{Name: testDownstreamEnvName, Namespace: testDownstreamNamespace}, &secret))
-	// A real apiserver converts StringData into the base64-encoded Data via
-	// admission logic the fake client doesn't replicate — see
-	// pkg/domain/registry/heartbeat_test.go's identical note.
-	assert.Equal(t, testStorage, secret.StringData["KONTINUUM_SERVER_STORAGE"])
+	// The zone's own storage no longer carries a copy of the hub's raw
+	// database DSN (see zoneStorageDSN's own doc) — it's an
+	// etcdproxy.BuildRelayDSN pointing back at the hub's own etcd gRPC
+	// proxy, carrying this zone's own (randomly generated, so not
+	// asserted verbatim) current auth key.
+	zoneName, _, hubEndpoint, ok := etcdproxy.ParseRelayDSN(secret.StringData["KONTINUUM_SERVER_STORAGE"])
+	require.True(t, ok, "KONTINUUM_SERVER_STORAGE must be a valid etcdproxy relay DSN")
+	assert.Equal(t, testZoneName, zoneName)
+	assert.Equal(t, testGRPCEndpoint, hubEndpoint)
 
 	var configMap corev1.ConfigMap
 	require.NoError(t, downstream.Get(t.Context(),
@@ -433,7 +503,7 @@ func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) 
 func TestReconcileFlipsInstalledOnceCertificateReady(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuum("hub", testStorage)
+	kontinuum, kontinuumSecret := registeredKontinuum("hub")
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
 		kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)
@@ -484,7 +554,7 @@ func TestReconcileFlipsInstalledOnceCertificateReady(t *testing.T) {
 func TestReconcileFlipsReadyOnceKontinuumJoinsRegistry(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuum("hub", testStorage)
+	kontinuum, kontinuumSecret := registeredKontinuum("hub")
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
 		kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)
@@ -511,7 +581,13 @@ func TestReconcileFlipsReadyOnceKontinuumJoinsRegistry(t *testing.T) {
 
 	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
-	assert.Equal(t, time.Duration(0), result.RequeueAfter)
+	// No longer a bare 0s once fully Ready: reconcileAuthKeys' own requeue
+	// deadline (see Reconcile) now always folds in, keeping the Zone
+	// reconciling for its whole lifetime so its auth keys keep rotating —
+	// see TestReconcileKeepsRequeuingForAuthKeyRotationOnceReady for that
+	// behavior's own dedicated coverage.
+	assert.LessOrEqual(t, result.RequeueAfter, 5*time.Minute)
+	assert.Positive(t, result.RequeueAfter)
 
 	var got v1alpha2.Zone
 	require.NoError(t, hubClient.Get(t.Context(), testZoneKey(), &got))
@@ -535,26 +611,31 @@ func TestReconcileIgnoresMissingZone(t *testing.T) {
 	assert.Equal(t, ctrl.Result{}, result)
 }
 
-func TestReconcileUsesAnyRegisteredKontinuumForStorage(t *testing.T) {
+// TestReconcileUsesAnyRegisteredKontinuumForVersion covers
+// anyRegisteredKontinuum's own name-sorted-first determinism (see its own
+// doc) as it applies to resolveImage's own version lookup — the same
+// mechanism findKontinuumStorage used to lean on for storage inference,
+// before a zone's own storage started pointing through the hub's etcd
+// gRPC proxy instead (see zoneStorageDSN).
+func TestReconcileUsesAnyRegisteredKontinuumForVersion(t *testing.T) {
 	t.Parallel()
 
-	// Two registered Kontinuums (as would happen once this same zone's own
-	// kontinuum-server joins the shared registry) — findKontinuumStorage
-	// picks the name-sorted first, regardless of role, per issue #29's
-	// explicit "do not discriminate by role" decision.
-	worker, workerSecret := registeredKontinuum("aaa-worker", "postgres://worker-copy/db")
-	hub, hubSecret := registeredKontinuum("zzz-hub", testStorage)
+	aaa, aaaSecret := registeredKontinuum("aaa-worker")
+	aaa.Status.Version = "v0.0.1-aaa"
+
+	zzz, zzzSecret := registeredKontinuum("zzz-hub")
+	zzz.Status.Version = "v0.0.2-zzz"
 
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
-		worker, workerSecret, hub, hubSecret)
+		aaa, aaaSecret, zzz, zzzSecret)
 	downstream := newDownstreamFakeClient(t)
 	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: downstream})
 
 	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
 
-	var secret corev1.Secret
+	var deployment appsv1.Deployment
 	require.NoError(t, downstream.Get(t.Context(),
-		client.ObjectKey{Name: testDownstreamEnvName, Namespace: testDownstreamNamespace}, &secret))
-	assert.Equal(t, "postgres://worker-copy/db", secret.StringData["KONTINUUM_SERVER_STORAGE"])
+		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &deployment))
+	assert.Equal(t, testImageRepo+":v0.0.1-aaa", deployment.Spec.Template.Spec.Containers[0].Image)
 }

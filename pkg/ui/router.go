@@ -454,7 +454,7 @@ func notFoundFallback(next http.HandlerFunc) http.HandlerFunc {
 		// mechanism deleteAndRedirect already uses for an explicit delete,
 		// just reached here for an object that vanished out from under a
 		// still-open page instead.
-		if request.Header.Get("HX-Request") == "true" {
+		if request.Header.Get("Hx-Request") == "true" {
 			writer.Header().Set("Hx-Redirect", target.String())
 			writer.WriteHeader(http.StatusOK)
 
