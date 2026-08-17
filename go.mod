@@ -26,7 +26,7 @@ require (
 	github.com/google/cel-go v0.27.0
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
-	github.com/kommodity-io/kommodity v0.162.1-0.20260816203131-05e744d2667e
+	github.com/kommodity-io/kommodity v0.163.0
 	github.com/lmittmann/tint v1.2.0
 	github.com/moby/moby/api v1.55.0
 	github.com/siderolabs/kms-client v0.2.0
@@ -34,6 +34,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go v0.43.0
+	go.etcd.io/etcd/api/v3 v3.6.8
 	golang.org/x/oauth2 v0.36.0
 	google.golang.org/grpc v1.83.0
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af
@@ -426,7 +427,6 @@ require (
 	go.augendre.info/arangolint v0.4.0 // indirect
 	go.augendre.info/fatcontext v0.9.0 // indirect
 	go.etcd.io/bbolt v1.4.3 // indirect
-	go.etcd.io/etcd/api/v3 v3.6.8 // indirect
 	go.etcd.io/etcd/client/pkg/v3 v3.6.8 // indirect
 	go.etcd.io/etcd/client/v3 v3.6.8 // indirect
 	go.etcd.io/etcd/pkg/v3 v3.6.8 // indirect

@@ -79,6 +79,20 @@ dev-clean: ## Stop development environment and remove volumes
 	@printf '$(CYAN)Cleaning development environment volumes...$(RESET)\n'
 	docker compose --profile dev down -v
 
+.PHONY: dev-talos
+dev-talos: ## Start development environment plus a real single-node Talos cluster (see docs/local-setup.md)
+	@printf '$(CYAN)Starting development environment with Talos...$(RESET)\n'
+	docker compose --profile dev --profile talos up
+
+.PHONY: dev-talos-down
+dev-talos-down: ## Stop development environment and Talos
+	docker compose --profile dev --profile talos down
+
+.PHONY: dev-talos-clean
+dev-talos-clean: ## Stop development environment and Talos, and remove volumes
+	@printf '$(CYAN)Cleaning development environment volumes...$(RESET)\n'
+	docker compose --profile dev --profile talos down -v
+
 .PHONY: image
 image: ## Build the container image
 	docker buildx build -f Containerfile -t kontinuum:$(VERSION) --load .
