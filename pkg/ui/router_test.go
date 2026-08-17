@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -74,6 +75,16 @@ const testTalosAddress = "10.0.0.5"
 // across zone-add/zone-delete tests below — see testTalosClusterName's own
 // doc for why this coincidentally matches its own <region>-<zone> naming.
 const testZoneValue = "eu-1a"
+
+// testExampleDomain is the shared DNS domain fixture value reused across
+// zone-add/zone-detail tests below.
+const testExampleDomain = "example.com"
+
+// testReadyConditionType mirrors zone.ReadyConditionType/
+// taloscluster.ReadyConditionType's own literal ("Ready") — kept as a local
+// copy rather than importing either domain package just for this one
+// string, same rationale as this file's other test-only literal constants.
+const testReadyConditionType = "Ready"
 
 // zoneAddFormRegionKey/zoneAddFormZoneKey/zoneAddFormTalosAddressKey are the
 // "Add zone" form's own field names (see zone_add_modal.html), reused across
@@ -548,8 +559,12 @@ func TestHandleKontinuumDetailRendersInstanceSettings(t *testing.T) {
 	}
 
 	item := kontinuumWithConfig(v1alpha2.KontinuumConfigStatus{
-		Server: v1alpha2.KontinuumServerConfigStatus{Addr: ":8080", Storage: "postgres://db.internal:5432/kontinuum"},
-		Log:    v1alpha2.KontinuumLogConfigStatus{Level: "info", Format: "json"},
+		Server: v1alpha2.KontinuumServerConfigStatus{
+			Addr: ":8080", Storage: "postgres://db.internal:5432/kontinuum",
+			DNS:  v1alpha2.KontinuumDNSConfigStatus{Domain: "kontinuum.example.com"},
+			GRPC: v1alpha2.KontinuumGRPCConfigStatus{Endpoint: "proxy:8443", InsecureTLSSkipVerify: "true"},
+		},
+		Log: v1alpha2.KontinuumLogConfigStatus{Level: "info", Format: "json"},
 		OIDC: v1alpha2.KontinuumOIDCConfigStatus{
 			Enabled: true, IssuerURL: testOIDCIssuerURL, ClientID: testOIDCClientID, AdminGroups: "platform-team",
 		},
@@ -581,6 +596,52 @@ func TestHandleKontinuumDetailRendersInstanceSettings(t *testing.T) {
 	assert.Contains(t, string(body), "kontinuum-system/worker-1")
 	assert.Contains(t, string(body), testOIDCIssuerURL)
 	assert.Contains(t, string(body), "platform-team")
+	assert.Contains(t, string(body), "kontinuum.example.com")
+	assert.Contains(t, string(body), "proxy:8443")
+	assert.Contains(t, string(body), "Insecure TLS skip verify")
+}
+
+// TestHandleKontinuumDetailShowsNotConfiguredWhenDNSAndGRPCUnset covers
+// issue #98's own case: a Kontinuum with no KONTINUUM_SERVER_DNS_DOMAIN or
+// KONTINUUM_SERVER_GRPC_ENDPOINT configured (the default for a local Talos
+// dev zone — see docs/local-setup.md) must show "Not configured" in both
+// the DNS and gRPC sections, not a blank value, and gRPC's own insecure
+// TLS skip verify must read "Disabled".
+func TestHandleKontinuumDetailShowsNotConfiguredWhenDNSAndGRPCUnset(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	item := kontinuumWithConfig(v1alpha2.KontinuumConfigStatus{
+		Server: v1alpha2.KontinuumServerConfigStatus{Addr: ":8080", Storage: "postgres://db.internal:5432/kontinuum"},
+	})
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{items: []v1alpha2.Kontinuum{item}}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-1"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, 2, strings.Count(string(body), "Not configured"),
+		"both DNS domain and gRPC endpoint must show their own \"Not configured\" state")
+	assert.Contains(t, string(body), "text-neutral-400\">Disabled<")
 }
 
 func TestHandleKontinuumDetailHidesOIDCDetailsWhenInstanceOIDCDisabled(t *testing.T) {
@@ -1753,6 +1814,19 @@ func (e errorZoneClient) Delete(context.Context, client.Object, ...client.Delete
 	return e.err
 }
 
+// getErrorZoneClient is a client.Client test double whose Get always
+// returns err — used to exercise handleZoneDetail's own bad-gateway/
+// forbidden paths, mirroring errorZoneClient's identical role for Delete.
+type getErrorZoneClient struct {
+	client.Client
+
+	err error
+}
+
+func (g getErrorZoneClient) Get(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error {
+	return g.err
+}
+
 func newTestZoneAddRequest(t *testing.T, form url.Values) *http.Request {
 	t.Helper()
 
@@ -2111,6 +2185,228 @@ func TestHandleDeleteZoneInvalidatesSessionOnForbidden(t *testing.T) {
 
 	assert.Equal(t, http.StatusFound, resp.StatusCode)
 	assert.NotEmpty(t, invalidatedWith)
+}
+
+// TestHandleZoneDetailRendersOverviewClusterAndRegistry covers the happy
+// path: a Zone whose owning TalosCluster exists and is Ready, and whose own
+// kontinuum-server has actually joined the hub's registry (see
+// zonedomain.FindJoinedKontinuum) — the state issue #95 asked this page to
+// surface directly.
+func TestHandleZoneDetailRendersOverviewClusterAndRegistry(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	zoneObj := &v1alpha2.Zone{
+		ObjectMeta: metav1.ObjectMeta{Name: testTalosClusterName, Namespace: v1alpha2.KontinuumSystemNamespace},
+		Spec:       v1alpha2.ZoneSpec{Region: "eu", Zone: testZoneValue, Domain: testExampleDomain},
+		Status: v1alpha2.ZoneStatus{
+			Conditions: []metav1.Condition{
+				{
+					Type: testReadyConditionType, Status: metav1.ConditionTrue, Reason: "RegistryJoined",
+					Message: "kontinuum-server for this zone is registered and heartbeating",
+				},
+			},
+		},
+	}
+	cluster := &v1alpha2.TalosCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: testTalosClusterName, Namespace: v1alpha2.KontinuumSystemNamespace},
+		Status: v1alpha2.TalosClusterStatus{
+			Conditions: []metav1.Condition{
+				{Type: testReadyConditionType, Status: metav1.ConditionTrue, Reason: "AddonsInstalled"},
+			},
+		},
+	}
+	kontinuum := &v1alpha2.Kontinuum{
+		ObjectMeta: metav1.ObjectMeta{Name: "eu-1a-worker", Namespace: v1alpha2.KontinuumSystemNamespace},
+		Spec:       v1alpha2.KontinuumSpec{Region: "eu", Zone: testZoneValue},
+		Status:     v1alpha2.KontinuumStatus{Role: v1alpha2.RoleWorker, LastHeartbeatTime: metav1.Now()},
+	}
+
+	zoneClient := newTestZoneClient(t, zoneObj, cluster, kontinuum)
+	zonesFactory := func(context.Context) (client.Client, error) { return zoneClient, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/zones/eu-eu-1a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "eu-eu-1a")
+	assert.Contains(t, string(body), "example.com")
+	assert.Contains(t, string(body), `href="/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"`)
+	assert.Contains(t, string(body), `href="/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/eu-1a-worker"`)
+	assert.Contains(t, string(body), "Worker")
+	assert.NotContains(t, string(body), "Not yet joined")
+	assert.NotContains(t, string(body), "Not provisioned yet")
+	assert.Contains(t, string(body), "RegistryJoined", "the Ready condition's own reason, rendered by conditions-table")
+}
+
+// TestHandleZoneDetailShowsNotProvisionedAndNotJoinedWhenMissing covers a
+// freshly created Zone: zone-add's own fan-out hasn't finished yet (no
+// TalosCluster sharing its name), and this zone's own kontinuum-server
+// hasn't joined the registry (or, per issue #95, may never even manage to
+// start — see zone.AuthConfig's own doc) yet either.
+func TestHandleZoneDetailShowsNotProvisionedAndNotJoinedWhenMissing(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	zoneObj := &v1alpha2.Zone{
+		ObjectMeta: metav1.ObjectMeta{Name: testTalosClusterName, Namespace: v1alpha2.KontinuumSystemNamespace},
+		Spec:       v1alpha2.ZoneSpec{Region: "eu", Zone: testZoneValue, Domain: testExampleDomain},
+	}
+
+	zoneClient := newTestZoneClient(t, zoneObj)
+	zonesFactory := func(context.Context) (client.Client, error) { return zoneClient, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/zones/eu-eu-1a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "Not provisioned yet")
+	assert.Contains(t, string(body), "Not yet joined")
+	assert.Contains(t, string(body), "No conditions reported yet.")
+}
+
+// TestHandleZoneDetailRedirectsToParentForUnknownZone: Zone has no
+// dedicated list page of its own (unlike TalosCluster/Instance), so the one
+// notFoundFallback hop this asserts lands on
+// .../namespaces/{ns}/zones — itself unmapped, walked past by a real
+// browser's own next redirect (see notFoundFallback's own doc), but this is
+// the correct first hop regardless.
+func TestHandleZoneDetailRedirectsToParentForUnknownZone(t *testing.T) {
+	t.Parallel()
+
+	assertGetRedirectsTo(t,
+		"/app/kontinuum.sh/namespaces/kontinuum-system/zones/missing",
+		"/app/kontinuum.sh/namespaces/kontinuum-system/zones")
+}
+
+// TestHandleZoneDetailPollSendsHxRedirectForDeletedZone is
+// TestHandleTalosClusterDetailPollSendsHxRedirectForDeletedCluster's own
+// counterpart for the zone detail page's identical 15s poll.
+func TestHandleZoneDetailPollSendsHxRedirectForDeletedZone(t *testing.T) {
+	t.Parallel()
+
+	assertHTMXGetRedirectsTo(t,
+		"/app/kontinuum.sh/namespaces/kontinuum-system/zones/missing",
+		"/app/kontinuum.sh/namespaces/kontinuum-system/zones")
+}
+
+func TestHandleZoneDetailInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	forbiddenReason := schema.GroupResource{Group: v1alpha2.GroupName, Resource: zonesResource}
+	zonesFactory := func(context.Context) (client.Client, error) {
+		return getErrorZoneClient{err: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
+	}
+
+	var invalidatedWith string
+
+	invalidateSession := func(writer http.ResponseWriter, _ *http.Request, message string) {
+		invalidatedWith = message
+
+		writer.WriteHeader(http.StatusFound)
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-version",
+		config.Config{}, false, invalidateSession)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/zones/eu-eu-1a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusFound, resp.StatusCode)
+	assert.NotEmpty(t, invalidatedWith)
+}
+
+func TestHandleZoneDetailReturnsBadGatewayOnFailure(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+	zonesFactory := func(context.Context) (client.Client, error) { return getErrorZoneClient{err: errFactory}, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/zones/eu-eu-1a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
+}
+
+// TestRegistryPageLinksZoneRowToDetailPage covers the registry page's own
+// zones table — see registry_content.html's own zone-name cell.
+func TestRegistryPageLinksZoneRowToDetailPage(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	zoneClient := newTestZoneClient(t, &v1alpha2.Zone{
+		ObjectMeta: metav1.ObjectMeta{Name: testZoneValue, Namespace: v1alpha2.KontinuumSystemNamespace},
+	})
+	zonesFactory := func(context.Context) (client.Client, error) { return zoneClient, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body),
+		`href="/app/kontinuum.sh/namespaces/kontinuum-system/zones/`+testZoneValue+`"`)
 }
 
 func TestRegistryPageEmbedsLeaveZoneButtonAndModal(t *testing.T) {
@@ -2906,7 +3202,7 @@ func talosClusterFixture(ready metav1.ConditionStatus) v1alpha2.TalosCluster {
 		Status: v1alpha2.TalosClusterStatus{
 			Conditions: []metav1.Condition{
 				{
-					Type: "Ready", Status: ready, Reason: "ClusterReady", Message: "cluster is ready",
+					Type: testReadyConditionType, Status: ready, Reason: "ClusterReady", Message: "cluster is ready",
 					LastTransitionTime: metav1.Now(),
 				},
 			},
@@ -3151,6 +3447,66 @@ func TestHandleTalosClusterDetailRendersOverviewPoolsAndConditions(t *testing.T)
 	assert.Regexp(t, `id="taloscluster-kubeconfig-masked"\s+class="relative`, string(body),
 		"the masked panel starts visible when the page loads without ?reveal=true")
 	assert.Regexp(t, `id="taloscluster-kubeconfig-content"\s+class="hidden relative`, string(body))
+}
+
+// TestHandleTalosClusterDetailSortsConditionsNewestFirst covers issue #98:
+// the conditions table must show the most recently transitioned condition
+// first, regardless of the order status.conditions happens to store them
+// in (Kubernetes gives no ordering guarantee there) — here the older
+// "ClusterReady" condition is listed before the newer "AddonsHealthy" one
+// in the fixture itself, so a naive render-in-storage-order would get this
+// backwards.
+func TestHandleTalosClusterDetailSortsConditionsNewestFirst(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	older := metav1.NewTime(time.Now().Add(-time.Hour))
+	newer := metav1.NewTime(time.Now())
+
+	cluster := talosClusterFixture(metav1.ConditionTrue)
+	cluster.Status.Conditions = []metav1.Condition{
+		{
+			Type: testReadyConditionType, Status: metav1.ConditionTrue,
+			Reason: "ClusterReady", Message: "cluster is ready", LastTransitionTime: older,
+		},
+		{
+			Type: "AddonsHealthy", Status: metav1.ConditionTrue,
+			Reason: "AddonsInstalled", Message: "addons are healthy", LastTransitionTime: newer,
+		},
+	}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{talosClusters: []v1alpha2.TalosCluster{cluster}}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder,
+		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	newerIndex := strings.Index(string(body), "AddonsHealthy")
+	olderIndex := strings.Index(string(body), "ClusterReady")
+
+	require.NotEqual(t, -1, newerIndex, "AddonsHealthy condition must be rendered")
+	require.NotEqual(t, -1, olderIndex, "ClusterReady condition must be rendered")
+	assert.Less(t, newerIndex, olderIndex,
+		"the newer AddonsHealthy condition must render before the older ClusterReady one")
 }
 
 func TestHandleTalosClusterDetailRevealsKubeconfigPanelViaQueryParam(t *testing.T) {

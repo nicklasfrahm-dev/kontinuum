@@ -118,18 +118,26 @@ func TestRunZoneAddPropagatesHubClientBuildError(t *testing.T) {
 	require.ErrorIs(t, err, assert.AnError)
 }
 
-func TestRunZoneAddPropagatesDomainInferenceError(t *testing.T) {
+// TestRunZoneAddSucceedsWithNoDomainToInfer covers issue #98's own gap: no
+// registered Kontinuum at all, so Add has nothing to infer a domain from —
+// this must not fail zone-add, since a Zone with no domain configured is a
+// legitimate, supported choice (see zonedomain.AddOptions.Domain's own
+// doc).
+func TestRunZoneAddSucceedsWithNoDomainToInfer(t *testing.T) {
 	t.Parallel()
 
-	// No registered Kontinuum at all — Add has nothing to infer a domain
-	// from.
 	hubClient := newFakeHubClient(t)
 	cmd := testCmd(&bytes.Buffer{})
 
 	err := zone.RunZoneAdd(cmd, zone.AddFlags{Region: testRegion, Zone: testZone, TalosAddress: testTalosAddress},
 		func(string, string) (client.Client, error) { return hubClient, nil })
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "infer domain")
+	require.NoError(t, err)
+
+	var got v1alpha2.Zone
+
+	require.NoError(t, hubClient.Get(t.Context(),
+		client.ObjectKey{Name: testRegion + "-" + testZone, Namespace: v1alpha2.KontinuumSystemNamespace}, &got))
+	assert.Empty(t, got.Spec.Domain)
 }
 
 func TestRunZoneAddWaitReturnsOnceInstalled(t *testing.T) {

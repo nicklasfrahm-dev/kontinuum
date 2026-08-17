@@ -27,8 +27,25 @@ const (
 	// InstalledConditionType is set true once every downstream object this
 	// package installs is created and, for Certificate specifically, itself
 	// reports Ready — a real signal that TLS issuance succeeded, not just
-	// that the object was created.
+	// that the object was created. This is not yet the reconciler's
+	// terminal gate — see RegistryJoinedConditionType's own doc — since a
+	// zone can be fully installed, with TLS issued and the kontinuum
+	// container itself running, while still failing to actually join the
+	// hub's registry (e.g. issue #95: a missing authentication env var used
+	// to make the deployed process exit immediately on startup, before it
+	// ever got as far as heartbeating).
 	InstalledConditionType = "Installed"
+	// RegistryJoinedConditionType is set true once this zone's own
+	// kontinuum-server has actually registered itself as a worker Kontinuum
+	// the hub can see (see FindJoinedKontinuum) — checked only once
+	// Installed is true, since there's no point looking for a heartbeat
+	// from a container that isn't even running yet. This, not Installed, is
+	// this reconciler's true terminal gate: "the downstream objects exist
+	// and TLS was issued" and "the zone's own kontinuum-server actually
+	// joined the registry" are two different failure modes an operator
+	// needs to tell apart (see docs/workflows/zone-add.md's own "closing
+	// the loop" description of what joining a zone is meant to achieve).
+	RegistryJoinedConditionType = "RegistryJoined"
 	// TeardownConditionType is set false while a Zone being deleted is
 	// still waiting on downstream cleanup and/or its seed node's Talos
 	// Reset — see teardown.go's own doc. Never observed true: the
@@ -36,16 +53,17 @@ const (
 	// reconcile pass that would otherwise have set it, per issue #49's own
 	// "only removes the finalizer once both steps complete" scope.
 	TeardownConditionType = "Teardown"
-	// ReadyConditionType aggregates ClusterReady and Installed into the one
-	// Type kstatus/kubectl-tree tooling recognizes generically — a CRD with
-	// no Kind-specific handling (like Zone) only ever renders a populated
-	// READY/REASON/STATUS column in `kubectl tree` if status.conditions
-	// carries an entry literally Typed "Ready" (mirrors TalosCluster's own
-	// ReadyConditionType). Set false alongside ClusterReady whenever that's
-	// false (see setClusterReadyCondition) — a true ClusterReady doesn't by
-	// itself mean the Zone is ready, only that reconcileInstall is about to
-	// run — and always mirrored from Installed otherwise (see
-	// setInstalledCondition), which is this reconciler's true terminal
+	// ReadyConditionType aggregates ClusterReady, Installed, and
+	// RegistryJoined into the one Type kstatus/kubectl-tree tooling
+	// recognizes generically — a CRD with no Kind-specific handling (like
+	// Zone) only ever renders a populated READY/REASON/STATUS column in
+	// `kubectl tree` if status.conditions carries an entry literally Typed
+	// "Ready" (mirrors TalosCluster's own ReadyConditionType). Set false
+	// alongside ClusterReady or Installed whenever either of those is false
+	// (see setClusterReadyCondition/setInstalledCondition) — neither being
+	// true by itself means the Zone is ready, only that the next step is
+	// about to run — and always mirrored from RegistryJoined otherwise (see
+	// setRegistryJoinedCondition), which is this reconciler's true terminal
 	// gate.
 	ReadyConditionType = "Ready"
 
@@ -54,9 +72,12 @@ const (
 	reasonClusterReady           = "ClusterReady"
 	reasonDownstreamNotReady     = "DownstreamNotReady"
 	reasonNoStorageSecret        = "NoStorageSecretFound"
+	reasonNoVersionFound         = "NoVersionFound"
 	reasonInstallFailed          = "InstallFailed"
 	reasonWaitingForCertificate  = "WaitingForCertificate"
 	reasonInstalled              = "Installed"
+	reasonWaitingForRegistry     = "WaitingForRegistry"
+	reasonRegistryJoined         = "RegistryJoined"
 
 	// reasonDownstreamTeardownFailed and reasonTalosClusterDeleteFailed are
 	// teardown.go's own retryable-failure reasons — see reconcileTeardown.
@@ -96,11 +117,30 @@ type Config struct {
 	// pkg/config's KONTINUUM_ACME_EMAIL/KONTINUUM_ACME_SERVER.
 	ACMEEmail  string
 	ACMEServer string
-	// Image is the kontinuum container image this package deploys onto
-	// every joined zone's downstream cluster (e.g.
-	// "ghcr.io/nicklasfrahm/kontinuum:v1.2.3") — see pkg/cli/serve.go's
-	// zoneOptions, which computes this from this repo's own build version.
-	Image string
+	// Auth mirrors the hub's own authentication choice onto every joined
+	// zone's own kontinuum-server — see AuthConfig's own doc for why this
+	// is required, not optional.
+	Auth AuthConfig
+	// ImageRepo is the kontinuum container image repository this package
+	// deploys onto every joined zone's downstream cluster (e.g.
+	// "ghcr.io/nicklasfrahm-dev/kontinuum") — see pkg/cli/serve.go's
+	// zoneOptions. The tag to deploy is resolved separately, at reconcile
+	// time, from whatever version an already-registered Kontinuum reports —
+	// see resolveImage's own doc.
+	ImageRepo string
+	// GRPCEndpoint is this hub's own publicly reachable "host:port" for
+	// its etcd gRPC proxy (see pkg/domain/etcdproxy and
+	// v1alpha2.KontinuumGRPCConfigStatus's own doc) — read from the hub's
+	// own KONTINUUM_SERVER_GRPC_ENDPOINT, and used by zoneStorageDSN to
+	// build every newly joined zone's own KONTINUUM_SERVER_STORAGE.
+	GRPCEndpoint string
+	// GRPCInsecureSkipVerify mirrors the hub's own
+	// KONTINUUM_SERVER_GRPC_INSECURE_TLS_SKIP_VERIFY (see
+	// v1alpha2.KontinuumGRPCConfigStatus's own doc) onto every newly joined
+	// zone's own ConfigMap — see ensureConfigMap's own doc for why this,
+	// not GRPCEndpoint above, is what a joined zone's own deployed process
+	// actually needs to dial GRPCEndpoint successfully.
+	GRPCInsecureSkipVerify string
 	// RetryInterval is how long Reconcile waits before retrying a step that
 	// hasn't converged yet. Defaults to fifteen seconds when zero.
 	RetryInterval time.Duration
@@ -109,6 +149,34 @@ type Config struct {
 	// anyway — see teardown.go's own doc. Defaults to fifteen minutes when
 	// zero.
 	TeardownTimeout time.Duration
+}
+
+// AuthConfig mirrors the hub's own authentication choice onto every joined
+// zone's own kontinuum-server ConfigMap (see ensureConfigMap) — without it,
+// the deployed process fails its own startup check
+// (pkg/config.Config.ValidateAuthentication, which refuses to start unless
+// exactly one of OIDCIssuerURL or InsecureAllowAnonymous is set) and exits
+// immediately, before it ever gets a chance to heartbeat and join the hub's
+// registry. Exactly one of InsecureAllowAnonymous ("true") or OIDCIssuerURL
+// is expected to be set here, mirroring the hub's own already-validated
+// choice — this package trusts that invariant rather than re-checking it,
+// since runServe already calls ValidateAuthentication on the hub's own cfg
+// before the zone controller is ever wired up (see pkg/cli/serve.go).
+type AuthConfig struct {
+	// InsecureAllowAnonymous is the hub's own KONTINUUM_INSECURE_ALLOW_ANONYMOUS
+	// value, forwarded verbatim.
+	InsecureAllowAnonymous string
+	// OIDCIssuerURL, OIDCClientID, and OIDCAdminGroups are the hub's own
+	// KONTINUUM_OIDC_ISSUER_URL/_CLIENT_ID/_ADMIN_GROUPS values, forwarded
+	// verbatim. Empty when the hub itself has no OIDC configured. Unlike
+	// those three, KONTINUUM_OIDC_REDIRECT_URL is never forwarded from the
+	// hub's own value — ensureConfigMap computes a zone-specific one from
+	// its own <zone>.<region>.<domain> hostname instead, since a redirect
+	// URL registered with the issuer for the hub's own host would never
+	// match a browser completing a login against this zone's own /app UI.
+	OIDCIssuerURL   string
+	OIDCClientID    string
+	OIDCAdminGroups string
 }
 
 // Controller wires the Zone downstream-install reconciler onto a
@@ -145,7 +213,10 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		DownstreamClientBuilder: c.Config.DownstreamClientBuilder,
 		ACMEEmail:               c.Config.ACMEEmail,
 		ACMEServer:              c.Config.ACMEServer,
-		Image:                   c.Config.Image,
+		Auth:                    c.Config.Auth,
+		ImageRepo:               c.Config.ImageRepo,
+		GRPCEndpoint:            c.Config.GRPCEndpoint,
+		GRPCInsecureSkipVerify:  c.Config.GRPCInsecureSkipVerify,
 		RetryInterval:           c.Config.RetryInterval,
 		TeardownTimeout:         c.Config.TeardownTimeout,
 		Logger:                  c.Config.Logger,
@@ -181,7 +252,10 @@ type Reconciler struct {
 	DownstreamClientBuilder DownstreamClientBuilder
 	ACMEEmail               string
 	ACMEServer              string
-	Image                   string
+	Auth                    AuthConfig
+	ImageRepo               string
+	GRPCEndpoint            string
+	GRPCInsecureSkipVerify  string
 	RetryInterval           time.Duration
 	TeardownTimeout         time.Duration
 	Logger                  *slog.Logger
@@ -211,11 +285,32 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
+	// Ensured/rotated regardless of install progress — a zone's own auth
+	// credential needs to exist (and later, keep rotating) for the whole
+	// lifetime of the Zone, not just while it's still being brought up. Its
+	// own requeue deadline is folded into whatever the rest of Reconcile
+	// decides below (see earliestRequeue), including once everything else
+	// is fully Ready and would otherwise stop requeuing altogether.
+	authRequeue, err := r.reconcileAuthKeys(ctx, &zoneObj)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to reconcile auth keys for zone %q: %w", zoneObj.Name, err)
+	}
+
+	result, err := r.reconcileClusterAndInstall(ctx, &zoneObj)
+
+	return earliestRequeue(result, authRequeue), err
+}
+
+// reconcileClusterAndInstall is Reconcile's own former body, factored out
+// so reconcileAuthKeys' own requeue deadline (see Reconcile) can be folded
+// into whatever this decides without every early return inside it needing
+// to know about that separately.
+func (r *Reconciler) reconcileClusterAndInstall(ctx context.Context, zoneObj *v1alpha2.Zone) (ctrl.Result, error) {
 	var cluster v1alpha2.TalosCluster
 
-	err = r.Client.Get(ctx, client.ObjectKey{Name: zoneObj.Name, Namespace: zoneObj.Namespace}, &cluster)
+	err := r.Client.Get(ctx, client.ObjectKey{Name: zoneObj.Name, Namespace: zoneObj.Namespace}, &cluster)
 	if apierrors.IsNotFound(err) {
-		return r.setClusterReadyCondition(ctx, &zoneObj, metav1.ConditionFalse, reasonTalosClusterNotFound,
+		return r.setClusterReadyCondition(ctx, zoneObj, metav1.ConditionFalse, reasonTalosClusterNotFound,
 			fmt.Sprintf("no talos cluster named %q found yet", zoneObj.Name))
 	}
 
@@ -224,27 +319,48 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	if !meta.IsStatusConditionTrue(cluster.Status.Conditions, taloscluster.ReadyConditionType) {
-		return r.setClusterReadyCondition(ctx, &zoneObj, metav1.ConditionFalse, reasonWaitingForTalosCluster,
+		return r.setClusterReadyCondition(ctx, zoneObj, metav1.ConditionFalse, reasonWaitingForTalosCluster,
 			fmt.Sprintf("waiting for talos cluster %q to become ready", cluster.Name))
 	}
 
-	result, err := r.setClusterReadyCondition(ctx, &zoneObj, metav1.ConditionTrue, reasonClusterReady,
+	result, err := r.setClusterReadyCondition(ctx, zoneObj, metav1.ConditionTrue, reasonClusterReady,
 		"talos cluster is ready")
 	if err != nil {
 		return result, err
 	}
 
-	return r.reconcileInstall(ctx, &zoneObj, &cluster)
+	return r.reconcileInstall(ctx, zoneObj, &cluster)
+}
+
+// earliestRequeue folds authRequeue (see reconcileAuthKeys) into result,
+// keeping whichever of the two would fire sooner. A zero authRequeue means
+// "no preference" (reconcileAuthKeys hit an error, already surfaced by its
+// own caller) and leaves result untouched.
+func earliestRequeue(result ctrl.Result, authRequeue time.Duration) ctrl.Result {
+	if authRequeue <= 0 {
+		return result
+	}
+
+	if result.RequeueAfter == 0 || authRequeue < result.RequeueAfter {
+		result.RequeueAfter = authRequeue
+	}
+
+	return result
 }
 
 // reconcileInstall installs kontinuum's downstream footprint onto zoneObj's own
 // cluster — only ever reached once ClusterReady is true (see Reconcile).
 // Every step is idempotent create-or-update; the first error short-circuits
-// with Installed=False/InstallFailed and a requeue. Installed only flips
-// True once the Certificate ensureCertificate creates itself reports Ready
-// — a real signal that TLS issuance succeeded, not just that the object was
-// created (mirrors how TalosCluster/Addon already aggregate real
-// downstream readiness).
+// with Installed=False/InstallFailed and a requeue. With spec.domain set,
+// Installed only flips True once the Certificate ensureCertificate creates
+// itself reports Ready — a real signal that TLS issuance succeeded, not
+// just that the object was created (mirrors how TalosCluster/Addon already
+// aggregate real downstream readiness). With spec.domain unset, there's no
+// hostname to issue a certificate or route traffic for, so installNetwork
+// is skipped entirely and Installed flips True as soon as the workload
+// itself installs. Either way, reconcileRegistryJoin runs as the final step
+// once Installed is True, before the Zone can report Ready (see
+// RegistryJoinedConditionType's own doc).
 func (r *Reconciler) reconcileInstall(
 	ctx context.Context, zoneObj *v1alpha2.Zone, cluster *v1alpha2.TalosCluster,
 ) (ctrl.Result, error) {
@@ -260,20 +376,56 @@ func (r *Reconciler) reconcileInstall(
 		return ctrl.Result{}, fmt.Errorf("failed to build downstream client for %q: %w", zoneObj.Name, err)
 	}
 
-	storage, err := findKontinuumStorage(ctx, r.Client)
+	storage, err := r.zoneStorageDSN(ctx, zoneObj)
 	if err != nil {
 		r.Logger.Warn("no storage credentials to propagate yet", "zone", zoneObj.Name, "error", err)
 
 		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonNoStorageSecret, err.Error())
 	}
 
-	hostname := fmt.Sprintf("%s.%s.%s", zoneObj.Spec.Zone, zoneObj.Spec.Region, zoneObj.Spec.Domain)
+	image, err := r.resolveImage(ctx)
+	if err != nil {
+		r.Logger.Warn("no kontinuum version to deploy yet", "zone", zoneObj.Name, "error", err)
 
-	err = r.installWorkload(ctx, downstream, zoneObj, storage)
+		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonNoVersionFound, err.Error())
+	}
+
+	// hostname stays empty when spec.domain is unset — installNetwork (and
+	// everything it creates: ClusterIssuer, Gateway, Certificate,
+	// HTTPRoute) is skipped entirely in that case, not just given a
+	// malformed "<zone>.<region>." hostname: none of those resources mean
+	// anything without a real domain to issue a certificate and route
+	// traffic for. installWorkload still runs regardless — this zone's own
+	// kontinuum-server registers with the hub either way (see
+	// ensureConfigMap's own doc for hostname's only other use, OIDC's
+	// redirect URL, itself skipped unless auth.OIDCIssuerURL is set).
+	hasDomain := zoneObj.Spec.Domain != ""
+
+	var hostname string
+	if hasDomain {
+		hostname = fmt.Sprintf("%s.%s.%s", zoneObj.Spec.Zone, zoneObj.Spec.Region, zoneObj.Spec.Domain)
+	}
+
+	err = r.installWorkload(ctx, downstream, zoneObj, storage, image, hostname)
 	if err != nil {
 		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonInstallFailed, err.Error())
 	}
 
+	if !hasDomain {
+		return r.finishInstallWithoutDomain(ctx, zoneObj)
+	}
+
+	return r.finishInstallWithDomain(ctx, downstream, zoneObj, hostname)
+}
+
+// finishInstallWithDomain installs the network layer (ClusterIssuer,
+// Gateway, Certificate, HTTPRoute — see installNetwork) for a Zone with
+// spec.domain set, and once the Certificate itself reports Ready, flips
+// Installed True and proceeds to reconcileRegistryJoin — split out of
+// reconcileInstall purely to keep its own cyclomatic complexity down.
+func (r *Reconciler) finishInstallWithDomain(
+	ctx context.Context, downstream client.Client, zoneObj *v1alpha2.Zone, hostname string,
+) (ctrl.Result, error) {
 	certReady, err := r.installNetwork(ctx, downstream, hostname)
 	if err != nil {
 		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonInstallFailed, err.Error())
@@ -284,14 +436,85 @@ func (r *Reconciler) reconcileInstall(
 			"waiting for cert-manager to issue "+hostname+"'s certificate")
 	}
 
-	return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionTrue, reasonInstalled,
+	result, err := r.setInstalledCondition(ctx, zoneObj, metav1.ConditionTrue, reasonInstalled,
 		"kontinuum-server installed and serving at "+hostname)
+	if err != nil {
+		return result, err
+	}
+
+	return r.reconcileRegistryJoin(ctx, zoneObj)
+}
+
+// finishInstallWithoutDomain flips Installed True and proceeds straight to
+// reconcileRegistryJoin for a Zone with no spec.domain configured — split
+// out of reconcileInstall purely to keep its own cyclomatic complexity
+// down; see that function's own doc for why no domain means installNetwork
+// never runs at all.
+func (r *Reconciler) finishInstallWithoutDomain(ctx context.Context, zoneObj *v1alpha2.Zone) (ctrl.Result, error) {
+	result, err := r.setInstalledCondition(ctx, zoneObj, metav1.ConditionTrue, reasonInstalled,
+		"kontinuum-server installed (no spec.domain configured — network exposure skipped)")
+	if err != nil {
+		return result, err
+	}
+
+	return r.reconcileRegistryJoin(ctx, zoneObj)
+}
+
+// reconcileRegistryJoin checks whether this zone's own kontinuum-server has
+// actually registered itself in the hub's registry yet (see
+// FindJoinedKontinuum) — only ever reached once Installed is true (see
+// reconcileInstall). This is the reconciler's true terminal gate — see
+// RegistryJoinedConditionType's own doc for why Installed alone isn't
+// enough.
+func (r *Reconciler) reconcileRegistryJoin(ctx context.Context, zoneObj *v1alpha2.Zone) (ctrl.Result, error) {
+	_, joined, err := FindJoinedKontinuum(ctx, r.Client, zoneObj.Spec.Region, zoneObj.Spec.Zone)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to check whether zone %q joined the registry: %w", zoneObj.Name, err)
+	}
+
+	if !joined {
+		return r.setRegistryJoinedCondition(ctx, zoneObj, metav1.ConditionFalse, reasonWaitingForRegistry,
+			"waiting for this zone's kontinuum-server to register itself in the hub's registry")
+	}
+
+	return r.setRegistryJoinedCondition(ctx, zoneObj, metav1.ConditionTrue, reasonRegistryJoined,
+		"kontinuum-server for this zone is registered and heartbeating")
+}
+
+// resolveImage returns the full container image (r.ImageRepo:tag) to
+// deploy onto a newly joined zone's downstream cluster — always read live
+// off any already-registered Kontinuum's own status.version (see
+// findKontinuumVersion), mirroring findKontinuumStorage/findKontinuumDomain's
+// identical "a property of the deployment, not of whichever specific
+// process happens to run this reconcile" reasoning: the fleet's actually
+// running version self-heals across a rolling upgrade this way, where
+// trusting this reconciling process's own build version could deploy a
+// stale or ahead-of-the-fleet tag depending on which hub replica's
+// reconcile happened to win.
+//
+// This includes a hub that's itself a local, unreleased build (reporting
+// "dev" as its own status.version, from pkg/cli/version.go's default) —
+// resolveImage deploys ImageRepo:dev in that case just like any other tag,
+// trusting it to be a real, pullable image: CI keeps that tag in sync with
+// main on every push, and `make image-push` publishes the working tree's
+// own build under it for local zone-join testing (see the Makefile's own
+// doc and docs/local-setup.md).
+func (r *Reconciler) resolveImage(ctx context.Context) (string, error) {
+	tag, err := findKontinuumVersion(ctx, r.Client)
+	if err != nil {
+		return "", err
+	}
+
+	return r.ImageRepo + ":" + tag, nil
 }
 
 // installWorkload ensures the namespace, kontinuum-env Secret/ConfigMap,
-// Deployment, and Service — see workload.go.
+// Deployment, and Service — see workload.go. hostname is the zone's own
+// <zone>.<region>.<domain> — only used to compute r.Auth's own
+// zone-specific OIDC redirect URL (see AuthConfig's own doc), not part of
+// storage/region/zone.
 func (r *Reconciler) installWorkload(
-	ctx context.Context, downstream client.Client, zoneObj *v1alpha2.Zone, storage string,
+	ctx context.Context, downstream client.Client, zoneObj *v1alpha2.Zone, storage, image, hostname string,
 ) error {
 	err := ensureNamespace(ctx, downstream, downstreamNamespace)
 	if err != nil {
@@ -304,12 +527,13 @@ func (r *Reconciler) installWorkload(
 	}
 
 	err = ensureConfigMap(ctx, downstream, downstreamNamespace,
-		zoneObj.Spec.Region, zoneObj.Spec.Zone, r.ACMEEmail, r.ACMEServer)
+		zoneObj.Spec.Region, zoneObj.Spec.Zone, hostname, r.ACMEEmail, r.ACMEServer,
+		r.GRPCEndpoint, r.GRPCInsecureSkipVerify, r.Auth)
 	if err != nil {
 		return err
 	}
 
-	err = ensureDeployment(ctx, downstream, downstreamNamespace, r.Image)
+	err = ensureDeployment(ctx, downstream, downstreamNamespace, image)
 	if err != nil {
 		return err
 	}
@@ -340,14 +564,36 @@ func (r *Reconciler) setClusterReadyCondition(
 	return r.persistStatus(ctx, zoneObj, status)
 }
 
-// setInstalledCondition sets InstalledConditionType, mirrors it onto
-// ReadyConditionType (see that constant's own doc — Installed is this
-// reconciler's true terminal gate), and persists zoneObj's status.
+// setInstalledCondition sets InstalledConditionType and persists zoneObj's
+// status. Only the blocking (False) case propagates to Ready here — mirrors
+// setClusterReadyCondition's own doc for why a True status doesn't: it just
+// means reconcileRegistryJoin is about to run, not that the Zone is ready.
 func (r *Reconciler) setInstalledCondition(
 	ctx context.Context, zoneObj *v1alpha2.Zone, status metav1.ConditionStatus, reason, message string,
 ) (ctrl.Result, error) {
 	meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
 		Type: InstalledConditionType, Status: status, Reason: reason, Message: message,
+	})
+
+	if status == metav1.ConditionFalse {
+		meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
+			Type: ReadyConditionType, Status: status, Reason: reason, Message: message,
+		})
+	}
+
+	return r.persistStatus(ctx, zoneObj, status)
+}
+
+// setRegistryJoinedCondition sets RegistryJoinedConditionType, mirrors it
+// onto ReadyConditionType (see that constant's own doc — RegistryJoined is
+// this reconciler's true terminal gate, so both directions propagate,
+// unlike setClusterReadyCondition/setInstalledCondition above which only
+// propagate their False case), and persists zoneObj's status.
+func (r *Reconciler) setRegistryJoinedCondition(
+	ctx context.Context, zoneObj *v1alpha2.Zone, status metav1.ConditionStatus, reason, message string,
+) (ctrl.Result, error) {
+	meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
+		Type: RegistryJoinedConditionType, Status: status, Reason: reason, Message: message,
 	})
 
 	meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{

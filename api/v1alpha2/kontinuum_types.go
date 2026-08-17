@@ -129,6 +129,8 @@ type KontinuumServerConfigStatus struct {
 	Zone string `default:"" json:"zone"`
 	// +optional
 	DNS KontinuumDNSConfigStatus `json:"dns"`
+	// +optional
+	GRPC KontinuumGRPCConfigStatus `json:"grpc"`
 }
 
 // KontinuumDNSConfigStatus groups DNS-related server config under its own
@@ -144,6 +146,36 @@ type KontinuumDNSConfigStatus struct {
 	// mirroring how it infers Storage from that Secret.
 	// +optional
 	Domain string `default:"" json:"domain"`
+}
+
+// KontinuumGRPCConfigStatus groups this process's own etcd gRPC proxy
+// config (see pkg/domain/etcdproxy) under its own namespace, same
+// rationale as KontinuumDNSConfigStatus.
+type KontinuumGRPCConfigStatus struct {
+	// Endpoint is this hub's own publicly reachable "host:port" for its
+	// etcd gRPC proxy (see pkg/domain/etcdproxy.RegisterHub) — multiplexed
+	// onto the same port as everything else this process serves, so this
+	// is normally the same host:port a browser reaches /app on. Not
+	// confidential, so — like DNS.Domain — it's published here directly:
+	// pkg/domain/zone's own Reconciler reads this off the hub's own
+	// config (not by inferring it from another registered Kontinuum, the
+	// way Storage/DNS.Domain are — every registered Kontinuum could be a
+	// different zone's own downstream instance, each reachable at a
+	// different address, so only the operator-configured value on this
+	// specific hub process is trustworthy here) to build a newly joined
+	// zone's own KONTINUUM_SERVER_STORAGE.
+	// +optional
+	Endpoint string `default:"" json:"endpoint"`
+	// InsecureTLSSkipVerify skips TLS certificate verification on the
+	// connection a joined zone's own etcdproxy.Relay makes back to
+	// Endpoint — for local development only, where Endpoint terminates TLS
+	// with a self-signed certificate no client trusts by default (see
+	// compose.yaml's own proxy service). A real deployment's Endpoint is
+	// expected to present a certificate the zone's own root CA set already
+	// trusts, the same as every other kind of traffic the hub serves.
+	// +optional
+	//nolint:tagliatelle // "TLS" (acronym kept uppercase) matches this type's own IssuerURL/ClientID convention
+	InsecureTLSSkipVerify string `default:"false" json:"insecureTLSSkipVerify"`
 }
 
 // KontinuumLogConfigStatus is pkg/config.LogConfig, referenced directly by

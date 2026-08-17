@@ -3,6 +3,7 @@ package taloscluster
 import (
 	"context"
 	"fmt"
+	"net"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -58,9 +59,28 @@ func listClaimedByPool(
 	return list.Items, nil
 }
 
-// dialAddress returns the address used to reach inst in maintenance mode
-// and (once configured) via its real mTLS identity — the same candidate
-// address inst's own Discovered condition already proved reachable.
+// dialAddress returns the address used to reach inst in maintenance mode and
+// (once configured) via its real mTLS identity. Talos's own server
+// certificate, once past maintenance mode, is scoped to the node's own
+// detected hostname/addresses — not whatever string spec.interfaces[0]
+// happened to be typed in as (which can be a DNS hostname, e.g. a Docker
+// Compose service name that resolves fine but isn't what the certificate
+// covers) — so this always prefers a real discovered IP from
+// status.interfaces (populated by maintenance-mode probing once Discovered
+// is true — see pkg/domain/instance's discoverInterfaces) over
+// spec.interfaces[0] verbatim, skipping loopback addresses. Falls back to
+// spec.interfaces[0] only if status.interfaces has no usable address yet.
 func dialAddress(inst v1alpha2.Instance) string {
+	for _, iface := range inst.Status.Interfaces {
+		for _, addr := range iface.Addresses {
+			ip, _, err := net.ParseCIDR(addr)
+			if err != nil || ip.IsLoopback() {
+				continue
+			}
+
+			return ip.String()
+		}
+	}
+
 	return inst.Spec.Interfaces[0]
 }

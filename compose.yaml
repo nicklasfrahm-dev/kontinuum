@@ -35,11 +35,60 @@ services:
       KONTINUUM_SERVER_STORAGE: "postgres://kontinuum:kontinuum@postgres:5432/kontinuum?sslmode=disable"
       KONTINUUM_LOG_LEVEL: "info"
       KONTINUUM_LOG_FORMAT: "console"
-      KONTINUUM_SERVER_DNS_DOMAIN: "kontinuum.localhost"
+      # A joined zone's own kontinuum-server (running inside the "talos"
+      # profile's downstream cluster's pod network, which sits on this same
+      # Docker bridge) reaches this hub's etcd gRPC proxy through this
+      # address, resolved via Docker Compose's own embedded DNS. Points at
+      # the proxy service's own 8443, not kontinuum-dev's plain-HTTP 8080
+      # directly: a real deployment's endpoint always terminates TLS (see
+      # proxy's own doc), and etcdproxy.Relay requires it unless
+      # InsecureSkipVerify is also set (see
+      # KONTINUUM_SERVER_GRPC_INSECURE_TLS_SKIP_VERIFY below) — dev stays
+      # representative of that, rather than dialing kontinuum-dev's own
+      # plaintext port, which a real deployment never exposes this way.
+      KONTINUUM_SERVER_GRPC_ENDPOINT: "proxy:8443"
+      # proxy's own certificate is self-signed (see its own "tls internal"
+      # config below) — no client trusts it by default, so the relay this
+      # endpoint drives would otherwise fail certificate verification on
+      # every call. Real deployments never set this: Endpoint there
+      # terminates TLS with a certificate the zone's own root CA set
+      # already trusts.
+      KONTINUUM_SERVER_GRPC_INSECURE_TLS_SKIP_VERIFY: "true"
       GOTOOLCHAIN: auto
     depends_on:
       postgres:
         condition: service_healthy
+
+  # A single-node Talos "cluster" — real Talos OS running in container
+  # mode (not a VM), the same shape the taloscluster/instance packages'
+  # own e2e tests boot — for exercising kontinuum's full zone-bootstrap
+  # flow locally end to end: `kontinuum zone add --talos-address talos
+  # ...` (see docs/local-setup.md — "talos", the Compose service name, is
+  # resolved to this container's own IP by zone.Add itself before it's
+  # ever stored; see instancedomain.ResolveAddress). Its own docker run shape
+  # (privileged, host cgroup namespace, tmpfs for /run|/system|/tmp,
+  # anonymous volumes for the directories Talos's container-mode init
+  # expects writable) mirrors
+  # pkg/domain/taloscluster/e2e_test.go's startTalosContainer.
+  talos:
+    profiles: ["dev"]
+    image: ghcr.io/siderolabs/talos:v1.13.0
+    privileged: true
+    cgroup: host
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+    tmpfs:
+      - /run
+      - /system
+      - /tmp
+    volumes:
+      - talos_state:/system/state
+      - talos_var:/var
+      - talos_etc_cni:/etc/cni
+      - talos_etc_kubernetes:/etc/kubernetes
+      - talos_libexec_kubernetes:/usr/libexec/kubernetes
+      - talos_opt:/opt
 
   # Self-signed TLS termination in front of kontinuum-dev. kubectl (via
   # client-go) refuses to send the bearer token that the oidc-login exec
@@ -64,17 +113,42 @@ volumes:
   go_mod_cache:
   go_build_cache:
   caddy_data:
+  talos_state:
+  talos_var:
+  talos_etc_cni:
+  talos_etc_kubernetes:
+  talos_libexec_kubernetes:
+  talos_opt:
 
 configs:
   caddyfile:
-    # A bare "localhost:8443 { ... }" address (rather than ":8443") is load-
-    # bearing: it makes Caddy obtain the self-signed certificate up front at
-    # startup, which is a well-exercised code path. A hostless ":8443" only
-    # tries to obtain one on-demand on the first handshake, which reliably
-    # fails with a generic "internal error" TLS alert in this environment.
+    # A bare "localhost:8443, proxy:8443 { ... }" address list (rather than
+    # ":8443") is load-bearing: it makes Caddy obtain the self-signed
+    # certificate up front at startup, which is a well-exercised code path.
+    # A hostless ":8443" only tries to obtain one on-demand on the first
+    # handshake, which reliably fails with a generic "internal error" TLS
+    # alert in this environment. Both addresses are listed, not just
+    # "localhost:8443", because grpc-go's default TLS credentials set SNI to
+    # the dial target's own host — KONTINUUM_SERVER_GRPC_ENDPOINT dials
+    # "proxy:8443" (see kontinuum-dev's own doc), so that connection's SNI
+    # is "proxy", not "localhost"; without "proxy" listed here too, Caddy
+    # has no site matching that SNI and the handshake fails outright,
+    # before this site block's certificate is even offered.
+    # transport http { versions h2c 2 } is load-bearing for the gRPC traffic
+    # KONTINUUM_SERVER_GRPC_ENDPOINT now sends through this proxy (see
+    # kontinuum-dev's own doc): kontinuum-dev:8080 speaks h2c (cleartext
+    # HTTP/2), which gRPC's own streaming/trailers semantics require, but
+    # Caddy's reverse_proxy defaults to plain HTTP/1.1 for a non-TLS
+    # upstream unless told otherwise — silently downgrading every relayed
+    # gRPC call to a protocol it can't actually run over. h2c still serves
+    # regular HTTP/UI traffic through this same proxy unchanged.
     content: |
-      localhost:8443 {
+      localhost:8443, proxy:8443 {
       	tls internal
 
-      	reverse_proxy kontinuum-dev:8080
+      	reverse_proxy kontinuum-dev:8080 {
+      		transport http {
+      			versions h2c 2
+      		}
+      	}
       }

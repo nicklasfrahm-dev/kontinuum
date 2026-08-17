@@ -15,10 +15,11 @@ throughout this whole flow, found by name alone (see stage 1 below).
 
 ## Try it
 
-The hub needs `KONTINUUM_SERVER_DNS_DOMAIN` set once (e.g. in its own
-`compose.yaml`/environment) — `zone add` never passes a domain itself, it
-infers it from any already-registered `Kontinuum`'s published config, the
-same way it infers the storage connection string (see
+The hub needs `KONTINUUM_SERVER_DNS_DOMAIN` and `KONTINUUM_SERVER_GRPC_ENDPOINT`
+set once (e.g. in its own `compose.yaml`/environment) — `zone add` never
+passes either itself: the domain is inferred from any already-registered
+`Kontinuum`'s published config, and the `zone` controller reads the gRPC
+endpoint straight off the hub's own config (see
 [Configuration](../reference.md#zones)):
 
 ```sh
@@ -75,6 +76,19 @@ Fans out a new zone's hub-side objects and, once its `TalosCluster` is bootstrap
    `<zone>.<region>.<domain>`. `Installed` only flips `True` once
    cert-manager's own `Certificate` reports `Ready` — a real signal that
    TLS issuance actually succeeded, not just that the object was created.
+4. **Registry join** (`pkg/domain/zone`'s `Reconciler`, once `Installed`) —
+   the reconciler checks the hub's own registry for a `Kontinuum` matching
+   this zone's `region`/`zone` with a non-zero heartbeat (see
+   `FindJoinedKontinuum`), and only then flips the aggregate `Ready`
+   condition true. `Installed` on its own only means the downstream objects
+   exist and TLS was issued — it says nothing about whether the deployed
+   `kontinuum` container actually managed to start and register itself, which
+   is a real, separate failure mode: the `kontinuum-env` ConfigMap/Secret
+   carry the *same* authentication choice (`KONTINUUM_INSECURE_ALLOW_ANONYMOUS`
+   or `KONTINUUM_OIDC_*`) the hub itself is running with, mirrored by the
+   `zone` controller's own `AuthConfig` — without it, the deployed process
+   refuses to even start (see [Authentication](../authentication.md)) and
+   never gets as far as heartbeating.
 
 Every step past machine-config generation is best-effort and idempotent: a
 maintenance-mode call against a node that's already moved past maintenance
@@ -84,21 +98,29 @@ reconciler simply retries on the next tick.
 
 ## Details
 
-### How the new zone's storage credentials travel, without ever touching the CLI
+### How the new zone reaches shared storage, without a direct database connection
 
 A zone's `kontinuum-server` only "closes the loop" — registering itself as
 a worker `Kontinuum` the hub can see — if it's pointed at the *same*
-storage backend the hub itself uses: storage is a property of the
-deployment, not of role. Rather than have the operator pass a raw
-connection string through `zone add`, the `zone` controller finds it
-itself: **every** registered `Kontinuum` — hub or worker, it doesn't
-matter which — already upserts its own storage connection string into a
-Secret on every heartbeat (`status.secretRef`, see
-`pkg/domain/registry/heartbeat.go`). The `zone` controller lists existing
-`Kontinuum`s, picks one (name-sorted, for determinism), reads that Secret,
-and copies the value into the new zone's own `kontinuum-env` Secret. There
-is always at least one to find — the hub always self-registers — so this
-never needs bootstrapping.
+storage the hub itself uses. But a zone's only network path back to the
+hub is the control-plane connection itself; it's never expected to reach
+the hub's real database (Postgres/etc.) directly, and it isn't given
+credentials to try.
+
+Instead, the `zone` controller issues each zone its own scoped credential
+for the hub's etcd gRPC proxy (`pkg/domain/etcdproxy` — see
+[Architecture](../architecture.md#storage) for the full mechanism): a
+128-character random key, stored in a Secret owned by the `Zone` (so it's
+garbage-collected on teardown), rotated hourly with a 5-minute overlap so
+an already-running zone is never cut off mid-rotation. That credential,
+together with the hub's own `KONTINUUM_SERVER_GRPC_ENDPOINT`, is encoded
+into a `grpc://zone:key@hub-endpoint` DSN and written into the new zone's
+own `kontinuum-env` Secret as `KONTINUUM_SERVER_STORAGE`. On startup, the
+zone's own `kontinuum-server` recognizes that scheme, starts a small local
+relay that attaches the credential to every call, and hands `libkapi` a
+plain local `unix://` socket instead — indistinguishable, from
+`libkapi`'s point of view, from talking to a local Kine instance
+directly.
 
 ### TLS: ACME over the Gateway API, not Ingress
 
@@ -304,15 +326,19 @@ flowchart TD
     KubeconfigOK -- No --> NotReady[Installed = False\nDownstreamNotReady]
     NotReady --> Requeue1
 
-    KubeconfigOK -- Yes --> FindStorage[Find any registered Kontinuum's\nstorage secret]
-    FindStorage --> StorageOK{Found?}
-    StorageOK -- No --> NoStorage[Installed = False\nNoStorageSecretFound]
+    KubeconfigOK -- Yes --> BuildDSN[Build zone's own etcd proxy DSN\nfrom hub's GRPCEndpoint + zone's auth key]
+    BuildDSN --> DSNOk{GRPCEndpoint configured\nand auth key ready?}
+    DSNOk -- No --> NoStorage[Installed = False\nNoStorageSecretFound]
     NoStorage --> Requeue1
 
-    StorageOK -- Yes --> InstallWorkload[Ensure namespace, kontinuum-env\nSecret/ConfigMap, Deployment, Service]
+    DSNOk -- Yes --> InstallWorkload[Ensure namespace, kontinuum-env\nSecret/ConfigMap incl. auth config, Deployment, Service]
     InstallWorkload --> InstallNetwork[Ensure ClusterIssuer, Gateway,\nCertificate, HTTPRoute]
     InstallNetwork --> CertCheck{Certificate reports Ready?}
     CertCheck -- No --> WaitCert[Installed = False\nWaitingForCertificate]
     WaitCert --> Requeue1
-    CertCheck -- Yes --> Done([Installed = True\nkontinuum-server registers\nas a worker Kontinuum])
+    CertCheck -- Yes --> Installed[Installed = True]
+    Installed --> RegistryCheck{Kontinuum matching this\nzone's region/zone heartbeating?}
+    RegistryCheck -- No --> WaitRegistry[Ready = False\nWaitingForRegistry]
+    WaitRegistry --> Requeue1
+    RegistryCheck -- Yes --> Done([Ready = True\nRegistryJoined])
 ```

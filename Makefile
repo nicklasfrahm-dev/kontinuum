@@ -15,6 +15,15 @@ INSTALLDIR ?= $(HOME)/.local/bin
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -ldflags "-s -w -X github.com/nicklasfrahm/kontinuum/pkg/cli.version=$(VERSION)"
 
+# CONTAINER_IMAGE_REPO mirrors pkg/cli/serve.go's own zoneImageRepo constant — the
+# registry zone.Reconciler.resolveImage deploys onto every joined zone's
+# downstream cluster. image-push below tags and pushes under $(VERSION)
+# itself, same as image's own local build — pass VERSION=dev to push the
+# tag resolveImage deploys for a hub with no real version override (the
+# same literal value air.toml's own build command already hardcodes for
+# `make dev`): `VERSION=dev make image-push`.
+CONTAINER_IMAGE_REPO := ghcr.io/nicklasfrahm-dev/kontinuum
+
 # Go commands
 GOCMD := go
 # -trimpath and the linker's -s -w (stripped symbol table/DWARF) apply to
@@ -66,7 +75,7 @@ install: build ## Build the binary and install it to ~/.local/bin
 	install $(BINARY) $(INSTALLDIR)/kontinuum
 
 .PHONY: dev
-dev: ## Start development environment with hot reload (air + postgres + proxy)
+dev: ## Start development environment with hot reload (air + postgres + proxy + talos)
 	@printf '$(CYAN)Starting development environment...$(RESET)\n'
 	docker compose --profile dev up
 
@@ -80,8 +89,21 @@ dev-clean: ## Stop development environment and remove volumes
 	docker compose --profile dev down -v
 
 .PHONY: image
+# --build-arg VERSION is load-bearing, not just the -t tag: the
+# Containerfile's own ARG VERSION has no default, so without this the
+# binary embeds an empty pkg/cli.version regardless of what the image
+# itself is tagged/pushed as — the registry tag and the running process's
+# own reported version (registry.Heartbeat's status.version, "kontinuum
+# version") silently drift apart otherwise. Mirrors .github/workflows/
+# ci.yml's own "Build container image" step.
 image: ## Build the container image
-	docker buildx build -f Containerfile -t kontinuum:$(VERSION) --load .
+	docker buildx build -f Containerfile -t kontinuum:$(VERSION) --build-arg VERSION=$(VERSION) --load .
+
+.PHONY: image-push
+image-push: image ## Build and push the working tree's image to ghcr.io under VERSION (see CONTAINER_IMAGE_REPO's own doc above; requires docker login ghcr.io first)
+	@printf '$(CYAN)Pushing $(CONTAINER_IMAGE_REPO):$(VERSION)...$(RESET)\n'
+	docker tag kontinuum:$(VERSION) $(CONTAINER_IMAGE_REPO):$(VERSION)
+	docker push $(CONTAINER_IMAGE_REPO):$(VERSION)
 
 ##@ Quality
 

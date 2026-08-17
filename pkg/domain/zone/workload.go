@@ -3,7 +3,9 @@ package zone
 import (
 	"context"
 	"fmt"
+	"strings"
 
+	"golang.org/x/mod/semver"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -83,17 +85,53 @@ func ensureSecret(ctx context.Context, downstream client.Client, namespace, stor
 // ensureConfigMap upserts the kontinuum-env ConfigMap with this zone's
 // non-confidential config — KONTINUUM_SERVER_REGION/_ZONE (so this zone's
 // own kontinuum serve process registers itself as a Worker — see
-// pkg/domain/registry.Role) and KONTINUUM_ACME_EMAIL/_SERVER (so it can, in
-// turn, run this same Zone controller for any further zones it joins).
+// pkg/domain/registry.Role), KONTINUUM_ACME_EMAIL/_SERVER (so it can, in
+// turn, run this same Zone controller for any further zones it joins), and
+// auth's own authentication choice (see AuthConfig's own doc) — without
+// that last part, the deployed process refuses to even start (see
+// pkg/config.Config.ValidateAuthentication), so it never gets as far as
+// registering itself at all. hostname is only used to compute a
+// zone-specific KONTINUUM_OIDC_REDIRECT_URL when auth.OIDCIssuerURL is set
+// — see AuthConfig's own doc for why the hub's own redirect URL can't be
+// reused here.
+//
+// grpcEndpoint/grpcInsecureSkipVerify mirror the hub's own
+// KONTINUUM_SERVER_GRPC_ENDPOINT/_INSECURE_TLS_SKIP_VERIFY (see
+// v1alpha2.KontinuumGRPCConfigStatus's own doc) straight onto this zone's
+// own env: this deployed process (not just the hub) also runs the full
+// kontinuum server, including its own Zone controller — reconciling any
+// Zone visible in its shared storage, this Zone included, if it ever
+// nested-joins one — and that controller's own zoneStorageDSN needs a
+// configured GRPCEndpoint the exact same way the hub's does, or every
+// reconcile logs "this hub has no KONTINUUM_SERVER_GRPC_ENDPOINT
+// configured" and any further-nested zone that hub tries to add gets no
+// working KONTINUUM_SERVER_STORAGE at all. GRPCInsecureSkipVerify's own
+// need is more immediate: this process's own relay (see etcdproxy.Relay)
+// already dials GRPCEndpoint on every KONTINUUM_SERVER_STORAGE call this
+// zone itself makes, so a hub configured to skip TLS verification against
+// a self-signed dev proxy but never propagating that choice downstream
+// left every joined zone's kontinuum-server crash-looping on a real
+// certificate verification failure instead.
 func ensureConfigMap(
-	ctx context.Context, downstream client.Client, namespace, region, zoneName, acmeEmail, acmeServer string,
+	ctx context.Context, downstream client.Client, namespace, region, zoneName, hostname, acmeEmail, acmeServer string,
+	grpcEndpoint, grpcInsecureSkipVerify string, auth AuthConfig,
 ) error {
 	data := map[string]string{
-		"KONTINUUM_SERVER_ADDR":   ":8080",
-		"KONTINUUM_SERVER_REGION": region,
-		"KONTINUUM_SERVER_ZONE":   zoneName,
-		"KONTINUUM_ACME_EMAIL":    acmeEmail,
-		"KONTINUUM_ACME_SERVER":   acmeServer,
+		"KONTINUUM_SERVER_ADDR":                          ":8080",
+		"KONTINUUM_SERVER_REGION":                        region,
+		"KONTINUUM_SERVER_ZONE":                          zoneName,
+		"KONTINUUM_ACME_EMAIL":                           acmeEmail,
+		"KONTINUUM_ACME_SERVER":                          acmeServer,
+		"KONTINUUM_INSECURE_ALLOW_ANONYMOUS":             auth.InsecureAllowAnonymous,
+		"KONTINUUM_SERVER_GRPC_ENDPOINT":                 grpcEndpoint,
+		"KONTINUUM_SERVER_GRPC_INSECURE_TLS_SKIP_VERIFY": grpcInsecureSkipVerify,
+	}
+
+	if auth.OIDCIssuerURL != "" {
+		data["KONTINUUM_OIDC_ISSUER_URL"] = auth.OIDCIssuerURL
+		data["KONTINUUM_OIDC_CLIENT_ID"] = auth.OIDCClientID
+		data["KONTINUUM_OIDC_ADMIN_GROUPS"] = auth.OIDCAdminGroups
+		data["KONTINUUM_OIDC_REDIRECT_URL"] = "https://" + hostname + "/app"
 	}
 
 	configMap := &corev1.ConfigMap{
@@ -189,6 +227,26 @@ func containerSecurityContext() *corev1.SecurityContext {
 	}
 }
 
+// imagePullPolicy returns corev1.PullAlways for image when its tag isn't
+// valid semver — "dev" or "latest", the two mutable, floating tags CI and
+// `make image-push` (see the Makefile) both keep overwriting in place —
+// and corev1.PullIfNotPresent otherwise, since a real semver-tagged
+// release is immutable once published and safe to cache. Kubernetes'
+// own default pull policy only special-cases the literal tag "latest"
+// this way; that's no longer enough now that resolveImage deploys
+// ImageRepo:dev just as often as a real version (see that function's own
+// doc) — without this, a node that already cached an older :dev layer
+// would never re-pull a newer one pushed under the same tag.
+func imagePullPolicy(image string) corev1.PullPolicy {
+	tag := image[strings.LastIndex(image, ":")+1:]
+
+	if semver.IsValid(tag) {
+		return corev1.PullIfNotPresent
+	}
+
+	return corev1.PullAlways
+}
+
 // buildDeployment returns the desired kontinuum Deployment — a single
 // replica running image, with no command/args override (Containerfile's own
 // ENTRYPOINT already runs `serve`), sourcing all of its configuration from
@@ -211,6 +269,7 @@ func buildDeployment(namespace, image string) *appsv1.Deployment {
 					Containers: []corev1.Container{{
 						Name:            deploymentName,
 						Image:           image,
+						ImagePullPolicy: imagePullPolicy(image),
 						Ports:           []corev1.ContainerPort{{Name: portName, ContainerPort: containerPort}},
 						SecurityContext: containerSecurityContext(),
 						EnvFrom: []corev1.EnvFromSource{

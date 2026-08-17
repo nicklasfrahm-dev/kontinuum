@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/addon"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/adminrbac"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/etcdproxy"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instancepool"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/registry"
@@ -38,6 +40,12 @@ import (
 )
 
 const shutdownTimeout = 10 * time.Second
+
+// errNoStorageEndpoints is registerEtcdProxy's own sentinel for the
+// (never expected in practice) case where libkapi.Ctx.StorageEndpoints
+// comes back empty — a static sentinel for the err113 linter, which flags
+// dynamically constructed errors.New/fmt.Errorf calls without one.
+var errNoStorageEndpoints = errors.New("no storage endpoints available to build the etcd gRPC proxy from")
 
 // NewServeCmd builds the serve command, which starts the Kubernetes-style
 // API server.
@@ -91,13 +99,29 @@ func runServe(cmd *cobra.Command, addr string, storage string) error {
 		return err
 	}
 
-	server, registryController, err := buildServer(cfg, logger, authOpts, oidcHandler)
+	server, registryController, relayCleanup, err := buildServer(cfg, logger, authOpts, oidcHandler)
 	if err != nil {
 		return err
 	}
 
+	// relayCleanup (see buildServer's own doc) is always safe to call, a
+	// no-op unless cfg.Server.Storage pointed through etcdproxy.Relay —
+	// deferred here, rather than at any one of runServe's several later
+	// return points, so it fires regardless of which one this call
+	// actually takes.
+	defer relayCleanup()
+
 	logger.Info("Kontinuum starting", "addr", cfg.Server.Addr, "storage", cfg.Server.Storage)
 
+	return serveUntilShutdown(ctx, sigChan, server, registryController, logger)
+}
+
+// serveUntilShutdown runs server until sigChan fires or it exits on its
+// own, then deregisters and gracefully shuts it down.
+func serveUntilShutdown(
+	ctx context.Context, sigChan chan os.Signal, server *libkapi.Server,
+	registryController *registry.Controller, logger *slog.Logger,
+) error {
 	// Run the server in a goroutine so we can watch for signals on the
 	// main goroutine and log which signal was received.
 	serveErr := make(chan error, 1)
@@ -112,7 +136,7 @@ func runServe(cmd *cobra.Command, addr string, storage string) error {
 	// would leave the process hanging forever on a startup failure instead
 	// of exiting with it.
 	select {
-	case err = <-serveErr:
+	case err := <-serveErr:
 		if err != nil {
 			return fmt.Errorf("server exited with error: %w", err)
 		}
@@ -127,7 +151,7 @@ func runServe(cmd *cobra.Command, addr string, storage string) error {
 	// it's deliberately not canceled yet), so the manager and its webhook
 	// server are too. See Controller.Deregister's doc for why that ordering
 	// matters.
-	err = registryController.Deregister(ctx)
+	err := registryController.Deregister(ctx)
 	if err != nil {
 		logger.Error("Failed to deregister server before shutdown", "error", err)
 	}
@@ -142,9 +166,10 @@ func runServe(cmd *cobra.Command, addr string, storage string) error {
 	// ctx early raced that internal watcher ahead of Shutdown's own
 	// sequencing, closing the listener out from under an in-flight
 	// deregister call. Shutdown cancels the same underlying context itself,
-	// at the correct point in that sequence — nothing here needs to. The
-	// deferred cancel() above still runs once runServe returns, as a safety
-	// net, but by then Shutdown has already finished.
+	// at the correct point in that sequence — nothing here needs to. runServe's
+	// own deferred cancel() still runs once it returns, as a safety net, but
+	// by then Shutdown has already finished.
+	//nolint:contextcheck // deliberately not ctx — see the comment above
 	err = shutdownServer(server, logger)
 	if err != nil {
 		<-serveErr
@@ -202,13 +227,61 @@ func loadServeConfig(cmd *cobra.Command, addr string, storage string) (*config.C
 	return cfg, logger, nil
 }
 
+// buildScheme registers every GVK any part of the server needs to resolve
+// through a controller-runtime client: kontinuum.sh/v1alpha2 (this
+// process's own API), kontinuum.sh/v1alpha1 (needed because the conversion
+// webhook handler, registered by registry.Controller.SetupWithManager,
+// resolves both GVKs against this scheme to convert between them), core/v1
+// (mgr.GetClient(), built off this same scheme — see
+// registryOptions/WithScheme — is what Heartbeat uses to create the
+// Namespace and Secret backing status.secretRef, and a controller-runtime
+// client can't handle a type its scheme doesn't recognize even though the
+// server itself already serves core/v1), and
+// rbac.authorization.k8s.io/v1 (for the same reason as core/v1:
+// adminrbac.Runnable's client.Client, built off this scheme, and the UI's
+// own per-request client — kontinuumListerFactory, which the IAM page also
+// uses to list ClusterRoleBindings, see handleIAM — both resolve
+// ClusterRole/ClusterRoleBinding's GVKs against it).
+func buildScheme() (*runtime.Scheme, error) {
+	scheme := runtime.NewScheme()
+
+	err := v1alpha2.AddToScheme(scheme)
+	if err != nil {
+		return nil, fmt.Errorf("failed to register kontinuum.sh/v1alpha2 scheme: %w", err)
+	}
+
+	err = v1alpha1.AddToScheme(scheme)
+	if err != nil {
+		return nil, fmt.Errorf("failed to register kontinuum.sh/v1alpha1 scheme: %w", err)
+	}
+
+	err = corev1.AddToScheme(scheme)
+	if err != nil {
+		return nil, fmt.Errorf("failed to register core/v1 scheme: %w", err)
+	}
+
+	err = rbacv1.AddToScheme(scheme)
+	if err != nil {
+		return nil, fmt.Errorf("failed to register rbac.authorization.k8s.io/v1 scheme: %w", err)
+	}
+
+	return scheme, nil
+}
+
 // buildServer creates the libkapi server with custom handlers. authOpts and
 // oidcHandler come from configureOIDC; oidcHandler is nil when OIDC is not
 // configured. The returned *registry.Controller is what runServe calls
-// Deregister on before shutting the server down — see its doc.
+// Deregister on before shutting the server down — see its doc. The
+// returned func is non-nil only when cfg.Server.Storage is an
+// etcdproxy.RelayScheme DSN — a zone's own kontinuum-server, pointed at
+// the hub's own etcd gRPC proxy instead of a database it likely can't
+// reach directly (see pkg/domain/etcdproxy's own doc) — in which case it
+// stops the etcdproxy.Relay this function started to serve that DSN
+// locally; runServe defers it unconditionally, since it's a no-op to call
+// nil-checked but never harmful to call on every shutdown.
 func buildServer(
 	cfg *config.Config, logger *slog.Logger, authOpts []libkapi.Option, oidcHandler *auth.Handler,
-) (*libkapi.Server, *registry.Controller, error) {
+) (*libkapi.Server, *registry.Controller, func(), error) {
 	// oidcHandler is nil when OIDC isn't configured — leave invalidateSession
 	// nil too rather than binding a method value to a nil receiver.
 	var invalidateSession ui.SessionInvalidator
@@ -216,40 +289,9 @@ func buildServer(
 		invalidateSession = oidcHandler.InvalidateSession
 	}
 
-	scheme := runtime.NewScheme()
-
-	err := v1alpha2.AddToScheme(scheme)
+	scheme, err := buildScheme()
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to register kontinuum.sh/v1alpha2 scheme: %w", err)
-	}
-
-	// v1alpha1 must be in the same scheme too — not because anything here
-	// constructs v1alpha1 objects, but because the conversion webhook
-	// handler (registered by registry.Controller.SetupWithManager) resolves
-	// both GVKs against this scheme to convert between them.
-	err = v1alpha1.AddToScheme(scheme)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to register kontinuum.sh/v1alpha1 scheme: %w", err)
-	}
-
-	// core/v1 is needed too: mgr.GetClient() (built off this same scheme —
-	// see registryOptions/WithScheme) is what Heartbeat uses to create the
-	// Namespace and Secret backing status.secretRef, and a
-	// controller-runtime client can't handle a type its scheme doesn't
-	// recognize even though the server itself already serves core/v1.
-	err = corev1.AddToScheme(scheme)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to register core/v1 scheme: %w", err)
-	}
-
-	// rbac.authorization.k8s.io/v1 is needed for the same reason as core/v1
-	// above: adminrbac.Runnable's client.Client (built off this scheme) and
-	// the UI's own per-request client (kontinuumListerFactory, which the IAM
-	// page also uses to list ClusterRoleBindings — see handleIAM) both
-	// resolve ClusterRole/ClusterRoleBinding's GVKs against it.
-	err = rbacv1.AddToScheme(scheme)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to register rbac.authorization.k8s.io/v1 scheme: %w", err)
+		return nil, nil, nil, err
 	}
 
 	uiRouter := ui.NewRouter(
@@ -259,7 +301,12 @@ func buildServer(
 
 	registryOpts, registryController, err := registryOptions(cfg, logger, scheme)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+
+	storage, relayCleanup, err := resolveStorageDSN(cfg.Server.Storage, cfg.Server.GRPC.InsecureTLSSkipVerify)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 
 	// WithGarbageCollector is now safe to enable: several domain controllers
@@ -282,9 +329,9 @@ func buildServer(
 	// with no more startup race.
 	opts := slices.Concat([]libkapi.Option{
 		libkapi.WithAddr(cfg.Server.Addr),
-		libkapi.WithStorage(cfg.Server.Storage),
+		libkapi.WithStorage(storage),
 		libkapi.WithLogger(logger),
-		libkapi.WithServerFactory(customHandlers(uiRouter, oidcHandler)),
+		libkapi.WithServerFactory(customHandlers(uiRouter, oidcHandler, scheme)),
 		libkapi.WithGarbageCollector(libkapi.GarbageCollectorConfig{}),
 	}, authOpts, registryOpts, instanceOptions(logger), instancePoolOptions(logger), talosClusterOptions(logger),
 		addonOptions(logger), zoneOptions(cfg, logger), adminRBACOptions(cfg, logger))
@@ -294,10 +341,69 @@ func buildServer(
 	// that drives ListenAndServe.
 	server, err := libkapi.New(context.Background(), opts...)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to build server: %w", err)
+		relayCleanup()
+
+		return nil, nil, nil, fmt.Errorf("failed to build server: %w", err)
 	}
 
-	return server, registryController, nil
+	return server, registryController, relayCleanup, nil
+}
+
+// storageRelaySocketPath is where the etcdproxy.Relay resolveStorageDSN
+// starts (for a zone whose own KONTINUUM_SERVER_STORAGE points through it
+// — see etcdproxy.ParseRelayDSN) listens. libkapi's own already-supported
+// "unix://" storage scheme (see pkg/libkapi/storage.Resolve) is then
+// pointed at this same path, so the local apiserver reaches Relay exactly
+// the way it would reach a local Kine instance. Lives under /tmp, the one
+// writable path the zone Deployment's own read-only-root container gets
+// (see pkg/domain/zone/workload.go's tmpVolumeMountPath) — the same reason
+// libkapi's own Kine endpoint uses a temp-dir socket too.
+const storageRelaySocketPath = "/tmp/kontinuum-storage-relay.sock"
+
+// resolveStorageDSN returns the KONTINUUM_SERVER_STORAGE value to actually
+// hand to libkapi.WithStorage. For every scheme but etcdproxy.RelayScheme,
+// that's configured unchanged — postgres://, sqlite://, mysql://, nats://,
+// etcd://, and unix:// are all libkapi's own concern, not this package's.
+// A RelayScheme DSN (see etcdproxy.ParseRelayDSN) is different: it isn't a
+// real storage backend at all, but a zone's own hub-issued credential for
+// reaching the hub's etcd gRPC proxy (see pkg/domain/etcdproxy's own doc
+// for why a zone is given this instead of a database connection string it
+// likely can't use directly) — resolveStorageDSN starts the local
+// etcdproxy.Relay that credential dials through, and returns a plain
+// "unix://" DSN pointed at it instead, which libkapi's own storage
+// resolution already knows how to handle unchanged. The returned cleanup
+// func is always safe to call — a no-op unless a Relay was actually
+// started — so callers never need to nil-check it first. insecureSkipVerify
+// is cfg.Server.GRPC.InsecureTLSSkipVerify's raw string value — see
+// etcdproxy.RelayConfig.InsecureSkipVerify's own doc for what it does;
+// parsed here rather than in Config itself since it's meaningless outside
+// this one call.
+func resolveStorageDSN(configured, insecureSkipVerify string) (string, func(), error) {
+	noopCleanup := func() {}
+
+	zoneName, key, hubEndpoint, ok := etcdproxy.ParseRelayDSN(configured)
+	if !ok {
+		return configured, noopCleanup, nil
+	}
+
+	skipVerify, err := strconv.ParseBool(insecureSkipVerify)
+	if err != nil {
+		return "", noopCleanup,
+			fmt.Errorf("failed to parse KONTINUUM_SERVER_GRPC_INSECURE_TLS_SKIP_VERIFY: %w", err)
+	}
+
+	relay, err := etcdproxy.StartRelay(etcdproxy.RelayConfig{
+		SocketPath:         storageRelaySocketPath,
+		HubEndpoint:        hubEndpoint,
+		Zone:               zoneName,
+		Key:                key,
+		InsecureSkipVerify: skipVerify,
+	})
+	if err != nil {
+		return "", noopCleanup, fmt.Errorf("failed to start storage relay: %w", err)
+	}
+
+	return "unix://" + storageRelaySocketPath, relay.Close, nil
 }
 
 // registryOptions builds the libkapi options that wire kontinuum's server
@@ -417,11 +523,11 @@ func addonOptions(logger *slog.Logger) []libkapi.Option {
 	return []libkapi.Option{libkapi.WithController(controller)}
 }
 
-// zoneImage is the kontinuum container image zoneOptions deploys onto
-// every joined zone's downstream cluster — matches the image ci.yml pushes
-// (see .github/workflows/ci.yml), tagged with this repo's own build
-// version so a zone runs the exact same version its own hub does.
-const zoneImageRepo = "ghcr.io/nicklasfrahm/kontinuum"
+// zoneImageRepo is the kontinuum container image repository zoneOptions
+// deploys onto every joined zone's downstream cluster — matches the image
+// ci.yml pushes (see .github/workflows/ci.yml). Which tag actually gets
+// deployed isn't decided here: see zone.Reconciler.resolveImage's own doc.
+const zoneImageRepo = "ghcr.io/nicklasfrahm-dev/kontinuum"
 
 // zoneOptions builds the libkapi options that wire the Zone downstream-
 // install reconciler (see pkg/domain/zone) onto the Server. No
@@ -432,7 +538,15 @@ func zoneOptions(cfg *config.Config, logger *slog.Logger) []libkapi.Option {
 		Logger:     logger.With("component", "zone"),
 		ACMEEmail:  cfg.ACME.Email,
 		ACMEServer: cfg.ACME.Server,
-		Image:      zoneImageRepo + ":" + version,
+		Auth: zone.AuthConfig{
+			InsecureAllowAnonymous: cfg.InsecureAllowAnonymous,
+			OIDCIssuerURL:          cfg.OIDC.IssuerURL,
+			OIDCClientID:           cfg.OIDC.ClientID,
+			OIDCAdminGroups:        cfg.OIDC.AdminGroups,
+		},
+		ImageRepo:              zoneImageRepo,
+		GRPCEndpoint:           cfg.Server.GRPC.Endpoint,
+		GRPCInsecureSkipVerify: cfg.Server.GRPC.InsecureTLSSkipVerify,
 	})
 
 	return []libkapi.Option{libkapi.WithController(controller)}
@@ -599,13 +713,25 @@ func shutdownServer(server *libkapi.Server, logger *slog.Logger) error {
 	return nil
 }
 
-// customHandlers mounts the /app UI alongside the built API server. Any
-// request that does not match a registered route falls through to the
-// Kubernetes API server's own handler. oidcHandler is nil when OIDC is not
-// configured, leaving the UI unprotected.
-func customHandlers(uiRouter *ui.Router, oidcHandler *auth.Handler) libkapi.ServerFactory {
-	return func(c *libkapi.Ctx) error {
-		mux := c.HTTPMux()
+// customHandlers mounts the /app UI and the etcd gRPC proxy (see
+// pkg/domain/etcdproxy) alongside the built API server. Any HTTP request
+// that does not match a registered route falls through to the Kubernetes
+// API server's own handler. oidcHandler is nil when OIDC is not
+// configured, leaving the UI unprotected. scheme must already carry
+// kontinuum.sh/v1alpha2 and core/v1 (see buildServer), the two GVKs the
+// proxy's own hub client (built from Ctx.LoopbackConfig) needs to resolve.
+//
+// Every kontinuum-server instance registers this proxy, hub or zone
+// alike — not just the control plane — the same "every registered
+// Kontinuum treated the same, regardless of role" reasoning
+// pkg/domain/zone/inference.go's anyRegisteredKontinuum already documents:
+// a zone that itself later sponsors further nested zones (see
+// pkg/domain/zone's own "further zones it joins" ACME propagation) needs
+// to expose this same proxy in front of its own local storage for exactly
+// the same reason the original hub does.
+func customHandlers(uiRouter *ui.Router, oidcHandler *auth.Handler, scheme *runtime.Scheme) libkapi.ServerFactory {
+	return func(serverCtx *libkapi.Ctx) error {
+		mux := serverCtx.HTTPMux()
 
 		var appRoot http.HandlerFunc
 
@@ -620,8 +746,36 @@ func customHandlers(uiRouter *ui.Router, oidcHandler *auth.Handler) libkapi.Serv
 
 		uiRouter.RegisterRoutes(mux, appRoot, protect)
 
-		return nil
+		return registerEtcdProxy(serverCtx, scheme)
 	}
+}
+
+// registerEtcdProxy wires pkg/domain/etcdproxy.RegisterHub onto
+// serverCtx's own shared gRPC server (see libkapi.Ctx.GRPCServer —
+// multiplexed onto the same port as everything else, via the same h2c
+// switch registering any gRPC service there already triggers) and its own
+// local storage endpoint (see libkapi.Ctx.StorageEndpoints). The dialed
+// connection to that local endpoint is deliberately never closed — it
+// needs to live exactly as long as this process does, same lifetime as
+// the shared gRPC server itself, so there's no meaningful point at which
+// closing it early would be correct.
+func registerEtcdProxy(serverCtx *libkapi.Ctx, scheme *runtime.Scheme) error {
+	endpoints := serverCtx.StorageEndpoints()
+	if len(endpoints) == 0 {
+		return errNoStorageEndpoints
+	}
+
+	hubClient, err := ctrlclient.New(serverCtx.LoopbackConfig(), ctrlclient.Options{Scheme: scheme})
+	if err != nil {
+		return fmt.Errorf("failed to build etcd proxy's own hub client: %w", err)
+	}
+
+	_, err = etcdproxy.RegisterHub(serverCtx.GRPCServer(), endpoints[0], hubClient, v1alpha2.KontinuumSystemNamespace)
+	if err != nil {
+		return fmt.Errorf("failed to register etcd gRPC proxy: %w", err)
+	}
+
+	return nil
 }
 
 // localBaseURL derives the loopback URL the in-process Kubernetes client

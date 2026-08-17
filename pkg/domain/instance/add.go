@@ -32,10 +32,10 @@ type AddOptions struct {
 	Namespace string
 	// Address is the candidate's maintenance-mode address (IP or hostname).
 	// A hostname is resolved before it ever reaches spec.interfaces[0] — see
-	// resolveAddress and Add's own doc.
+	// ResolveAddress and Add's own doc.
 	Address string
 	// Resolver resolves Address when it isn't already an IP literal — see
-	// resolveAddress. Left nil (always the case for pkg/ui's own form
+	// ResolveAddress. Left nil (always the case for pkg/ui's own form
 	// parse), Add uses net.DefaultResolver; tests inject a stub instead of
 	// making real DNS queries.
 	Resolver Resolver
@@ -58,7 +58,7 @@ func NameFromAddress(address string) string {
 // maintenance-mode probing, exactly like zone.Add's own seed Instance, but
 // fanning out no other objects around it. When opts.Address is a DNS
 // hostname rather than an IP literal, it's resolved first (see
-// resolveAddress): spec.interfaces[0] always ends up holding the resolved
+// ResolveAddress): spec.interfaces[0] always ends up holding the resolved
 // IP, with the hostname that was actually typed in preserved instead on the
 // Instance's own AnnotationHostname annotation — so an Instance registered
 // by hostname comes out byte-for-byte identical (same Name, same Spec) to
@@ -72,7 +72,7 @@ func Add(ctx context.Context, hubClient client.Client, opts AddOptions) (*v1alph
 		return nil, fmt.Errorf("%w: namespace and address are required", errAddOptionsMissingField)
 	}
 
-	resolvedAddress, hostname, err := resolveAddress(ctx, opts.Resolver, address)
+	resolvedAddress, hostname, err := ResolveAddress(ctx, opts.Resolver, address)
 	if err != nil {
 		return nil, err
 	}

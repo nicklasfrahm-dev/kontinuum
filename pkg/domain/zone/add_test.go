@@ -1,6 +1,8 @@
 package zone_test
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -17,6 +19,27 @@ import (
 	instancedomain "github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/zone"
 )
+
+const testTalosHostname = "talos.example.com"
+
+// stubResolver is a test-only instancedomain.Resolver that never touches the
+// network — LookupHost either returns addrs or, when addrs is empty,
+// errStubLookupFailed. Mirrors pkg/domain/instance's own add_test.go
+// stubResolver — that one lives in package instance_test, unexported, so
+// this package needs its own copy rather than reusing it.
+type stubResolver struct {
+	addrs []string
+}
+
+var errStubLookupFailed = errors.New("stub resolver: lookup failed")
+
+func (s stubResolver) LookupHost(_ context.Context, _ string) ([]string, error) {
+	if len(s.addrs) == 0 {
+		return nil, errStubLookupFailed
+	}
+
+	return s.addrs, nil
+}
 
 // getSeedInstance finds Add's seed Instance by its region/zone labels
 // rather than by name — its name is instance.NameFromAddress(TalosAddress)
@@ -250,10 +273,79 @@ func TestAddPropagatesUnexpectedCreateError(t *testing.T) {
 	assert.False(t, apierrors.IsAlreadyExists(err))
 }
 
+// TestAddResolvesTalosAddressHostnameToIP covers issue #98's own gap: unlike
+// instance.Add's standalone registration, zone.Add used to store
+// opts.TalosAddress verbatim, so a hostname (e.g. a Docker Compose service
+// name) ended up dialed literally by the taloscluster controller instead of
+// a real IP, breaking TLS verification once Talos left maintenance mode.
+func TestAddResolvesTalosAddressHostnameToIP(t *testing.T) {
+	t.Parallel()
+
+	hubClient := newHubFakeClient(t)
+
+	opts := testAddOptions()
+	opts.TalosAddress = testTalosHostname
+	opts.Resolver = stubResolver{addrs: []string{testTalosAddress}}
+
+	_, err := zone.Add(t.Context(), hubClient, opts)
+	require.NoError(t, err)
+
+	got := getSeedInstance(t, hubClient)
+	assert.Equal(t, []string{testTalosAddress}, got.Spec.Interfaces,
+		"spec must carry the resolved IP, not the hostname")
+	assert.Equal(t, testTalosHostname, got.Annotations[instancedomain.AnnotationHostname])
+}
+
+// TestAddByTalosHostnameMatchesAddByResolvedIP covers the same convergence
+// instance.Add's own TestAddByHostnameMatchesAddByResolvedIP covers: a zone
+// added by hostname and a zone added directly by that hostname's resolved IP
+// must land on the exact same seed Instance identity (see BuildAddObjects'
+// own doc), not two independent duplicates.
+func TestAddByTalosHostnameMatchesAddByResolvedIP(t *testing.T) {
+	t.Parallel()
+
+	hubClient := newHubFakeClient(t)
+
+	existing := &v1alpha2.Instance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: instancedomain.NameFromAddress(testTalosAddress), Namespace: v1alpha2.KontinuumSystemNamespace,
+		},
+		Spec: v1alpha2.InstanceSpec{Interfaces: []string{testTalosAddress}},
+	}
+	require.NoError(t, hubClient.Create(t.Context(), existing))
+
+	opts := testAddOptions()
+	opts.TalosAddress = testTalosHostname
+	opts.Resolver = stubResolver{addrs: []string{testTalosAddress}}
+
+	_, err := zone.Add(t.Context(), hubClient, opts)
+	require.NoError(t, err)
+
+	var list v1alpha2.InstanceList
+	require.NoError(t, hubClient.List(t.Context(), &list, client.InNamespace(v1alpha2.KontinuumSystemNamespace)))
+	require.Len(t, list.Items, 1, "hostname and its resolved IP must not create two separate Instances")
+	assert.Equal(t, existing.Name, list.Items[0].Name)
+}
+
+// TestAddSurfacesTalosAddressResolveFailure covers a hostname that fails to
+// resolve — Add must surface that error rather than silently storing the
+// unresolved hostname in spec.interfaces[0], the exact bug this test guards
+// against regressing.
+func TestAddSurfacesTalosAddressResolveFailure(t *testing.T) {
+	t.Parallel()
+
+	opts := testAddOptions()
+	opts.TalosAddress = testTalosHostname
+	opts.Resolver = stubResolver{}
+
+	_, err := zone.Add(t.Context(), newHubFakeClient(t), opts)
+	require.Error(t, err)
+}
+
 func TestAddInfersDomainFromRegisteredKontinuumWhenUnset(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuum("hub", testStorage)
+	kontinuum, kontinuumSecret := registeredKontinuum("hub")
 	kontinuum.Status.Config.Server.DNS.Domain = testDomain
 
 	hubClient := newHubFakeClient(t, kontinuum, kontinuumSecret)
@@ -269,7 +361,7 @@ func TestAddInfersDomainFromRegisteredKontinuumWhenUnset(t *testing.T) {
 func TestAddPrefersExplicitDomainOverInference(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuum("hub", testStorage)
+	kontinuum, kontinuumSecret := registeredKontinuum("hub")
 	kontinuum.Status.Config.Server.DNS.Domain = "inferred.example.com"
 
 	hubClient := newHubFakeClient(t, kontinuum, kontinuumSecret)
@@ -282,23 +374,31 @@ func TestAddPrefersExplicitDomainOverInference(t *testing.T) {
 	assert.Equal(t, "explicit.example.com", got.Spec.Domain)
 }
 
-func TestAddFailsWhenNoRegisteredKontinuumPublishesDomain(t *testing.T) {
+// TestAddLeavesDomainEmptyWhenNoRegisteredKontinuumPublishesOne covers
+// issue #98's own gap: a Kontinuum is registered, but hasn't set
+// KONTINUUM_SERVER_DNS_DOMAIN — nothing for inference to find. This must
+// not fail zone-add: a zone's own hostname has no reason to match whatever
+// domain the hub happens to publish, and a Zone with no domain at all is a
+// supported choice (see controller.go's reconcileInstall, which just skips
+// installing a network layer for one).
+func TestAddLeavesDomainEmptyWhenNoRegisteredKontinuumPublishesOne(t *testing.T) {
 	t.Parallel()
 
-	// A Kontinuum is registered, but hasn't set KONTINUUM_SERVER_DNS_DOMAIN
-	// — nothing for inference to find.
-	kontinuum, kontinuumSecret := registeredKontinuum("hub", testStorage)
+	kontinuum, kontinuumSecret := registeredKontinuum("hub")
 	hubClient := newHubFakeClient(t, kontinuum, kontinuumSecret)
 
 	opts := testAddOptions()
 	opts.Domain = ""
 
-	_, err := zone.Add(t.Context(), hubClient, opts)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no registered kontinuum publishes a DNS domain")
+	got, err := zone.Add(t.Context(), hubClient, opts)
+	require.NoError(t, err)
+	assert.Empty(t, got.Spec.Domain)
 }
 
-func TestAddFailsWhenNoKontinuumRegisteredAtAllForDomainInference(t *testing.T) {
+// TestAddLeavesDomainEmptyWhenNoKontinuumRegisteredAtAllForDomainInference
+// is the same case one step earlier: no Kontinuum registered at all, not
+// even one with an empty domain to find.
+func TestAddLeavesDomainEmptyWhenNoKontinuumRegisteredAtAllForDomainInference(t *testing.T) {
 	t.Parallel()
 
 	hubClient := newHubFakeClient(t)
@@ -306,9 +406,9 @@ func TestAddFailsWhenNoKontinuumRegisteredAtAllForDomainInference(t *testing.T) 
 	opts := testAddOptions()
 	opts.Domain = ""
 
-	_, err := zone.Add(t.Context(), hubClient, opts)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no registered kontinuum found")
+	got, err := zone.Add(t.Context(), hubClient, opts)
+	require.NoError(t, err)
+	assert.Empty(t, got.Spec.Domain)
 }
 
 // preRegisteredInstance is an already-registered, unclaimed Instance in
