@@ -67,7 +67,7 @@ What happens next depends on `KONTINUUM_SERVER_DNS_DOMAIN` (see `.env.example`):
 One more thing to expect either way, not a sign anything's broken: **the deployed `kontinuum` pod runs whatever your local hub's own registered version publishes, not your working tree directly** — `zone.Reconciler.resolveImage` always inherits the image tag off an already-registered Kontinuum's own `status.version`, which for a plain `make dev` hub (no `-ldflags -X` version override) is literally `"dev"`. If you're testing local changes to `pkg/cli/serve.go`/`pkg/domain/etcdproxy`/etc., publish them first:
 
 ```sh
-make image-push
+VERSION=dev make image-push
 ```
 
 This builds and pushes the working tree under `ghcr.io/nicklasfrahm-dev/kontinuum:dev` (see the Makefile's own doc) — the same tag CI keeps in sync with `main` on every push, so without running this, a freshly joined zone deploys whatever `main` last published, not your local changes. (`kubectl logs -n kontinuum-system deploy/kontinuum` on the downstream cluster's own kubeconfig, fetched from `kubectl get secret -n kontinuum-system taloscluster-local-a -o jsonpath='{.data.kubeconfig}' | base64 -d`, shows which image actually landed.)
