@@ -359,12 +359,15 @@ func earliestRequeue(result ctrl.Result, authRequeue time.Duration) ctrl.Result 
 // reconcileInstall installs kontinuum's downstream footprint onto zoneObj's own
 // cluster — only ever reached once ClusterReady is true (see Reconcile).
 // Every step is idempotent create-or-update; the first error short-circuits
-// with Installed=False/InstallFailed and a requeue. Installed only flips
-// True once the Certificate ensureCertificate creates itself reports Ready
-// — a real signal that TLS issuance succeeded, not just that the object was
-// created (mirrors how TalosCluster/Addon already aggregate real
-// downstream readiness) — and, once it does, reconcileRegistryJoin runs as
-// the final step before the Zone can report Ready (see
+// with Installed=False/InstallFailed and a requeue. With spec.domain set,
+// Installed only flips True once the Certificate ensureCertificate creates
+// itself reports Ready — a real signal that TLS issuance succeeded, not
+// just that the object was created (mirrors how TalosCluster/Addon already
+// aggregate real downstream readiness). With spec.domain unset, there's no
+// hostname to issue a certificate or route traffic for, so installNetwork
+// is skipped entirely and Installed flips True as soon as the workload
+// itself installs. Either way, reconcileRegistryJoin runs as the final step
+// once Installed is True, before the Zone can report Ready (see
 // RegistryJoinedConditionType's own doc).
 func (r *Reconciler) reconcileInstall(
 	ctx context.Context, zoneObj *v1alpha2.Zone, cluster *v1alpha2.TalosCluster,
@@ -395,13 +398,42 @@ func (r *Reconciler) reconcileInstall(
 		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonNoVersionFound, err.Error())
 	}
 
-	hostname := fmt.Sprintf("%s.%s.%s", zoneObj.Spec.Zone, zoneObj.Spec.Region, zoneObj.Spec.Domain)
+	// hostname stays empty when spec.domain is unset — installNetwork (and
+	// everything it creates: ClusterIssuer, Gateway, Certificate,
+	// HTTPRoute) is skipped entirely in that case, not just given a
+	// malformed "<zone>.<region>." hostname: none of those resources mean
+	// anything without a real domain to issue a certificate and route
+	// traffic for. installWorkload still runs regardless — this zone's own
+	// kontinuum-server registers with the hub either way (see
+	// ensureConfigMap's own doc for hostname's only other use, OIDC's
+	// redirect URL, itself skipped unless auth.OIDCIssuerURL is set).
+	hasDomain := zoneObj.Spec.Domain != ""
+
+	var hostname string
+	if hasDomain {
+		hostname = fmt.Sprintf("%s.%s.%s", zoneObj.Spec.Zone, zoneObj.Spec.Region, zoneObj.Spec.Domain)
+	}
 
 	err = r.installWorkload(ctx, downstream, zoneObj, storage, image, hostname)
 	if err != nil {
 		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonInstallFailed, err.Error())
 	}
 
+	if !hasDomain {
+		return r.finishInstallWithoutDomain(ctx, zoneObj)
+	}
+
+	return r.finishInstallWithDomain(ctx, downstream, zoneObj, hostname)
+}
+
+// finishInstallWithDomain installs the network layer (ClusterIssuer,
+// Gateway, Certificate, HTTPRoute — see installNetwork) for a Zone with
+// spec.domain set, and once the Certificate itself reports Ready, flips
+// Installed True and proceeds to reconcileRegistryJoin — split out of
+// reconcileInstall purely to keep its own cyclomatic complexity down.
+func (r *Reconciler) finishInstallWithDomain(
+	ctx context.Context, downstream client.Client, zoneObj *v1alpha2.Zone, hostname string,
+) (ctrl.Result, error) {
 	certReady, err := r.installNetwork(ctx, downstream, hostname)
 	if err != nil {
 		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonInstallFailed, err.Error())
@@ -414,6 +446,21 @@ func (r *Reconciler) reconcileInstall(
 
 	result, err := r.setInstalledCondition(ctx, zoneObj, metav1.ConditionTrue, reasonInstalled,
 		"kontinuum-server installed and serving at "+hostname)
+	if err != nil {
+		return result, err
+	}
+
+	return r.reconcileRegistryJoin(ctx, zoneObj)
+}
+
+// finishInstallWithoutDomain flips Installed True and proceeds straight to
+// reconcileRegistryJoin for a Zone with no spec.domain configured — split
+// out of reconcileInstall purely to keep its own cyclomatic complexity
+// down; see that function's own doc for why no domain means installNetwork
+// never runs at all.
+func (r *Reconciler) finishInstallWithoutDomain(ctx context.Context, zoneObj *v1alpha2.Zone) (ctrl.Result, error) {
+	result, err := r.setInstalledCondition(ctx, zoneObj, metav1.ConditionTrue, reasonInstalled,
+		"kontinuum-server installed (no spec.domain configured — network exposure skipped)")
 	if err != nil {
 		return result, err
 	}

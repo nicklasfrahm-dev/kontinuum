@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -368,6 +369,68 @@ func TestReconcileInstallsDownstreamObjectsAndWaitsForCertificate(t *testing.T) 
 	assertReadyMirrors(t, got, metav1.ConditionFalse, "WaitingForCertificate")
 
 	assertDownstreamFootprintInstalled(t, downstream)
+}
+
+// TestReconcileSkipsNetworkInstallWhenDomainUnset covers issue #98's own
+// gap: a Zone with no spec.domain (network exposure never configured, e.g.
+// a local Talos dev cluster with no public DNS to satisfy ACME's own
+// HTTP-01 challenge — see docs/local-setup.md) used to hostname-format its
+// way to a malformed "<zone>.<region>." Certificate DNS name and sit stuck
+// at WaitingForCertificate forever. With spec.domain unset, Installed must
+// flip True as soon as the workload itself installs, and none of
+// ClusterIssuer/Gateway/HTTPRoute/Certificate — meaningless without a real
+// hostname — get created at all.
+func TestReconcileSkipsNetworkInstallWhenDomainUnset(t *testing.T) {
+	t.Parallel()
+
+	kontinuum, kontinuumSecret := registeredKontinuum("hub")
+
+	zoneObj := testZoneObject()
+	zoneObj.Spec.Domain = ""
+
+	hubClient := newHubFakeClient(t, zoneObj, readyTalosCluster(), kubeconfigSecret(), kontinuum, kontinuumSecret)
+	downstream := newDownstreamFakeClient(t)
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: downstream})
+
+	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+	assert.Equal(t, testRetryInterval, result.RequeueAfter)
+
+	var got v1alpha2.Zone
+	require.NoError(t, hubClient.Get(t.Context(), testZoneKey(), &got))
+
+	cond := meta.FindStatusCondition(got.Status.Conditions, zone.InstalledConditionType)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, "Installed", cond.Reason)
+
+	var deployment appsv1.Deployment
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &deployment),
+		"the workload itself must still install with no domain configured")
+
+	var issuer certmanagerv1.ClusterIssuer
+
+	err = downstream.Get(t.Context(), client.ObjectKey{Name: testDownstreamResourceName}, &issuer)
+	assert.True(t, apierrors.IsNotFound(err), "no clusterissuer without a domain to issue a certificate for")
+
+	var gateway gatewayv1.Gateway
+
+	err = downstream.Get(t.Context(),
+		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &gateway)
+	assert.True(t, apierrors.IsNotFound(err), "no gateway without a domain to route traffic for")
+
+	var httpRoute gatewayv1.HTTPRoute
+
+	err = downstream.Get(t.Context(),
+		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &httpRoute)
+	assert.True(t, apierrors.IsNotFound(err), "no httproute without a domain to route traffic for")
+
+	var cert certmanagerv1.Certificate
+
+	err = downstream.Get(t.Context(),
+		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &cert)
+	assert.True(t, apierrors.IsNotFound(err), "no certificate without a domain to issue one for")
 }
 
 // TestReconcileDevVersionDeploysLatestTag covers resolveImage's own
