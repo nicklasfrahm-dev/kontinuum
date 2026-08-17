@@ -134,6 +134,13 @@ type Config struct {
 	// own KONTINUUM_SERVER_GRPC_ENDPOINT, and used by zoneStorageDSN to
 	// build every newly joined zone's own KONTINUUM_SERVER_STORAGE.
 	GRPCEndpoint string
+	// GRPCInsecureSkipVerify mirrors the hub's own
+	// KONTINUUM_SERVER_GRPC_INSECURE_TLS_SKIP_VERIFY (see
+	// v1alpha2.KontinuumGRPCConfigStatus's own doc) onto every newly joined
+	// zone's own ConfigMap — see ensureConfigMap's own doc for why this,
+	// not GRPCEndpoint above, is what a joined zone's own deployed process
+	// actually needs to dial GRPCEndpoint successfully.
+	GRPCInsecureSkipVerify string
 	// RetryInterval is how long Reconcile waits before retrying a step that
 	// hasn't converged yet. Defaults to fifteen seconds when zero.
 	RetryInterval time.Duration
@@ -209,6 +216,7 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		Auth:                    c.Config.Auth,
 		ImageRepo:               c.Config.ImageRepo,
 		GRPCEndpoint:            c.Config.GRPCEndpoint,
+		GRPCInsecureSkipVerify:  c.Config.GRPCInsecureSkipVerify,
 		RetryInterval:           c.Config.RetryInterval,
 		TeardownTimeout:         c.Config.TeardownTimeout,
 		Logger:                  c.Config.Logger,
@@ -247,6 +255,7 @@ type Reconciler struct {
 	Auth                    AuthConfig
 	ImageRepo               string
 	GRPCEndpoint            string
+	GRPCInsecureSkipVerify  string
 	RetryInterval           time.Duration
 	TeardownTimeout         time.Duration
 	Logger                  *slog.Logger
@@ -518,7 +527,8 @@ func (r *Reconciler) installWorkload(
 	}
 
 	err = ensureConfigMap(ctx, downstream, downstreamNamespace,
-		zoneObj.Spec.Region, zoneObj.Spec.Zone, hostname, r.ACMEEmail, r.ACMEServer, r.Auth)
+		zoneObj.Spec.Region, zoneObj.Spec.Zone, hostname, r.ACMEEmail, r.ACMEServer,
+		r.GRPCEndpoint, r.GRPCInsecureSkipVerify, r.Auth)
 	if err != nil {
 		return err
 	}

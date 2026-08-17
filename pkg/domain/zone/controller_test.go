@@ -242,6 +242,7 @@ func newReconciler(hubClient client.Client, downstreamBuilder zone.DownstreamCli
 		Auth:                    zone.AuthConfig{InsecureAllowAnonymous: "true"},
 		ImageRepo:               testImageRepo,
 		GRPCEndpoint:            testGRPCEndpoint,
+		GRPCInsecureSkipVerify:  "true",
 		RetryInterval:           testRetryInterval,
 		Logger:                  slog.Default(),
 	}
@@ -519,6 +520,18 @@ func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) 
 	// pkg/config.Config.ValidateAuthentication) and so never gets as far as
 	// heartbeating — the root cause tracked by issue #95.
 	assert.Equal(t, "true", configMap.Data["KONTINUUM_INSECURE_ALLOW_ANONYMOUS"])
+	// Without this, the deployed process's own relay back through the
+	// hub's own KONTINUUM_SERVER_STORAGE endpoint fails real TLS
+	// certificate verification against a self-signed dev proxy and
+	// crash-loops — this process's own env is what actually needs it, not
+	// the hub's (see ensureConfigMap's own doc).
+	assert.Equal(t, "true", configMap.Data["KONTINUUM_SERVER_GRPC_INSECURE_TLS_SKIP_VERIFY"])
+	// Without this, this deployed process's own Zone controller (it runs
+	// the full kontinuum server too — see ensureConfigMap's own doc) logs
+	// "this hub has no KONTINUUM_SERVER_GRPC_ENDPOINT configured" on every
+	// reconcile of any Zone visible in its shared storage, and can't build
+	// a working KONTINUUM_SERVER_STORAGE for any further zone it joins.
+	assert.Equal(t, testGRPCEndpoint, configMap.Data["KONTINUUM_SERVER_GRPC_ENDPOINT"])
 
 	var deployment appsv1.Deployment
 	require.NoError(t, downstream.Get(t.Context(),

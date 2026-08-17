@@ -94,17 +94,37 @@ func ensureSecret(ctx context.Context, downstream client.Client, namespace, stor
 // zone-specific KONTINUUM_OIDC_REDIRECT_URL when auth.OIDCIssuerURL is set
 // — see AuthConfig's own doc for why the hub's own redirect URL can't be
 // reused here.
+//
+// grpcEndpoint/grpcInsecureSkipVerify mirror the hub's own
+// KONTINUUM_SERVER_GRPC_ENDPOINT/_INSECURE_TLS_SKIP_VERIFY (see
+// v1alpha2.KontinuumGRPCConfigStatus's own doc) straight onto this zone's
+// own env: this deployed process (not just the hub) also runs the full
+// kontinuum server, including its own Zone controller — reconciling any
+// Zone visible in its shared storage, this Zone included, if it ever
+// nested-joins one — and that controller's own zoneStorageDSN needs a
+// configured GRPCEndpoint the exact same way the hub's does, or every
+// reconcile logs "this hub has no KONTINUUM_SERVER_GRPC_ENDPOINT
+// configured" and any further-nested zone that hub tries to add gets no
+// working KONTINUUM_SERVER_STORAGE at all. GRPCInsecureSkipVerify's own
+// need is more immediate: this process's own relay (see etcdproxy.Relay)
+// already dials GRPCEndpoint on every KONTINUUM_SERVER_STORAGE call this
+// zone itself makes, so a hub configured to skip TLS verification against
+// a self-signed dev proxy but never propagating that choice downstream
+// left every joined zone's kontinuum-server crash-looping on a real
+// certificate verification failure instead.
 func ensureConfigMap(
 	ctx context.Context, downstream client.Client, namespace, region, zoneName, hostname, acmeEmail, acmeServer string,
-	auth AuthConfig,
+	grpcEndpoint, grpcInsecureSkipVerify string, auth AuthConfig,
 ) error {
 	data := map[string]string{
-		"KONTINUUM_SERVER_ADDR":              ":8080",
-		"KONTINUUM_SERVER_REGION":            region,
-		"KONTINUUM_SERVER_ZONE":              zoneName,
-		"KONTINUUM_ACME_EMAIL":               acmeEmail,
-		"KONTINUUM_ACME_SERVER":              acmeServer,
-		"KONTINUUM_INSECURE_ALLOW_ANONYMOUS": auth.InsecureAllowAnonymous,
+		"KONTINUUM_SERVER_ADDR":                          ":8080",
+		"KONTINUUM_SERVER_REGION":                        region,
+		"KONTINUUM_SERVER_ZONE":                          zoneName,
+		"KONTINUUM_ACME_EMAIL":                           acmeEmail,
+		"KONTINUUM_ACME_SERVER":                          acmeServer,
+		"KONTINUUM_INSECURE_ALLOW_ANONYMOUS":             auth.InsecureAllowAnonymous,
+		"KONTINUUM_SERVER_GRPC_ENDPOINT":                 grpcEndpoint,
+		"KONTINUUM_SERVER_GRPC_INSECURE_TLS_SKIP_VERIFY": grpcInsecureSkipVerify,
 	}
 
 	if auth.OIDCIssuerURL != "" {

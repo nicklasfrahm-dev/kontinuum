@@ -544,8 +544,9 @@ func zoneOptions(cfg *config.Config, logger *slog.Logger) []libkapi.Option {
 			OIDCClientID:           cfg.OIDC.ClientID,
 			OIDCAdminGroups:        cfg.OIDC.AdminGroups,
 		},
-		ImageRepo:    zoneImageRepo,
-		GRPCEndpoint: cfg.Server.GRPC.Endpoint,
+		ImageRepo:              zoneImageRepo,
+		GRPCEndpoint:           cfg.Server.GRPC.Endpoint,
+		GRPCInsecureSkipVerify: cfg.Server.GRPC.InsecureTLSSkipVerify,
 	})
 
 	return []libkapi.Option{libkapi.WithController(controller)}
