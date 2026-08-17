@@ -11,7 +11,9 @@
     (see templateDict) with: Conditions - a slice of {Type, Status, OK,
     Reason, Message, Age} (see conditionRow / instanceConditionRow — both
     already share this exact shape; Status is unused here but kept for
-    parity with the two structs).
+    parity with the two structs), already sorted newest-transitioned-first
+    (see router.go's sortConditionsNewestFirst) — this template renders
+    Conditions in the order given, it doesn't sort them itself.
 */}}
 {{define "conditions-table"}}
 {{if .Conditions}}

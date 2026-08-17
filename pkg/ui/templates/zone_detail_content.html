@@ -28,6 +28,14 @@
 
     <div class="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
         <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
+            {{template "icon-list-checks"}}
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider">Conditions</h2>
+        </div>
+        {{template "conditions-table" (dict "Conditions" .Conditions)}}
+    </div>
+
+    <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+        <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
             {{template "icon-info"}}
             <h2 class="text-sm font-bold text-white uppercase tracking-wider">Overview</h2>
         </div>
@@ -113,14 +121,6 @@
             </div>
             {{end}}
         </dl>
-    </div>
-
-    <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
-        <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
-            {{template "icon-list-checks"}}
-            <h2 class="text-sm font-bold text-white uppercase tracking-wider">Conditions</h2>
-        </div>
-        {{template "conditions-table" (dict "Conditions" .Conditions)}}
     </div>
 </div>
 

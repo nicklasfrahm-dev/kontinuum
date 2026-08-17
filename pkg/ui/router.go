@@ -820,6 +820,24 @@ func (r *Router) listZoneRows(writer http.ResponseWriter, request *http.Request)
 	return rows, nil
 }
 
+// sortConditionsNewestFirst returns a copy of conditions ordered by
+// LastTransitionTime, newest first — shared by every detail page's own
+// conditions table (see conditions-table's own doc) so the most recently
+// changed condition is always the top row, rather than whatever order
+// status.conditions happens to store them in (Kubernetes gives no ordering
+// guarantee there). A copy, not an in-place sort: conditions here is always
+// item.Status.Conditions straight off a live object, and this package has
+// no business reordering that object's own status.
+func sortConditionsNewestFirst(conditions []metav1.Condition) []metav1.Condition {
+	sorted := append([]metav1.Condition(nil), conditions...)
+
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].LastTransitionTime.After(sorted[j].LastTransitionTime.Time)
+	})
+
+	return sorted
+}
+
 // latestCondition returns whichever of conditions most recently
 // transitioned, or nil if conditions is empty — see zoneRow's own doc for
 // why "most recent" is the summary this package shows.
@@ -966,8 +984,10 @@ func zoneDetailData(
 	zoneObj v1alpha2.Zone, cluster v1alpha2.TalosCluster, hasCluster bool,
 	kontinuum *v1alpha2.Kontinuum, joined bool, namespace, version string, authEnabled bool,
 ) map[string]any {
-	conditions := make([]conditionRow, 0, len(zoneObj.Status.Conditions))
-	for _, cond := range zoneObj.Status.Conditions {
+	sortedConditions := sortConditionsNewestFirst(zoneObj.Status.Conditions)
+	conditions := make([]conditionRow, 0, len(sortedConditions))
+
+	for _, cond := range sortedConditions {
 		conditions = append(conditions, conditionRow{
 			Type: cond.Type, Status: string(cond.Status), OK: cond.Status == metav1.ConditionTrue,
 			Reason: cond.Reason, Message: capitalizeFirst(cond.Message), Age: formatAge(cond.LastTransitionTime.Time),
@@ -1744,8 +1764,10 @@ func instanceDetailData(item v1alpha2.Instance, version string, authEnabled bool
 		})
 	}
 
-	conditions := make([]instanceConditionRow, 0, len(item.Status.Conditions))
-	for _, cond := range item.Status.Conditions {
+	sortedConditions := sortConditionsNewestFirst(item.Status.Conditions)
+	conditions := make([]instanceConditionRow, 0, len(sortedConditions))
+
+	for _, cond := range sortedConditions {
 		conditions = append(conditions, instanceConditionRow{
 			Type:    cond.Type,
 			Status:  string(cond.Status),
@@ -2142,8 +2164,10 @@ func talosClusterDetailData(
 		pools = append(pools, fetchPoolRow(ctx, kontinuums, cluster.Namespace, worker.Name, worker.PoolRef.Name))
 	}
 
-	conditions := make([]conditionRow, 0, len(cluster.Status.Conditions))
-	for _, cond := range cluster.Status.Conditions {
+	sortedConditions := sortConditionsNewestFirst(cluster.Status.Conditions)
+	conditions := make([]conditionRow, 0, len(sortedConditions))
+
+	for _, cond := range sortedConditions {
 		conditions = append(conditions, conditionRow{
 			Type: cond.Type, Status: string(cond.Status), OK: cond.Status == metav1.ConditionTrue,
 			Reason: cond.Reason, Message: capitalizeFirst(cond.Message), Age: formatAge(cond.LastTransitionTime.Time),

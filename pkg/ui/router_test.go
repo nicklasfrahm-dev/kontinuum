@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -3396,6 +3397,66 @@ func TestHandleTalosClusterDetailRendersOverviewPoolsAndConditions(t *testing.T)
 	assert.Regexp(t, `id="taloscluster-kubeconfig-masked"\s+class="relative`, string(body),
 		"the masked panel starts visible when the page loads without ?reveal=true")
 	assert.Regexp(t, `id="taloscluster-kubeconfig-content"\s+class="hidden relative`, string(body))
+}
+
+// TestHandleTalosClusterDetailSortsConditionsNewestFirst covers issue #98:
+// the conditions table must show the most recently transitioned condition
+// first, regardless of the order status.conditions happens to store them
+// in (Kubernetes gives no ordering guarantee there) — here the older
+// "ClusterReady" condition is listed before the newer "AddonsHealthy" one
+// in the fixture itself, so a naive render-in-storage-order would get this
+// backwards.
+func TestHandleTalosClusterDetailSortsConditionsNewestFirst(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	older := metav1.NewTime(time.Now().Add(-time.Hour))
+	newer := metav1.NewTime(time.Now())
+
+	cluster := talosClusterFixture(metav1.ConditionTrue)
+	cluster.Status.Conditions = []metav1.Condition{
+		{
+			Type: testReadyConditionType, Status: metav1.ConditionTrue,
+			Reason: "ClusterReady", Message: "cluster is ready", LastTransitionTime: older,
+		},
+		{
+			Type: "AddonsHealthy", Status: metav1.ConditionTrue,
+			Reason: "AddonsInstalled", Message: "addons are healthy", LastTransitionTime: newer,
+		},
+	}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{talosClusters: []v1alpha2.TalosCluster{cluster}}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder,
+		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	newerIndex := strings.Index(string(body), "AddonsHealthy")
+	olderIndex := strings.Index(string(body), "ClusterReady")
+
+	require.NotEqual(t, -1, newerIndex, "AddonsHealthy condition must be rendered")
+	require.NotEqual(t, -1, olderIndex, "ClusterReady condition must be rendered")
+	assert.Less(t, newerIndex, olderIndex,
+		"the newer AddonsHealthy condition must render before the older ClusterReady one")
 }
 
 func TestHandleTalosClusterDetailRevealsKubeconfigPanelViaQueryParam(t *testing.T) {
