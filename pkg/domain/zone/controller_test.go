@@ -281,14 +281,17 @@ func joinedKontinuum(name string) (*v1alpha2.Kontinuum, *corev1.Secret) {
 //nolint:gosec // false positive: fixture data, not a real credential
 const testDNSCredential = "AKIAEXAMPLE:secret"
 
-// registeredKontinuumWithDNS extends registeredKontinuum with a DNS provider
-// credential stored under the same Secret — see
-// v1alpha2.KontinuumDNSConfigStatus.Credential's own doc for why it lives
-// alongside Storage. Named "hub", not parameterized: every dns_test.go
-// caller wants the same fixture, mirroring how those tests never need
-// registeredKontinuum's own multi-Kontinuum flexibility either.
-func registeredKontinuumWithDNS() (*v1alpha2.Kontinuum, *corev1.Secret) {
+// registeredKontinuumWithDNS extends registeredKontinuum with a DNS
+// provider name (non-confidential, published directly on status — see
+// v1alpha2.KontinuumDNSConfigStatus.Provider's own doc) and credential
+// stored under the same Secret as Provider's own doc for why it lives
+// alongside Storage. Named "hub", not parameterized beyond provider: every
+// dns_test.go caller wants the same fixture otherwise, mirroring how those
+// tests never need registeredKontinuum's own multi-Kontinuum flexibility
+// either.
+func registeredKontinuumWithDNS(provider string) (*v1alpha2.Kontinuum, *corev1.Secret) {
 	kontinuum, secret := registeredKontinuum("hub")
+	kontinuum.Status.Config.Server.DNS.Provider = provider
 	secret.Data["KONTINUUM_SERVER_DNS_CREDENTIAL"] = []byte(testDNSCredential)
 
 	return kontinuum, secret
@@ -426,7 +429,7 @@ func TestReconcileReportsNoStorageSecretFound(t *testing.T) {
 func TestReconcileInstallsDownstreamObjectsAndWaitsForCertificate(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuum("hub")
+	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderRoute53)
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
 		kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)
@@ -741,7 +744,7 @@ func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) 
 func TestReconcileFlipsInstalledOnceCertificateReady(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuum("hub")
+	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderRoute53)
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
 		kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)
@@ -792,7 +795,7 @@ func TestReconcileFlipsInstalledOnceCertificateReady(t *testing.T) {
 func TestReconcileFlipsReadyOnceKontinuumJoinsRegistry(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuum("hub")
+	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderRoute53)
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
 		kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)

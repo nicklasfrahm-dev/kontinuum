@@ -67,13 +67,12 @@ const (
 	// gate.
 	ReadyConditionType = "Ready"
 	// DNSRecordConditionType reports this zone's own DNS record management
-	// — see reconcileDNS's own doc. Unlike InstalledConditionType, a False
-	// status here doesn't necessarily mean something is wrong: the common,
-	// expected steady state for a deployment with no DNS credentials
-	// configured (see issue #51's own "must not require DNS credentials to
-	// reach Ready" requirement) is DNSRecordConditionType permanently False
-	// with reasonDNSCredentialsNotConfigured, while InstalledConditionType
-	// still reaches True.
+	// — see reconcileDNS's own doc. Only ever reconciled once
+	// InstalledConditionType's own DNS-configuration gate (see
+	// finishInstallWithDomain) has already passed, so unlike that
+	// unconfigured-DNS case, a False status here always means something is
+	// transiently in progress (waiting on the downstream Gateway's own
+	// address), not a permanent, expected steady state.
 	DNSRecordConditionType = "DNSRecord"
 
 	reasonTalosClusterNotFound   = "TalosClusterNotFound"
@@ -87,13 +86,17 @@ const (
 	reasonInstalled              = "Installed"
 	reasonWaitingForRegistry     = "WaitingForRegistry"
 	reasonRegistryJoined         = "RegistryJoined"
+	// reasonWaitingForDNSConfiguration is InstalledConditionType's own
+	// reason while a Zone with spec.domain set is waiting for the hub to
+	// have both a DNS provider and credential configured — see
+	// finishInstallWithDomain's own doc for why installNetwork is
+	// deliberately never attempted before then.
+	reasonWaitingForDNSConfiguration = "WaitingForDNSConfiguration"
 
-	// reasonDNSCredentialsNotConfigured, reasonWaitingForGatewayAddress, and
-	// reasonDNSRecordCreated are DNSRecordConditionType's own reasons — see
-	// reconcileDNS.
-	reasonDNSCredentialsNotConfigured = "DNSCredentialsNotConfigured"
-	reasonWaitingForGatewayAddress    = "WaitingForGatewayAddress"
-	reasonDNSRecordCreated            = "DNSRecordCreated"
+	// reasonWaitingForGatewayAddress and reasonDNSRecordCreated are
+	// DNSRecordConditionType's own reasons — see reconcileDNS.
+	reasonWaitingForGatewayAddress = "WaitingForGatewayAddress"
+	reasonDNSRecordCreated         = "DNSRecordCreated"
 
 	// reasonDownstreamTeardownFailed and reasonTalosClusterDeleteFailed are
 	// teardown.go's own retryable-failure reasons — see reconcileTeardown.
@@ -466,7 +469,7 @@ func (r *Reconciler) reconcileInstall(
 		return r.finishInstallWithoutDomain(ctx, zoneObj)
 	}
 
-	return r.finishInstallWithDomain(ctx, downstream, zoneObj, hostname)
+	return r.finishInstallWithDomain(ctx, downstream, zoneObj, cluster, hostname)
 }
 
 // finishInstallWithDomain installs the network layer (ClusterIssuer,
@@ -474,9 +477,35 @@ func (r *Reconciler) reconcileInstall(
 // spec.domain set, and once the Certificate itself reports Ready, flips
 // Installed True and proceeds to reconcileRegistryJoin — split out of
 // reconcileInstall purely to keep its own cyclomatic complexity down.
+//
+// installNetwork is deliberately never attempted before findKontinuumDNSConfig
+// confirms the hub has both a DNS provider and credential configured:
+// hostname's own ACME HTTP-01 challenge can only ever succeed once hostname
+// actually resolves to the downstream Gateway's own address, and nothing
+// makes that happen without a DNS provider to eventually reconcile the
+// DNSEndpoint reconcileDNS creates (see that function's own doc) — a
+// Certificate created before then would just sit Provisioning forever, with
+// no actionable next step for an operator staring at it. See
+// reconcileExternalDNSAddon's own doc for the one provider (cloudflare)
+// this package can wire up automatically; any other provider still needs
+// its own external-dns Addon, same as before this gate existed — this only
+// changes when installNetwork itself runs, not who's responsible for DNS.
 func (r *Reconciler) finishInstallWithDomain(
-	ctx context.Context, downstream client.Client, zoneObj *v1alpha2.Zone, hostname string,
+	ctx context.Context, downstream client.Client, zoneObj *v1alpha2.Zone, cluster *v1alpha2.TalosCluster,
+	hostname string,
 ) (ctrl.Result, error) {
+	provider, credential, err := findKontinuumDNSConfig(ctx, r.Client)
+	if err != nil {
+		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonWaitingForDNSConfiguration,
+			"waiting for a dns provider and credential to be configured on the hub before exposing "+hostname+
+				"; see docs/workflows/zone-add.md")
+	}
+
+	err = r.reconcileExternalDNSAddon(ctx, cluster, downstream, provider, credential)
+	if err != nil {
+		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonInstallFailed, err.Error())
+	}
+
 	certReady, err := r.installNetwork(ctx, downstream, hostname)
 	if err != nil {
 		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonInstallFailed, err.Error())
