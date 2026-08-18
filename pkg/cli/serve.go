@@ -459,61 +459,100 @@ func buildServer(
 // libkapi's own Kine endpoint uses a temp-dir socket too.
 const storageRelaySocketPath = "/tmp/kontinuum-storage-relay.sock"
 
+// storageLocalPoolSocketPath is where the etcdproxy.LocalPool
+// resolveStorageDSN starts (for a Kine DSN backend — postgres://,
+// sqlite://, mysql://, nats://, see etcdproxy.IsPoolableBackend) listens,
+// in place of libkapi's own directly-managed Kine socket — see
+// etcdproxy.LocalPool's own doc for why this local indirection exists at
+// all. Distinct from storageRelaySocketPath: resolveStorageDSN only ever
+// starts one of the two per process (a zone uses Relay, everything else
+// uses LocalPool), but giving them separate paths keeps that obvious
+// rather than relying on it.
+const storageLocalPoolSocketPath = "/tmp/kontinuum-storage-pool.sock"
+
 // resolveStorageDSN returns the KONTINUUM_SERVER_STORAGE value to actually
-// hand to libkapi.WithStorage. For every scheme but etcdproxy.RelayScheme,
-// that's configured unchanged — postgres://, sqlite://, mysql://, nats://,
-// etcd://, and unix:// are all libkapi's own concern, not this package's.
-// A RelayScheme DSN (see etcdproxy.ParseRelayDSN) is different: it isn't a
-// real storage backend at all, but a zone's own name and its hub's etcd
-// gRPC proxy address (see pkg/domain/etcdproxy's own doc for why a zone is
-// given this instead of a database connection string it likely can't use
-// directly) — resolveStorageDSN loads this zone's own ed25519 private key
-// off its mounted identity Secret (see etcdproxy.IdentityMountPath) and
-// starts the local etcdproxy.Relay that signs with it, returning a plain
-// "unix://" DSN pointed at it instead, which libkapi's own storage
-// resolution already knows how to handle unchanged. The returned cleanup
-// func is always safe to call — a no-op unless a Relay was actually
-// started — so callers never need to nil-check it first. insecureSkipVerify
-// is cfg.Server.GRPC.InsecureTLSSkipVerify's raw string value — see
+// hand to libkapi.WithStorage, plus a cleanup func that's always safe to
+// call — a no-op unless this call actually started something — so callers
+// never need to nil-check it first. insecureSkipVerify is
+// cfg.Server.GRPC.InsecureTLSSkipVerify's raw string value — see
 // etcdproxy.RelayConfig.InsecureSkipVerify's own doc for what it does;
 // parsed here rather than in Config itself since it's meaningless outside
-// this one call.
+// the RelayScheme branch below.
+//
+// Three cases:
+//
+//   - A RelayScheme DSN (see etcdproxy.ParseRelayDSN) isn't a real storage
+//     backend at all, but a zone's own name and its hub's etcd gRPC proxy
+//     address (see pkg/domain/etcdproxy's own doc for why a zone is given
+//     this instead of a database connection string it likely can't use
+//     directly) — this loads the zone's own ed25519 private key off its
+//     mounted identity Secret (see etcdproxy.IdentityMountPath) and starts
+//     the local etcdproxy.Relay that signs with it, returning a plain
+//     "unix://" DSN pointed at it instead.
+//   - A Kine DSN scheme (etcdproxy.IsPoolableBackend — postgres://,
+//     sqlite://, mysql://, nats://) is a real backend, but handing it to
+//     libkapi.WithStorage unchanged would let libkapi spawn its own
+//     embedded Kine endpoint and hand its socket directly to every REST
+//     storage instance's own client — the per-connection ping-strike
+//     problem etcdproxy.LocalPool exists to avoid (see its own doc). This
+//     resolves the backend itself via LocalPool and returns a "unix://"
+//     DSN pointed at LocalPool's own socket instead.
+//   - Anything else (etcd://, unix://) is already a real, already-running
+//     endpoint — configured unchanged, libkapi's own concern from here.
 func resolveStorageDSN(configured, insecureSkipVerify string) (string, func(), error) {
 	noopCleanup := func() {}
 
 	zoneName, hubEndpoint, ok := etcdproxy.ParseRelayDSN(configured)
-	if !ok {
+	if ok {
+		skipVerify, err := strconv.ParseBool(insecureSkipVerify)
+		if err != nil {
+			return "", noopCleanup,
+				fmt.Errorf("failed to parse KONTINUUM_SERVER_GRPC_INSECURE_TLS_SKIP_VERIFY: %w", err)
+		}
+
+		keyPEM, err := os.ReadFile(filepath.Join(etcdproxy.IdentityMountPath, corev1.TLSPrivateKeyKey))
+		if err != nil {
+			return "", noopCleanup, fmt.Errorf("failed to read etcd proxy identity key: %w", err)
+		}
+
+		privateKey, err := etcdproxy.LoadPrivateKey(keyPEM)
+		if err != nil {
+			return "", noopCleanup, fmt.Errorf("failed to parse etcd proxy identity key: %w", err)
+		}
+
+		relay, err := etcdproxy.StartRelay(etcdproxy.RelayConfig{
+			SocketPath:         storageRelaySocketPath,
+			HubEndpoint:        hubEndpoint,
+			Zone:               zoneName,
+			PrivateKey:         privateKey,
+			InsecureSkipVerify: skipVerify,
+		})
+		if err != nil {
+			return "", noopCleanup, fmt.Errorf("failed to start storage relay: %w", err)
+		}
+
+		return "unix://" + storageRelaySocketPath, relay.Close, nil
+	}
+
+	if !etcdproxy.IsPoolableBackend(configured) {
 		return configured, noopCleanup, nil
 	}
 
-	skipVerify, err := strconv.ParseBool(insecureSkipVerify)
-	if err != nil {
-		return "", noopCleanup,
-			fmt.Errorf("failed to parse KONTINUUM_SERVER_GRPC_INSECURE_TLS_SKIP_VERIFY: %w", err)
-	}
-
-	keyPEM, err := os.ReadFile(filepath.Join(etcdproxy.IdentityMountPath, corev1.TLSPrivateKeyKey))
-	if err != nil {
-		return "", noopCleanup, fmt.Errorf("failed to read etcd proxy identity key: %w", err)
-	}
-
-	privateKey, err := etcdproxy.LoadPrivateKey(keyPEM)
-	if err != nil {
-		return "", noopCleanup, fmt.Errorf("failed to parse etcd proxy identity key: %w", err)
-	}
-
-	relay, err := etcdproxy.StartRelay(etcdproxy.RelayConfig{
-		SocketPath:         storageRelaySocketPath,
-		HubEndpoint:        hubEndpoint,
-		Zone:               zoneName,
-		PrivateKey:         privateKey,
-		InsecureSkipVerify: skipVerify,
+	// Resolved against a background context, not one this call was ever
+	// handed (resolveStorageDSN has no ctx parameter of its own) — same
+	// reasoning as buildServer's own libkapi.New(context.Background(), ...)
+	// call: the pool's lifetime is tied to its own Close, not to any
+	// request/setup context that might be canceled before this process is
+	// done with it.
+	pool, err := etcdproxy.StartLocalPool(context.Background(), etcdproxy.LocalPoolConfig{
+		SocketPath: storageLocalPoolSocketPath,
+		Backend:    configured,
 	})
 	if err != nil {
-		return "", noopCleanup, fmt.Errorf("failed to start storage relay: %w", err)
+		return "", noopCleanup, fmt.Errorf("failed to start local storage pool: %w", err)
 	}
 
-	return "unix://" + storageRelaySocketPath, relay.Close, nil
+	return "unix://" + storageLocalPoolSocketPath, pool.Close, nil
 }
 
 // registryOptions builds the libkapi options that wire kontinuum's server
