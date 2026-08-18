@@ -549,19 +549,20 @@ func (r *Reconciler) installWorkload(
 func (r *Reconciler) setClusterReadyCondition(
 	ctx context.Context, zoneObj *v1alpha2.Zone, status metav1.ConditionStatus, reason, message string,
 ) (ctrl.Result, error) {
-	meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
+	changed := meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
 		Type: ClusterReadyConditionType, Status: status, Reason: reason, Message: message,
 	})
 
 	// Only the blocking (False) case propagates to Ready here — see
 	// ReadyConditionType's own doc for why a True ClusterReady doesn't.
 	if status == metav1.ConditionFalse {
-		meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
+		readyChanged := meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
 			Type: ReadyConditionType, Status: status, Reason: reason, Message: message,
 		})
+		changed = changed || readyChanged
 	}
 
-	return r.persistStatus(ctx, zoneObj, status)
+	return r.persistStatus(ctx, zoneObj, status, changed)
 }
 
 // setInstalledCondition sets InstalledConditionType and persists zoneObj's
@@ -571,17 +572,18 @@ func (r *Reconciler) setClusterReadyCondition(
 func (r *Reconciler) setInstalledCondition(
 	ctx context.Context, zoneObj *v1alpha2.Zone, status metav1.ConditionStatus, reason, message string,
 ) (ctrl.Result, error) {
-	meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
+	changed := meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
 		Type: InstalledConditionType, Status: status, Reason: reason, Message: message,
 	})
 
 	if status == metav1.ConditionFalse {
-		meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
+		readyChanged := meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
 			Type: ReadyConditionType, Status: status, Reason: reason, Message: message,
 		})
+		changed = changed || readyChanged
 	}
 
-	return r.persistStatus(ctx, zoneObj, status)
+	return r.persistStatus(ctx, zoneObj, status, changed)
 }
 
 // setRegistryJoinedCondition sets RegistryJoinedConditionType, mirrors it
@@ -592,24 +594,42 @@ func (r *Reconciler) setInstalledCondition(
 func (r *Reconciler) setRegistryJoinedCondition(
 	ctx context.Context, zoneObj *v1alpha2.Zone, status metav1.ConditionStatus, reason, message string,
 ) (ctrl.Result, error) {
-	meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
+	joinedChanged := meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
 		Type: RegistryJoinedConditionType, Status: status, Reason: reason, Message: message,
 	})
 
-	meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
+	readyChanged := meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
 		Type: ReadyConditionType, Status: status, Reason: reason, Message: message,
 	})
 
-	return r.persistStatus(ctx, zoneObj, status)
+	return r.persistStatus(ctx, zoneObj, status, joinedChanged || readyChanged)
 }
 
 // persistStatus writes zoneObj's status and decides whether to requeue.
+// changed is whatever the caller's own meta.SetStatusCondition call(s)
+// returned — when every one of them reports false (same
+// Type/Status/Reason/Message already stored), the Status().Update call is
+// skipped entirely.
+//
+// This matters beyond avoiding a no-op API call: this controller's own
+// Zone watch (see SetupWithManager's For(&v1alpha2.Zone{}), which carries
+// no predicate) re-triggers Reconcile on every Update to a Zone, including
+// its own status-subresource writes. An unconditional Update here — even
+// one that changes nothing — would still bump ResourceVersion and fire a
+// new watch event, immediately re-entering Reconcile faster than the
+// informer cache can catch up. Two such overlapping reconciles then race:
+// the later one's Get reads a ResourceVersion the earlier Update has
+// already moved past, and its own Update fails with a 409 conflict. Only
+// writing when the conditions actually changed breaks that
+// self-sustaining loop.
 func (r *Reconciler) persistStatus(
-	ctx context.Context, zoneObj *v1alpha2.Zone, status metav1.ConditionStatus,
+	ctx context.Context, zoneObj *v1alpha2.Zone, status metav1.ConditionStatus, changed bool,
 ) (ctrl.Result, error) {
-	err := r.Client.Status().Update(ctx, zoneObj)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to update zone %q status: %w", zoneObj.Name, err)
+	if changed {
+		err := r.Client.Status().Update(ctx, zoneObj)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to update zone %q status: %w", zoneObj.Name, err)
+		}
 	}
 
 	if status == metav1.ConditionTrue {

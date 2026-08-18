@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -148,7 +149,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	if len(inst.Spec.Interfaces) == 0 {
-		return r.setDiscovered(ctx, &inst, metav1.ConditionFalse, reasonNoInterface, "spec.interfaces is empty")
+		return r.setDiscovered(ctx, &inst, metav1.ConditionFalse, false, reasonNoInterface, "spec.interfaces is empty")
 	}
 
 	return r.probeCandidates(ctx, &inst)
@@ -162,10 +163,14 @@ func (r *Reconciler) probeCandidates(ctx context.Context, inst *v1alpha2.Instanc
 	for _, candidate := range inst.Spec.Interfaces {
 		talosVersion, interfaces, err := r.probe(ctx, candidate)
 		if err == nil {
+			fieldsChanged := inst.Status.Talos.Version != talosVersion ||
+				!reflect.DeepEqual(inst.Status.Interfaces, interfaces)
+
 			inst.Status.Talos.Version = talosVersion
 			inst.Status.Interfaces = interfaces
 
-			return r.setDiscovered(ctx, inst, metav1.ConditionTrue, reasonDiscovered, "discovered via "+candidate)
+			return r.setDiscovered(ctx, inst, metav1.ConditionTrue, fieldsChanged,
+				reasonDiscovered, "discovered via "+candidate)
 		}
 
 		lastErr = err
@@ -174,7 +179,7 @@ func (r *Reconciler) probeCandidates(ctx context.Context, inst *v1alpha2.Instanc
 			"instance", inst.Name, "address", candidate, "error", err)
 	}
 
-	return r.setDiscovered(ctx, inst, metav1.ConditionFalse, reasonProbeFailed,
+	return r.setDiscovered(ctx, inst, metav1.ConditionFalse, false, reasonProbeFailed,
 		fmt.Sprintf("all %d candidate(s) failed, last error: %v", len(inst.Spec.Interfaces), lastErr))
 }
 
@@ -200,19 +205,37 @@ func (r *Reconciler) probe(ctx context.Context, addr string) (string, []v1alpha2
 // candidate gets probed again soon; a true status requeues after the much
 // longer RecheckInterval instead, to confirm it's still there without
 // hammering it.
+//
+// fieldsChanged is whether the caller already mutated inst.Status.Talos/
+// Interfaces before calling this (see probeCandidates' successful-probe
+// path) — SetStatusCondition's own return only knows about the condition
+// it just set, not those other fields, so a caller that changed them has
+// to say so itself.
+//
+// The Status().Update is skipped only when neither fieldsChanged nor
+// SetStatusCondition reports anything actually changed — this
+// controller's own Instance watch (see SetupWithManager's
+// For(&v1alpha2.Instance{}), which carries no predicate) re-triggers
+// Reconcile on every Update to an Instance, including its own
+// status-subresource writes; an unconditional write on every recheck
+// would self-trigger a reconcile storm the same way pkg/domain/zone's
+// identical persistStatus doc describes.
 func (r *Reconciler) setDiscovered(
-	ctx context.Context, inst *v1alpha2.Instance, status metav1.ConditionStatus, reason, message string,
+	ctx context.Context, inst *v1alpha2.Instance, status metav1.ConditionStatus, fieldsChanged bool,
+	reason, message string,
 ) (ctrl.Result, error) {
-	meta.SetStatusCondition(&inst.Status.Conditions, metav1.Condition{
+	conditionChanged := meta.SetStatusCondition(&inst.Status.Conditions, metav1.Condition{
 		Type:    DiscoveredConditionType,
 		Status:  status,
 		Reason:  reason,
 		Message: message,
 	})
 
-	err := r.Client.Status().Update(ctx, inst)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to update instance %q status: %w", inst.Name, err)
+	if fieldsChanged || conditionChanged {
+		err := r.Client.Status().Update(ctx, inst)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to update instance %q status: %w", inst.Name, err)
+		}
 	}
 
 	if status == metav1.ConditionTrue {

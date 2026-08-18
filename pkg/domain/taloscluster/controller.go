@@ -735,11 +735,11 @@ func (r *Reconciler) recordTalosVersions(
 func (r *Reconciler) setControlPlaneCondition(
 	ctx context.Context, cluster *v1alpha2.TalosCluster, status metav1.ConditionStatus, reason, message string,
 ) (ctrl.Result, error) {
-	meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+	changed := meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
 		Type: ControlPlaneReadyConditionType, Status: status, Reason: reason, Message: message,
 	})
 
-	return r.persistStatus(ctx, cluster, status)
+	return r.persistStatus(ctx, cluster, status, changed)
 }
 
 // setReadyCondition sets ReadyConditionType and persists cluster's status
@@ -747,20 +747,30 @@ func (r *Reconciler) setControlPlaneCondition(
 func (r *Reconciler) setReadyCondition(
 	ctx context.Context, cluster *v1alpha2.TalosCluster, status metav1.ConditionStatus, reason, message string,
 ) (ctrl.Result, error) {
-	meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+	changed := meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
 		Type: ReadyConditionType, Status: status, Reason: reason, Message: message,
 	})
 
-	return r.persistStatus(ctx, cluster, status)
+	return r.persistStatus(ctx, cluster, status, changed)
 }
 
 // persistStatus writes cluster's status and decides whether to requeue.
+// changed is whatever the caller's own meta.SetStatusCondition returned —
+// false skips the Status().Update entirely. This controller's own
+// TalosCluster watch (see SetupWithManager's For(&v1alpha2.TalosCluster{}),
+// which carries no predicate) re-triggers Reconcile on every Update,
+// including its own status writes; an unconditional write here would
+// self-trigger a reconcile storm the same way pkg/domain/zone's identical
+// persistStatus doc describes (and that TalosCluster's own status changes
+// feed into, via zone's own Watches(&v1alpha2.TalosCluster{}, ...)).
 func (r *Reconciler) persistStatus(
-	ctx context.Context, cluster *v1alpha2.TalosCluster, status metav1.ConditionStatus,
+	ctx context.Context, cluster *v1alpha2.TalosCluster, status metav1.ConditionStatus, changed bool,
 ) (ctrl.Result, error) {
-	err := r.Client.Status().Update(ctx, cluster)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to update talos cluster %q status: %w", cluster.Name, err)
+	if changed {
+		err := r.Client.Status().Update(ctx, cluster)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to update talos cluster %q status: %w", cluster.Name, err)
+		}
 	}
 
 	if status == metav1.ConditionTrue {

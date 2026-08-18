@@ -2,6 +2,7 @@ package taloscluster_test
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
@@ -111,6 +112,40 @@ func (f *fakeBootstrapper) Reset(_ context.Context, _, node string, _ *clientcon
 	}
 
 	return f.resetErr
+}
+
+// statusUpdateCountingClient wraps a client.Client, counting every
+// Status().Update call made through it — see
+// TestReconcileSkipsRedundantStatusUpdate's own doc for what this is used
+// to verify.
+type statusUpdateCountingClient struct {
+	client.Client
+
+	statusUpdates *int
+}
+
+//nolint:ireturn // client.Client's own Status() signature dictates this; wrapping it is the point.
+func (c statusUpdateCountingClient) Status() client.SubResourceWriter {
+	return countingStatusWriter{c.Client.Status(), c.statusUpdates}
+}
+
+type countingStatusWriter struct {
+	client.SubResourceWriter
+
+	count *int
+}
+
+func (w countingStatusWriter) Update(
+	ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption,
+) error {
+	*w.count++
+
+	err := w.SubResourceWriter.Update(ctx, obj, opts...)
+	if err != nil {
+		return fmt.Errorf("failed to update status: %w", err)
+	}
+
+	return nil
 }
 
 func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
@@ -227,6 +262,34 @@ func TestReconcileWaitsForControlPlaneInstances(t *testing.T) {
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, "WaitingForInstances", cond.Reason)
+}
+
+// TestReconcileSkipsRedundantStatusUpdate guards against a reconcile
+// storm: this controller's own TalosCluster watch (see SetupWithManager)
+// carries no predicate, so any Status().Update — even one that changes
+// nothing — re-triggers Reconcile. Reconciling twice in a row against
+// unchanged state (no control-plane candidates yet) must only write
+// status once.
+func TestReconcileSkipsRedundantStatusUpdate(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+
+	statusUpdates := 0
+	fakeClient := statusUpdateCountingClient{newFakeClient(t, cluster), &statusUpdates}
+
+	bootstrapper := &fakeBootstrapper{}
+	reconciler := newReconciler(fakeClient, bootstrapper)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName}}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, 1, statusUpdates, "first reconcile should persist the new ControlPlaneReady=False condition")
+
+	_, err = reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, 1, statusUpdates, "second reconcile computes the same condition and should not write again")
 }
 
 func TestReconcileControlPlaneNotYetHealthy(t *testing.T) {
