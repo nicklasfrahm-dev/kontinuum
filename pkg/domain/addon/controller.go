@@ -346,16 +346,29 @@ func (r *Reconciler) probeHealthy(
 // requeues at RetryInterval; True doesn't (stop actively polling once
 // healthy — nothing yet forces periodic re-checks of an already-healthy
 // addon).
+//
+// The Status().Update is skipped when SetStatusCondition reports nothing
+// actually changed. This controller's own Addon watch (see
+// SetupWithManager's For(&v1alpha2.Addon{}), which carries no predicate)
+// re-triggers Reconcile on every Update to an Addon, including its own
+// status-subresource writes — an unconditional Update here, even one that
+// changes nothing, would bump ResourceVersion and immediately re-enter
+// Reconcile faster than the informer cache can catch up, eventually
+// racing itself into a 409 conflict on some later Update. See
+// pkg/domain/zone's identical persistStatus for the fuller version of
+// this doc.
 func (r *Reconciler) setReady(
 	ctx context.Context, addon *v1alpha2.Addon, status metav1.ConditionStatus, reason, message string,
 ) (ctrl.Result, error) {
-	meta.SetStatusCondition(&addon.Status.Conditions, metav1.Condition{
+	changed := meta.SetStatusCondition(&addon.Status.Conditions, metav1.Condition{
 		Type: addonReadyConditionType, Status: status, Reason: reason, Message: message,
 	})
 
-	err := r.Client.Status().Update(ctx, addon)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to update addon %q status: %w", addon.Name, err)
+	if changed {
+		err := r.Client.Status().Update(ctx, addon)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to update addon %q status: %w", addon.Name, err)
+		}
 	}
 
 	if status == metav1.ConditionTrue {

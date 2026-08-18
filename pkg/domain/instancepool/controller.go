@@ -406,6 +406,14 @@ func (r *Reconciler) tryClaim(
 // requeues after RetryInterval so a since-appeared candidate gets tried
 // again; sufficient capacity doesn't — the Instance watch (see
 // SetupWithManager) re-triggers on the next relevant change instead.
+//
+// The Status().Update is skipped when neither ReadyReplicas nor either
+// condition actually changed. This controller's own InstancePool watch
+// (see SetupWithManager's For(&v1alpha2.InstancePool{}), which carries no
+// predicate) re-triggers Reconcile on every Update to an InstancePool,
+// including its own status-subresource writes; an unconditional write
+// here would self-trigger a reconcile storm the same way pkg/domain/zone's
+// identical persistStatus doc describes.
 func (r *Reconciler) updateStatus(
 	ctx context.Context, pool *v1alpha2.InstancePool, claimed []v1alpha2.Instance, insufficient bool,
 ) (ctrl.Result, error) {
@@ -417,6 +425,7 @@ func (r *Reconciler) updateStatus(
 		}
 	}
 
+	changed := pool.Status.ReadyReplicas != ready
 	pool.Status.ReadyReplicas = ready
 
 	status := metav1.ConditionFalse
@@ -432,7 +441,7 @@ func (r *Reconciler) updateStatus(
 			len(claimed), pool.Spec.Replicas)
 	}
 
-	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
+	insufficientChanged := meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
 		Type:    InsufficientCapacityConditionType,
 		Status:  status,
 		Reason:  reason,
@@ -444,16 +453,18 @@ func (r *Reconciler) updateStatus(
 		readyStatus = metav1.ConditionFalse
 	}
 
-	meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
+	readyChanged := meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
 		Type:    ReadyConditionType,
 		Status:  readyStatus,
 		Reason:  reason,
 		Message: message,
 	})
 
-	err := r.Client.Status().Update(ctx, pool)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to update instance pool %q status: %w", pool.Name, err)
+	if changed || insufficientChanged || readyChanged {
+		err := r.Client.Status().Update(ctx, pool)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to update instance pool %q status: %w", pool.Name, err)
+		}
 	}
 
 	if insufficient {

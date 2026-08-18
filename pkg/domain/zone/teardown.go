@@ -3,7 +3,6 @@ package zone
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -235,13 +234,11 @@ func (r *Reconciler) teardownRetryMessage(zoneObj *v1alpha2.Zone, err error) str
 func (r *Reconciler) setTeardownCondition(
 	ctx context.Context, zoneObj *v1alpha2.Zone, reason, message string,
 ) (ctrl.Result, error) {
-	before := zoneObj.Status.DeepCopy()
-
-	meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
+	changed := meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
 		Type: TeardownConditionType, Status: metav1.ConditionFalse, Reason: reason, Message: message,
 	})
 
-	if !reflect.DeepEqual(before.Conditions, zoneObj.Status.Conditions) {
+	if changed {
 		err := r.Client.Status().Update(ctx, zoneObj)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to update zone %q status: %w", zoneObj.Name, err)

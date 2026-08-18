@@ -90,6 +90,40 @@ func discoveredResult() fakeResult {
 	}
 }
 
+// statusUpdateCountingClient wraps a client.Client, counting every
+// Status().Update call made through it — see
+// TestReconcileSkipsRedundantStatusUpdate's own doc for what this is used
+// to verify.
+type statusUpdateCountingClient struct {
+	client.Client
+
+	statusUpdates *int
+}
+
+//nolint:ireturn // client.Client's own Status() signature dictates this; wrapping it is the point.
+func (c statusUpdateCountingClient) Status() client.SubResourceWriter {
+	return countingStatusWriter{c.Client.Status(), c.statusUpdates}
+}
+
+type countingStatusWriter struct {
+	client.SubResourceWriter
+
+	count *int
+}
+
+func (w countingStatusWriter) Update(
+	ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption,
+) error {
+	*w.count++
+
+	err := w.SubResourceWriter.Update(ctx, obj, opts...)
+	if err != nil {
+		return fmt.Errorf("failed to update status: %w", err)
+	}
+
+	return nil
+}
+
 func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
 	t.Helper()
 
@@ -299,6 +333,47 @@ func TestReconcileRechecksUnclaimedDiscoveredInstance(t *testing.T) {
 
 	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: nodeFName}, &got))
 	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, instance.DiscoveredConditionType))
+}
+
+// TestReconcileSkipsRedundantStatusUpdate guards against a reconcile
+// storm: this controller's own Instance watch (see SetupWithManager)
+// carries no predicate, so any Status().Update — even one that changes
+// nothing — re-triggers Reconcile. obj already carries the exact
+// Talos.Version/Interfaces/condition a successful reprobe of
+// candidateAddress1 via discoveredResult() would recompute, so a second
+// reconcile is a true no-op and must not write status again.
+func TestReconcileSkipsRedundantStatusUpdate(t *testing.T) {
+	t.Parallel()
+
+	obj := &v1alpha2.Instance{
+		ObjectMeta: metav1.ObjectMeta{Name: nodeGName},
+		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{candidateAddress1}},
+		Status: v1alpha2.InstanceStatus{
+			Talos:      v1alpha2.InstanceTalosStatus{Version: talosVersionFixture},
+			Interfaces: []v1alpha2.InstanceInterfaceStatus{{Name: candidateInterface}},
+			Conditions: []metav1.Condition{
+				{
+					Type: instance.DiscoveredConditionType, Status: metav1.ConditionTrue,
+					Reason: reasonDiscoveredFixture, Message: "discovered via " + candidateAddress1,
+				},
+			},
+		},
+	}
+
+	statusUpdates := 0
+	fakeClient := statusUpdateCountingClient{newFakeClient(t, obj), &statusUpdates}
+	discoverer := &fakeDiscoverer{results: map[string]fakeResult{candidateAddress1: discoveredResult()}}
+	reconciler := newReconciler(fakeClient, discoverer)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: nodeGName}}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, 0, statusUpdates, "reprobing to an identical result should not write status")
+
+	_, err = reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, 0, statusUpdates, "second reconcile computes the same result and should not write again")
 }
 
 // TestReconcileFlipsDiscoveredFalseWhenUnclaimedNodeGoesOffline covers the

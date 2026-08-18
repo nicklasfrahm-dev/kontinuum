@@ -2,6 +2,7 @@ package addon_test
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
@@ -72,6 +73,40 @@ type fakeCRDChecker struct {
 
 func (f *fakeCRDChecker) ChartCRDsReady(context.Context, []byte, addon.InstallRequest) (bool, string, error) {
 	return f.ready, f.reason, f.err
+}
+
+// statusUpdateCountingClient wraps a client.Client, counting every
+// Status().Update call made through it — see
+// TestReconcileSkipsRedundantStatusUpdate's own doc for what this is used
+// to verify.
+type statusUpdateCountingClient struct {
+	client.Client
+
+	statusUpdates *int
+}
+
+//nolint:ireturn // client.Client's own Status() signature dictates this; wrapping it is the point.
+func (c statusUpdateCountingClient) Status() client.SubResourceWriter {
+	return countingStatusWriter{c.Client.Status(), c.statusUpdates}
+}
+
+type countingStatusWriter struct {
+	client.SubResourceWriter
+
+	count *int
+}
+
+func (w countingStatusWriter) Update(
+	ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption,
+) error {
+	*w.count++
+
+	err := w.SubResourceWriter.Update(ctx, obj, opts...)
+	if err != nil {
+		return fmt.Errorf("failed to update status: %w", err)
+	}
+
+	return nil
 }
 
 func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
@@ -351,6 +386,40 @@ func TestReconcileInstallFailureSetsReadyFalse(t *testing.T) {
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, "InstallFailed", cond.Reason)
+}
+
+// TestReconcileSkipsRedundantStatusUpdate guards against a reconcile
+// storm: this controller's own Addon watch (see SetupWithManager) carries
+// no predicate, so any Status().Update — even one that changes nothing —
+// re-triggers Reconcile. Reconciling twice in a row against an install
+// that keeps failing identically must only write status once.
+func TestReconcileSkipsRedundantStatusUpdate(t *testing.T) {
+	t.Parallel()
+
+	cluster, secret := readyCluster()
+	cpInstance := claimedDiscoveredInstance("cp-node-1")
+	cilium := builtinAddon()
+
+	statusUpdates := 0
+	fakeClient := statusUpdateCountingClient{
+		newFakeClient(t, cluster, secret, cpInstance, cilium), &statusUpdates,
+	}
+
+	installer := &fakeAddonInstaller{err: assert.AnError}
+	prober := &fakePodProber{}
+	reconciler := newReconciler(fakeClient, installer, prober)
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace},
+	}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, 1, statusUpdates, "first reconcile should persist the new Ready=False condition")
+
+	_, err = reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, 1, statusUpdates, "second reconcile computes the same condition and should not write again")
 }
 
 func TestReconcileUnhealthyProbeSetsReadyFalse(t *testing.T) {

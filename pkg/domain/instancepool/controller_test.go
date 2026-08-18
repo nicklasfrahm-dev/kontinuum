@@ -2,6 +2,7 @@ package instancepool_test
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"testing"
@@ -37,6 +38,40 @@ const (
 	poolFinalizerName = "pool-finalizer"
 	poolTeardownName  = "pool-teardown"
 )
+
+// statusUpdateCountingClient wraps a client.Client, counting every
+// Status().Update call made through it — see
+// TestReconcileSkipsRedundantStatusUpdate's own doc for what this is used
+// to verify.
+type statusUpdateCountingClient struct {
+	client.Client
+
+	statusUpdates *int
+}
+
+//nolint:ireturn // client.Client's own Status() signature dictates this; wrapping it is the point.
+func (c statusUpdateCountingClient) Status() client.SubResourceWriter {
+	return countingStatusWriter{c.Client.Status(), c.statusUpdates}
+}
+
+type countingStatusWriter struct {
+	client.SubResourceWriter
+
+	count *int
+}
+
+func (w countingStatusWriter) Update(
+	ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption,
+) error {
+	*w.count++
+
+	err := w.SubResourceWriter.Update(ctx, obj, opts...)
+	if err != nil {
+		return fmt.Errorf("failed to update status: %w", err)
+	}
+
+	return nil
+}
 
 func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
 	t.Helper()
@@ -153,6 +188,38 @@ func TestReconcileReportsInsufficientCapacity(t *testing.T) {
 	readyCond := findCondition(got.Status.Conditions, instancepool.ReadyConditionType)
 	require.NotNil(t, readyCond)
 	assert.Equal(t, metav1.ConditionFalse, readyCond.Status, "insufficient capacity means not ready")
+}
+
+// TestReconcileSkipsRedundantStatusUpdate guards against a reconcile
+// storm: this controller's own InstancePool watch (see SetupWithManager)
+// carries no predicate, so any Status().Update — even one that changes
+// nothing — re-triggers Reconcile. Reconciling twice in a row against the
+// same insufficient-capacity state (node-a stays claimed by pool-b after
+// the first pass) must only write status once.
+func TestReconcileSkipsRedundantStatusUpdate(t *testing.T) {
+	t.Parallel()
+
+	pool := &v1alpha2.InstancePool{
+		ObjectMeta: metav1.ObjectMeta{Name: poolBName},
+		Spec:       v1alpha2.InstancePoolSpec{Selector: poolSelector(), Replicas: 3},
+	}
+
+	statusUpdates := 0
+	fakeClient := statusUpdateCountingClient{
+		newFakeClient(t, pool, candidateInstance(nodeAName, true)), &statusUpdates,
+	}
+
+	reconciler := newReconciler(fakeClient)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: poolBName}}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, 1, statusUpdates, "first reconcile should persist the new InsufficientCapacity condition")
+
+	_, err = reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, 1, statusUpdates, "second reconcile computes the same status and should not write again")
 }
 
 // TestReconcileClaimingRequiresDiscovery covers the fix for a real
