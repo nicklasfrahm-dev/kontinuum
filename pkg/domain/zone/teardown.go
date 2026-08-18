@@ -147,10 +147,18 @@ func (r *Reconciler) teardownDownstream(
 }
 
 // uninstallNetwork deletes the DNSEndpoint (if reconcileDNS ever created
-// one), ClusterIssuer, Gateway, Certificate, and HTTPRoute installNetwork/
-// reconcileDNS install — see teardownDownstream's own doc for ordering.
+// one), the Cloudflare credential Secret (if reconcileExternalDNSAddon ever
+// created one — see deleteExternalDNSCredentialSecret's own doc for why
+// this is unconditional), ClusterIssuer, Gateway, Certificate, and
+// HTTPRoute installNetwork/reconcileDNS install — see teardownDownstream's
+// own doc for ordering.
 func uninstallNetwork(ctx context.Context, downstream client.Client) error {
 	err := deleteDNSEndpoint(ctx, downstream, downstreamNamespace, dnsEndpointName)
+	if err != nil {
+		return err
+	}
+
+	err = deleteExternalDNSCredentialSecret(ctx, downstream, downstreamNamespace)
 	if err != nil {
 		return err
 	}
