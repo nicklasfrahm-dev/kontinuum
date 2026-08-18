@@ -139,6 +139,40 @@ func admitSecret(obj client.Object) {
 	secret.StringData = nil
 }
 
+// statusUpdateCountingClient wraps a client.Client, counting every
+// Status().Update call made through it — see
+// TestReconcileSkipsRedundantStatusUpdate's own doc for what this is used
+// to verify.
+type statusUpdateCountingClient struct {
+	client.Client
+
+	statusUpdates *int
+}
+
+//nolint:ireturn // client.Client's own Status() signature dictates this; wrapping it is the point.
+func (c statusUpdateCountingClient) Status() client.SubResourceWriter {
+	return countingStatusWriter{c.Client.Status(), c.statusUpdates}
+}
+
+type countingStatusWriter struct {
+	client.SubResourceWriter
+
+	count *int
+}
+
+func (w countingStatusWriter) Update(
+	ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption,
+) error {
+	*w.count++
+
+	err := w.SubResourceWriter.Update(ctx, obj, opts...)
+	if err != nil {
+		return fmt.Errorf("failed to update status: %w", err)
+	}
+
+	return nil
+}
+
 func newHubFakeClient(t *testing.T, objects ...client.Object) client.Client {
 	t.Helper()
 
@@ -271,6 +305,31 @@ func TestReconcileReportsTalosClusterNotFound(t *testing.T) {
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, "TalosClusterNotFound", cond.Reason)
+}
+
+// TestReconcileSkipsRedundantStatusUpdate guards against a reconcile storm:
+// this controller's own Zone watch (see SetupWithManager) carries no
+// predicate, so any Status().Update — even one that changes nothing —
+// re-triggers Reconcile, and two such reconciles racing each other is
+// exactly what produces the "the object has been modified" conflicts this
+// test exists to prevent. Reconciling twice in a row against unchanged
+// state (no TalosCluster, same as TestReconcileReportsTalosClusterNotFound)
+// must only write status once — the second pass computes the identical
+// condition and should skip the write entirely.
+func TestReconcileSkipsRedundantStatusUpdate(t *testing.T) {
+	t.Parallel()
+
+	statusUpdates := 0
+	hubClient := statusUpdateCountingClient{newHubFakeClient(t, testZoneObject()), &statusUpdates}
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{})
+
+	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+	assert.Equal(t, 1, statusUpdates, "first reconcile should persist the new ClusterReady=False condition")
+
+	_, err = reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+	assert.Equal(t, 1, statusUpdates, "second reconcile computes the same condition and should not write again")
 }
 
 // assertReadyMirrors asserts that got's own aggregate Ready condition (see

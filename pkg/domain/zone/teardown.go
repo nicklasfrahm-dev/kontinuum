@@ -3,6 +3,7 @@ package zone
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -226,17 +227,25 @@ func (r *Reconciler) teardownRetryMessage(zoneObj *v1alpha2.Zone, err error) str
 // setTeardownCondition sets TeardownConditionType False and persists
 // zoneObj's status, always requeuing after r.RetryInterval — teardown never
 // observes this condition True (see TeardownConditionType's own doc), so
-// unlike persistStatus this has no True/no-requeue branch to make.
+// unlike persistStatus this has no True/no-requeue branch to make. The
+// Status().Update is skipped when reason/message didn't actually change —
+// see persistStatus's own doc in controller.go for why an unconditional
+// write here would self-trigger a reconcile storm via this controller's
+// own un-predicated Zone watch.
 func (r *Reconciler) setTeardownCondition(
 	ctx context.Context, zoneObj *v1alpha2.Zone, reason, message string,
 ) (ctrl.Result, error) {
+	before := zoneObj.Status.DeepCopy()
+
 	meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
 		Type: TeardownConditionType, Status: metav1.ConditionFalse, Reason: reason, Message: message,
 	})
 
-	err := r.Client.Status().Update(ctx, zoneObj)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to update zone %q status: %w", zoneObj.Name, err)
+	if !reflect.DeepEqual(before.Conditions, zoneObj.Status.Conditions) {
+		err := r.Client.Status().Update(ctx, zoneObj)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to update zone %q status: %w", zoneObj.Name, err)
+		}
 	}
 
 	return ctrl.Result{RequeueAfter: r.RetryInterval}, nil

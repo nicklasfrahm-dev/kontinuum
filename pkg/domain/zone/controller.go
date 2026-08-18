@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -549,6 +550,8 @@ func (r *Reconciler) installWorkload(
 func (r *Reconciler) setClusterReadyCondition(
 	ctx context.Context, zoneObj *v1alpha2.Zone, status metav1.ConditionStatus, reason, message string,
 ) (ctrl.Result, error) {
+	before := zoneObj.Status.DeepCopy()
+
 	meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
 		Type: ClusterReadyConditionType, Status: status, Reason: reason, Message: message,
 	})
@@ -561,7 +564,7 @@ func (r *Reconciler) setClusterReadyCondition(
 		})
 	}
 
-	return r.persistStatus(ctx, zoneObj, status)
+	return r.persistStatus(ctx, zoneObj, status, before)
 }
 
 // setInstalledCondition sets InstalledConditionType and persists zoneObj's
@@ -571,6 +574,8 @@ func (r *Reconciler) setClusterReadyCondition(
 func (r *Reconciler) setInstalledCondition(
 	ctx context.Context, zoneObj *v1alpha2.Zone, status metav1.ConditionStatus, reason, message string,
 ) (ctrl.Result, error) {
+	before := zoneObj.Status.DeepCopy()
+
 	meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
 		Type: InstalledConditionType, Status: status, Reason: reason, Message: message,
 	})
@@ -581,7 +586,7 @@ func (r *Reconciler) setInstalledCondition(
 		})
 	}
 
-	return r.persistStatus(ctx, zoneObj, status)
+	return r.persistStatus(ctx, zoneObj, status, before)
 }
 
 // setRegistryJoinedCondition sets RegistryJoinedConditionType, mirrors it
@@ -592,6 +597,8 @@ func (r *Reconciler) setInstalledCondition(
 func (r *Reconciler) setRegistryJoinedCondition(
 	ctx context.Context, zoneObj *v1alpha2.Zone, status metav1.ConditionStatus, reason, message string,
 ) (ctrl.Result, error) {
+	before := zoneObj.Status.DeepCopy()
+
 	meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
 		Type: RegistryJoinedConditionType, Status: status, Reason: reason, Message: message,
 	})
@@ -600,16 +607,34 @@ func (r *Reconciler) setRegistryJoinedCondition(
 		Type: ReadyConditionType, Status: status, Reason: reason, Message: message,
 	})
 
-	return r.persistStatus(ctx, zoneObj, status)
+	return r.persistStatus(ctx, zoneObj, status, before)
 }
 
 // persistStatus writes zoneObj's status and decides whether to requeue.
+// before is zoneObj.Status as it was prior to the caller's own
+// meta.SetStatusCondition call(s) — when nothing in it actually changed
+// (same Type/Status/Reason/Message on every condition touched), the
+// Status().Update call is skipped entirely.
+//
+// This matters beyond avoiding a no-op API call: this controller's own
+// Zone watch (see SetupWithManager's For(&v1alpha2.Zone{}), which carries
+// no predicate) re-triggers Reconcile on every Update to a Zone, including
+// its own status-subresource writes. An unconditional Update here — even
+// one that changes nothing — would still bump ResourceVersion and fire a
+// new watch event, immediately re-entering Reconcile faster than the
+// informer cache can catch up. Two such overlapping reconciles then race:
+// the later one's Get reads a ResourceVersion the earlier Update has
+// already moved past, and its own Update fails with a 409 conflict. Only
+// writing when the conditions actually changed breaks that
+// self-sustaining loop.
 func (r *Reconciler) persistStatus(
-	ctx context.Context, zoneObj *v1alpha2.Zone, status metav1.ConditionStatus,
+	ctx context.Context, zoneObj *v1alpha2.Zone, status metav1.ConditionStatus, before *v1alpha2.ZoneStatus,
 ) (ctrl.Result, error) {
-	err := r.Client.Status().Update(ctx, zoneObj)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to update zone %q status: %w", zoneObj.Name, err)
+	if !reflect.DeepEqual(before.Conditions, zoneObj.Status.Conditions) {
+		err := r.Client.Status().Update(ctx, zoneObj)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to update zone %q status: %w", zoneObj.Name, err)
+		}
 	}
 
 	if status == metav1.ConditionTrue {
