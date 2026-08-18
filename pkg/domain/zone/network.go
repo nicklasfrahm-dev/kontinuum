@@ -500,43 +500,28 @@ func deleteDNSEndpoint(ctx context.Context, downstream client.Client, namespace,
 // reconcileDNS sets DNSRecordConditionType on zoneObj, in memory — the
 // caller (reconcileInstall) persists it together with InstalledConditionType
 // in a single Status().Update, same as installWorkload/installNetwork's own
-// errors already share that call. Returns a non-nil error only for a real
-// downstream API failure, so it's handled exactly like an installWorkload/
-// installNetwork failure (Installed flips False/InstallFailed, forcing a
-// retry) — every other outcome here is expected, not a failure, and is
-// recorded on the condition directly instead:
+// errors already share that call. Only ever reached once
+// finishInstallWithDomain's own findKontinuumDNSConfig check has already
+// confirmed a DNS provider and credential are configured — see that
+// function's own doc — so unlike before that gate existed, there's no
+// "credentials not configured" outcome to record here. Returns a non-nil
+// error only for a real downstream API failure, so it's handled exactly
+// like an installWorkload/installNetwork failure (Installed flips
+// False/InstallFailed, forcing a retry) — every other outcome here is
+// expected, not a failure, and is recorded on the condition directly
+// instead:
 //
-//   - No DNS credentials configured (see issue #51's own "must not require
-//     DNS credentials to reach Ready" requirement): False/
-//     reasonDNSCredentialsNotConfigured. Deliberately does not affect
-//     InstalledConditionType or force a retry of its own — see
-//     DNSRecordConditionType's own doc.
-//   - Credentials are configured, but hostname's own downstream Gateway has
-//     no address yet: False/reasonWaitingForGatewayAddress. Installed
-//     already can't reach True yet either in this case — the same ACME
-//     HTTP-01 challenge that gates certReady needs the hostname to resolve,
-//     which needs this very DNSEndpoint to exist and propagate first — so no
-//     separate retry wiring is needed here: reconcileInstall's own
-//     certReady-driven requeue already covers it.
+//   - hostname's own downstream Gateway has no address yet: False/
+//     reasonWaitingForGatewayAddress. Installed already can't reach True
+//     yet either in this case — the same ACME HTTP-01 challenge that gates
+//     certReady needs the hostname to resolve, which needs this very
+//     DNSEndpoint to exist and propagate first — so no separate retry
+//     wiring is needed here: reconcileInstall's own certReady-driven
+//     requeue already covers it.
 //   - DNSEndpoint upserted successfully: True/reasonDNSRecordCreated.
 func (r *Reconciler) reconcileDNS(
 	ctx context.Context, zoneObj *v1alpha2.Zone, downstream client.Client, hostname string,
 ) error {
-	_, err := findKontinuumDNSCredential(ctx, r.Client)
-	if err != nil {
-		meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
-			Type: DNSRecordConditionType, Status: metav1.ConditionFalse, Reason: reasonDNSCredentialsNotConfigured,
-			Message: "no dns credentials configured — point " + hostname +
-				" at the downstream gateway's own address yourself; see docs/workflows/zone-add.md",
-		})
-
-		// Deliberate: an unconfigured DNS credential is the expected,
-		// common case (see this function's own doc), not a failure to
-		// surface as a retryable error.
-		//nolint:nilerr // see comment above
-		return nil
-	}
-
 	address, recordType, ready, err := gatewayAddress(ctx, downstream, downstreamNamespace, gatewayName)
 	if err != nil {
 		return err
