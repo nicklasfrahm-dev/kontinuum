@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"syscall"
@@ -79,6 +80,11 @@ func NewServeCmd() *cobra.Command {
 // runServe loads config, builds the libkapi server, and runs it until a
 // signal is received or an unrecoverable error occurs.
 func runServe(cmd *cobra.Command, addr string, storage string) error {
+	err := configureHelmHome()
+	if err != nil {
+		return err
+	}
+
 	cfg, logger, err := loadServeConfig(cmd, addr, storage)
 	if err != nil {
 		return err
@@ -180,6 +186,52 @@ func serveUntilShutdown(
 	err = <-serveErr
 	if err != nil {
 		return fmt.Errorf("server exited with error: %w", err)
+	}
+
+	return nil
+}
+
+// helmHomeDirPerm is the permission mode configureHelmHome creates its own
+// cache/config/data subdirectories with — matches os.CreateTemp's own
+// implicit 0o600-ish intent for the process's own scratch files, readable
+// and writable only by the (single, non-root) user this process runs as.
+const helmHomeDirPerm = 0o700
+
+// configureHelmHome points Helm's own HELM_CACHE_HOME/HELM_CONFIG_HOME/
+// HELM_DATA_HOME (helm.sh/helm/v3/pkg/helmpath's own lazypath — consulted
+// by both registry.NewClient's credentials-file path and cli.New()'s
+// EnvSettings, ahead of $XDG_*/$HOME) at subdirectories of os.TempDir(),
+// instead of leaving Helm to fall back to $HOME/.cache et al. On Cloud Run
+// and every zone's own downstream Deployment (see
+// pkg/domain/zone/workload.go's podSecurityContext) this process runs
+// under a read-only root filesystem with only /tmp mounted writable —
+// os.TempDir() already resolves there (or wherever $TMPDIR points, in
+// local dev) — so without this, the addon controller's first OCI chart
+// pull (pkg/domain/addon/installer.go's and kubectlapply.go's own
+// registry.NewClient calls) fails trying to mkdir $HOME/.cache. Scoped to
+// the serve command's own process rather than main.go: kontinuum config
+// import and kontinuum zone add both resolve ~/.kube/config against the
+// real $HOME by default (clientcmd's own default loading rules), which
+// this must not disturb.
+func configureHelmHome() error {
+	base := filepath.Join(os.TempDir(), "kontinuum-helm")
+
+	envVars := map[string]string{
+		"HELM_CACHE_HOME":  filepath.Join(base, "cache"),
+		"HELM_CONFIG_HOME": filepath.Join(base, "config"),
+		"HELM_DATA_HOME":   filepath.Join(base, "data"),
+	}
+
+	for envVar, dir := range envVars {
+		err := os.MkdirAll(dir, helmHomeDirPerm)
+		if err != nil {
+			return fmt.Errorf("failed to create %s dir %q: %w", envVar, dir, err)
+		}
+
+		err = os.Setenv(envVar, dir)
+		if err != nil {
+			return fmt.Errorf("failed to set %s: %w", envVar, err)
+		}
 	}
 
 	return nil
