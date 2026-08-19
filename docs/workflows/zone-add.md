@@ -107,20 +107,22 @@ hub is the control-plane connection itself; it's never expected to reach
 the hub's real database (Postgres/etc.) directly, and it isn't given
 credentials to try.
 
-Instead, the `zone` controller issues each zone its own scoped credential
-for the hub's etcd gRPC proxy (`pkg/domain/etcdproxy` — see
+Instead, the `zone` controller issues each zone its own scoped identity for
+the hub's etcd gRPC proxy (`pkg/domain/etcdproxy` — see
 [Architecture](../architecture.md#storage) for the full mechanism): a
-128-character random key, stored in a Secret owned by the `Zone` (so it's
-garbage-collected on teardown), rotated hourly with a 5-minute overlap so
-an already-running zone is never cut off mid-rotation. That credential,
-together with the hub's own `KONTINUUM_SERVER_GRPC_ENDPOINT`, is encoded
-into a `grpc://zone:key@hub-endpoint` DSN and written into the new zone's
-own `kontinuum-env` Secret as `KONTINUUM_SERVER_STORAGE`. On startup, the
+long-lived ed25519 keypair, issued once and never rotated. The private half
+is delivered to the zone's own downstream cluster as a `kubernetes.io/tls`
+Secret; the hub keeps only the public half, wrapped in a self-signed
+certificate, in a Secret owned by the `Zone` (so it's garbage-collected on
+teardown) — its SHA-256 thumbprint shows up on the zone's own detail page.
+The hub's own `KONTINUUM_SERVER_GRPC_ENDPOINT` is encoded into a
+`grpc://zone@hub-endpoint` DSN and written into the new zone's own
+`kontinuum-env` Secret as `KONTINUUM_SERVER_STORAGE`. On startup, the
 zone's own `kontinuum-server` recognizes that scheme, starts a small local
-relay that attaches the credential to every call, and hands `libkapi` a
-plain local `unix://` socket instead — indistinguishable, from
-`libkapi`'s point of view, from talking to a local Kine instance
-directly.
+relay that signs a fresh, short-lived JWT with the zone's own identity key
+on every call, and hands `libkapi` a plain local `unix://` socket instead —
+indistinguishable, from `libkapi`'s point of view, from talking to a local
+Kine instance directly.
 
 ### TLS: ACME over the Gateway API, not Ingress
 

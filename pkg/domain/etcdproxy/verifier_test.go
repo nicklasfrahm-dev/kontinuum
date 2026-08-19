@@ -19,10 +19,38 @@ const (
 	verifierTestZone      = "eu-eu-1a"
 )
 
-func newVerifierTestSecret(t *testing.T, pair etcdproxy.AuthKeyPair) *corev1.Secret {
+// testIdentity is one GenerateIdentity call's own cert+key, bundled
+// together for this file's own tests.
+type testIdentity struct {
+	certPEM []byte
+	keyPEM  []byte
+}
+
+func generateTestIdentity(t *testing.T) testIdentity {
 	t.Helper()
 
-	secret := etcdproxy.BuildAuthSecret(verifierTestZone, verifierTestNamespace, pair)
+	certPEM, keyPEM, err := etcdproxy.GenerateIdentity(verifierTestZone)
+	require.NoError(t, err)
+
+	return testIdentity{certPEM: certPEM, keyPEM: keyPEM}
+}
+
+func signTestToken(t *testing.T, identity testIdentity) string {
+	t.Helper()
+
+	priv, err := etcdproxy.LoadPrivateKey(identity.keyPEM)
+	require.NoError(t, err)
+
+	token, err := etcdproxy.SignToken(verifierTestZone, priv)
+	require.NoError(t, err)
+
+	return token
+}
+
+func newVerifierTestSecret(t *testing.T, pair etcdproxy.IdentityPair) *corev1.Secret {
+	t.Helper()
+
+	secret := etcdproxy.BuildPublicSecret(verifierTestZone, verifierTestNamespace, pair)
 	secret.Data = map[string][]byte{}
 
 	for k, v := range secret.StringData {
@@ -43,69 +71,83 @@ func newVerifierTestClient(t *testing.T, objects ...client.Object) client.Client
 	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 }
 
-func TestVerifierAuthenticateAcceptsCurrentKey(t *testing.T) {
+func TestVerifierAuthenticateAcceptsCurrentIdentity(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
-	secret := newVerifierTestSecret(t, etcdproxy.AuthKeyPair{
-		Current:  etcdproxy.AuthKey{Value: testCurrentSecretKey, CreatedAt: now},
-		Previous: etcdproxy.AuthKey{Value: testPreviousSecretKey, CreatedAt: now.Add(-etcdproxy.RotationInterval)},
+	current := generateTestIdentity(t)
+	previous := generateTestIdentity(t)
+
+	secret := newVerifierTestSecret(t, etcdproxy.IdentityPair{
+		Current:  etcdproxy.Identity{CertPEM: current.certPEM, IssuedAt: now},
+		Previous: etcdproxy.Identity{CertPEM: previous.certPEM, IssuedAt: now.Add(-etcdproxy.IdentityRotationInterval)},
 	})
 
 	verifier, err := etcdproxy.NewVerifier(newVerifierTestClient(t, secret), verifierTestNamespace)
 	require.NoError(t, err)
 
-	zone, err := verifier.Authenticate(t.Context(), etcdproxy.EncodeToken(verifierTestZone, testCurrentSecretKey))
+	zone, err := verifier.Authenticate(t.Context(), signTestToken(t, current))
 	require.NoError(t, err)
 	assert.Equal(t, verifierTestZone, zone)
 }
 
-func TestVerifierAuthenticateAcceptsPreviousKeyWithinOverlap(t *testing.T) {
+func TestVerifierAuthenticateAcceptsPreviousIdentityWithinOverlap(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
-	secret := newVerifierTestSecret(t, etcdproxy.AuthKeyPair{
-		Current:  etcdproxy.AuthKey{Value: testCurrentSecretKey, CreatedAt: now},
-		Previous: etcdproxy.AuthKey{Value: testPreviousSecretKey, CreatedAt: now.Add(-etcdproxy.RotationInterval)},
+	current := generateTestIdentity(t)
+	previous := generateTestIdentity(t)
+
+	secret := newVerifierTestSecret(t, etcdproxy.IdentityPair{
+		Current:  etcdproxy.Identity{CertPEM: current.certPEM, IssuedAt: now},
+		Previous: etcdproxy.Identity{CertPEM: previous.certPEM, IssuedAt: now.Add(-etcdproxy.IdentityRotationInterval)},
 	})
 
 	verifier, err := etcdproxy.NewVerifier(newVerifierTestClient(t, secret), verifierTestNamespace)
 	require.NoError(t, err)
 
-	zone, err := verifier.Authenticate(t.Context(), etcdproxy.EncodeToken(verifierTestZone, testPreviousSecretKey))
+	zone, err := verifier.Authenticate(t.Context(), signTestToken(t, previous))
 	require.NoError(t, err)
 	assert.Equal(t, verifierTestZone, zone)
 }
 
-func TestVerifierAuthenticateRejectsExpiredPreviousKey(t *testing.T) {
+func TestVerifierAuthenticateRejectsExpiredPreviousIdentity(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
+	current := generateTestIdentity(t)
+	previous := generateTestIdentity(t)
+
 	// Demoted well past its own overlap window.
-	secret := newVerifierTestSecret(t, etcdproxy.AuthKeyPair{
-		Current:  etcdproxy.AuthKey{Value: testCurrentSecretKey, CreatedAt: now},
-		Previous: etcdproxy.AuthKey{Value: testPreviousSecretKey, CreatedAt: now.Add(-2 * etcdproxy.RotationInterval)},
+	secret := newVerifierTestSecret(t, etcdproxy.IdentityPair{
+		Current:  etcdproxy.Identity{CertPEM: current.certPEM, IssuedAt: now},
+		Previous: etcdproxy.Identity{CertPEM: previous.certPEM, IssuedAt: now.Add(-2 * etcdproxy.IdentityRotationInterval)},
 	})
 
 	verifier, err := etcdproxy.NewVerifier(newVerifierTestClient(t, secret), verifierTestNamespace)
 	require.NoError(t, err)
 
-	_, err = verifier.Authenticate(t.Context(), etcdproxy.EncodeToken(verifierTestZone, testPreviousSecretKey))
+	_, err = verifier.Authenticate(t.Context(), signTestToken(t, previous))
 	require.ErrorIs(t, err, etcdproxy.ErrUnauthenticated)
 }
 
 func TestVerifierAuthenticateRejectsWrongKey(t *testing.T) {
 	t.Parallel()
 
-	secret := newVerifierTestSecret(t, etcdproxy.AuthKeyPair{
-		Current:  etcdproxy.AuthKey{Value: testCurrentSecretKey, CreatedAt: time.Now()},
-		Previous: etcdproxy.AuthKey{Value: testPreviousSecretKey, CreatedAt: time.Now()},
+	now := time.Now()
+	current := generateTestIdentity(t)
+	previous := generateTestIdentity(t)
+	unrelated := generateTestIdentity(t)
+
+	secret := newVerifierTestSecret(t, etcdproxy.IdentityPair{
+		Current:  etcdproxy.Identity{CertPEM: current.certPEM, IssuedAt: now},
+		Previous: etcdproxy.Identity{CertPEM: previous.certPEM, IssuedAt: now},
 	})
 
 	verifier, err := etcdproxy.NewVerifier(newVerifierTestClient(t, secret), verifierTestNamespace)
 	require.NoError(t, err)
 
-	_, err = verifier.Authenticate(t.Context(), etcdproxy.EncodeToken(verifierTestZone, "not-the-right-secret"))
+	_, err = verifier.Authenticate(t.Context(), signTestToken(t, unrelated))
 	require.ErrorIs(t, err, etcdproxy.ErrUnauthenticated)
 }
 
@@ -115,7 +157,7 @@ func TestVerifierAuthenticateRejectsUnknownZone(t *testing.T) {
 	verifier, err := etcdproxy.NewVerifier(newVerifierTestClient(t), verifierTestNamespace)
 	require.NoError(t, err)
 
-	_, err = verifier.Authenticate(t.Context(), etcdproxy.EncodeToken("no-such-zone", "whatever"))
+	_, err = verifier.Authenticate(t.Context(), signTestToken(t, generateTestIdentity(t)))
 	require.ErrorIs(t, err, etcdproxy.ErrUnauthenticated)
 }
 
@@ -125,33 +167,37 @@ func TestVerifierAuthenticateRejectsMalformedToken(t *testing.T) {
 	verifier, err := etcdproxy.NewVerifier(newVerifierTestClient(t), verifierTestNamespace)
 	require.NoError(t, err)
 
-	_, err = verifier.Authenticate(t.Context(), "not-valid-base64!!!")
-	require.ErrorIs(t, err, etcdproxy.ErrInvalidToken)
+	_, err = verifier.Authenticate(t.Context(), "not-a-jwt")
+	require.ErrorIs(t, err, etcdproxy.ErrUnauthenticated)
 }
 
 // TestVerifierAuthenticateUsesCacheBetweenLookups covers the LRU cache
-// itself: once a zone's key pair is fetched, a second Authenticate call
+// itself: once a zone's identity is fetched, a second Authenticate call
 // for the same zone must not need the Secret to still exist — proving the
 // second call was served from cache, not a fresh API read.
 func TestVerifierAuthenticateUsesCacheBetweenLookups(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
-	secret := newVerifierTestSecret(t, etcdproxy.AuthKeyPair{
-		Current:  etcdproxy.AuthKey{Value: testCurrentSecretKey, CreatedAt: now},
-		Previous: etcdproxy.AuthKey{Value: testPreviousSecretKey, CreatedAt: now},
+	current := generateTestIdentity(t)
+
+	secret := newVerifierTestSecret(t, etcdproxy.IdentityPair{
+		Current:  etcdproxy.Identity{CertPEM: current.certPEM, IssuedAt: now},
+		Previous: etcdproxy.Identity{CertPEM: current.certPEM, IssuedAt: now},
 	})
 
 	testClient := newVerifierTestClient(t, secret)
 	verifier, err := etcdproxy.NewVerifier(testClient, verifierTestNamespace)
 	require.NoError(t, err)
 
-	_, err = verifier.Authenticate(t.Context(), etcdproxy.EncodeToken(verifierTestZone, testCurrentSecretKey))
+	token := signTestToken(t, current)
+
+	_, err = verifier.Authenticate(t.Context(), token)
 	require.NoError(t, err)
 
 	require.NoError(t, testClient.Delete(t.Context(), secret))
 
-	zone, err := verifier.Authenticate(t.Context(), etcdproxy.EncodeToken(verifierTestZone, testCurrentSecretKey))
+	zone, err := verifier.Authenticate(t.Context(), token)
 	require.NoError(t, err, "the second lookup should be served from cache, not require the Secret to still exist")
 	assert.Equal(t, verifierTestZone, zone)
 }

@@ -29,6 +29,7 @@ import (
 	"github.com/nicklasfrahm/kontinuum/pkg/auth"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/adminrbac"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/etcdproxy"
 	instancedomain "github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
 	zonedomain "github.com/nicklasfrahm/kontinuum/pkg/domain/zone"
 )
@@ -274,7 +275,7 @@ func NewRouter(
 			"templates/components/icon_chevron_left.html", "templates/components/icon_info.html",
 			"templates/components/icon_kubernetes.html", "templates/components/icon_server.html",
 			"templates/components/icon_list_checks.html", "templates/components/icon_trash.html",
-			"templates/components/conditions_table.html"),
+			"templates/components/icon_key.html", "templates/components/conditions_table.html"),
 		pageIAM: mustParsePage("templates/iam_content.html",
 			"templates/components/icon_key.html", "templates/components/icon_info.html"),
 		pageConnect: mustParsePage("templates/connect_content.html",
@@ -965,10 +966,44 @@ func (r *Router) handleZoneDetail(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 
+	thumbprint, issuedAt, hasIdentity := fetchZoneIdentity(request.Context(), zones, zoneObj.Name)
+
 	data := zoneDetailData(zoneObj, cluster, hasCluster, kontinuum, joined,
-		request.PathValue("ns"), r.version, r.authEnabled)
+		request.PathValue("ns"), r.version, r.authEnabled, thumbprint, issuedAt, hasIdentity)
 
 	r.render(writer, request, pageZoneDetail, data)
+}
+
+// fetchZoneIdentity reads zoneName's own hub-side etcd gRPC proxy identity
+// Secret (see etcdproxy.BuildPublicSecret) and returns its currently
+// active (Current) certificate's own thumbprint and issuance time — ok is
+// false for anything that keeps this from resolving (Secret not found
+// yet, no permission to read Secrets, malformed content, ...), in which
+// case the zone detail page simply omits its own "Etcd proxy identity"
+// card rather than erroring the whole page: unlike RegistryJoined/
+// HasCluster, this is a purely informational display, not something the
+// rest of the page depends on.
+func fetchZoneIdentity(ctx context.Context, zones client.Client, zoneName string) (string, time.Time, bool) {
+	var secret corev1.Secret
+
+	key := client.ObjectKey{Name: etcdproxy.AuthSecretName(zoneName), Namespace: v1alpha2.KontinuumSystemNamespace}
+
+	err := zones.Get(ctx, key, &secret)
+	if err != nil {
+		return "", time.Time{}, false
+	}
+
+	pair, ok := etcdproxy.ParsePublicSecret(&secret)
+	if !ok {
+		return "", time.Time{}, false
+	}
+
+	thumbprint, err := etcdproxy.Thumbprint(pair.Current.CertPEM)
+	if err != nil {
+		return "", time.Time{}, false
+	}
+
+	return thumbprint, pair.Current.IssuedAt, true
 }
 
 // zoneDetailData builds handleZoneDetail's template data from zoneObj and
@@ -983,6 +1018,7 @@ func (r *Router) handleZoneDetail(writer http.ResponseWriter, request *http.Requ
 func zoneDetailData(
 	zoneObj v1alpha2.Zone, cluster v1alpha2.TalosCluster, hasCluster bool,
 	kontinuum *v1alpha2.Kontinuum, joined bool, namespace, version string, authEnabled bool,
+	identityThumbprint string, identityIssuedAt time.Time, hasIdentity bool,
 ) map[string]any {
 	sortedConditions := sortConditionsNewestFirst(zoneObj.Status.Conditions)
 	conditions := make([]conditionRow, 0, len(sortedConditions))
@@ -1023,6 +1059,12 @@ func zoneDetailData(
 			data["ClusterReady"] = string(cond.Status)
 			data["ClusterReadyOK"] = cond.Status == metav1.ConditionTrue
 		}
+	}
+
+	data["HasIdentity"] = hasIdentity
+	if hasIdentity {
+		data["IdentityThumbprint"] = identityThumbprint
+		data["IdentityIssuedAge"] = formatAge(identityIssuedAt)
 	}
 
 	if joined && kontinuum != nil {
