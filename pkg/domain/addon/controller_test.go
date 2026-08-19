@@ -23,7 +23,10 @@ import (
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
 )
 
-const testRetryInterval = 15 * time.Second
+const (
+	testRetryInterval  = 15 * time.Second
+	testResyncInterval = 5 * time.Minute
+)
 
 // fakeAddonInstaller is addon.Installer's test double.
 type fakeAddonInstaller struct {
@@ -133,6 +136,21 @@ func newReconciler(fakeClient client.Client, installer *fakeAddonInstaller, prob
 		RetryInterval: testRetryInterval,
 		Logger:        slog.Default(),
 	}
+}
+
+// newReconcilerWithResync is newReconciler plus a non-zero ResyncInterval —
+// a separate helper rather than a newReconciler parameter, since every
+// other test relies on ResyncInterval defaulting to zero (see
+// TestReconcileBuiltinAddonResolvesEmbeddedDefaults's own assert.Zero on
+// its Ready-path result) and only the resync-specific tests below need it
+// set.
+func newReconcilerWithResync(
+	fakeClient client.Client, installer *fakeAddonInstaller, prober *fakePodProber,
+) *addon.Reconciler {
+	reconciler := newReconciler(fakeClient, installer, prober)
+	reconciler.ResyncInterval = testResyncInterval
+
+	return reconciler
 }
 
 // testClusterName is every fixture's own TalosCluster name — kept as one
@@ -668,4 +686,42 @@ func TestReconcileNoPodsIsVacuouslyHealthy(t *testing.T) {
 	require.NoError(t, fakeClient.Get(context.Background(),
 		types.NamespacedName{Name: customAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace}, &got))
 	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, "Ready"))
+}
+
+// TestReconcileReadyAddonRequeuesForResync covers an already-Ready addon
+// still getting periodically re-visited rather than going quiet forever —
+// see setReady's own doc for why: nothing else would ever pick up a
+// built-in chart version bump (values/*.yaml) for an addon that was
+// already installed and Ready before a controller carrying that bump was
+// deployed.
+func TestReconcileReadyAddonRequeuesForResync(t *testing.T) {
+	t.Parallel()
+
+	cluster, secret := readyCluster()
+	cpInstance := claimedDiscoveredInstance("cp-node-1")
+	cilium := builtinAddon()
+
+	fakeClient := newFakeClient(t, cluster, secret, cpInstance, cilium)
+
+	installer := &fakeAddonInstaller{}
+	prober := &fakePodProber{}
+	reconciler := newReconcilerWithResync(fakeClient, installer, prober)
+
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, testResyncInterval, result.RequeueAfter)
+	assert.Len(t, installer.calls, 1)
+
+	// A second reconcile (simulating that requeue firing) re-resolves and
+	// re-installs — idempotent against the fake, but this is what makes a
+	// real `helm upgrade --install` pick up a changed chart version
+	// against a real cluster.
+	result, err = reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, testResyncInterval, result.RequeueAfter)
+	assert.Len(t, installer.calls, 2)
 }

@@ -37,6 +37,16 @@ const (
 
 	// podProbeTimeout bounds each PodProber.NamespaceHealthy call.
 	podProbeTimeout = 15 * time.Second
+
+	// defaultResyncInterval is how often Reconcile re-visits an already-
+	// Ready addon — see setReady's own doc for why this exists at all.
+	// Five minutes mirrors pkg/domain/taloscluster's own
+	// defaultHealthCheckInterval: frequent enough that a built-in chart
+	// version bump (see values/*.yaml) or an upstream chart drifting from
+	// its last-applied values reaches an already-installed addon within a
+	// bounded time, without hammering every healthy addon's pods on a
+	// tight loop.
+	defaultResyncInterval = 5 * time.Minute
 )
 
 // Config configures a Controller.
@@ -55,6 +65,10 @@ type Config struct {
 	// RetryInterval is how long Reconcile waits before retrying a step
 	// that hasn't converged yet. Defaults to fifteen seconds when zero.
 	RetryInterval time.Duration
+	// ResyncInterval is how long Reconcile waits before re-visiting an
+	// already-Ready addon — see setReady's own doc. Defaults to five
+	// minutes when zero.
+	ResyncInterval time.Duration
 }
 
 // Controller wires the Addon reconciler onto a controller-runtime
@@ -82,6 +96,10 @@ func NewController(cfg Config) *Controller {
 		cfg.RetryInterval = defaultRetryInterval
 	}
 
+	if cfg.ResyncInterval == 0 {
+		cfg.ResyncInterval = defaultResyncInterval
+	}
+
 	return &Controller{Config: cfg}
 }
 
@@ -95,12 +113,13 @@ func NewController(cfg Config) *Controller {
 // server).
 func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 	reconciler := &Reconciler{
-		Client:        mgr.GetClient(),
-		Installer:     c.Config.Installer,
-		PodProber:     c.Config.PodProber,
-		CRDChecker:    c.Config.CRDChecker,
-		RetryInterval: c.Config.RetryInterval,
-		Logger:        c.Config.Logger,
+		Client:         mgr.GetClient(),
+		Installer:      c.Config.Installer,
+		PodProber:      c.Config.PodProber,
+		CRDChecker:     c.Config.CRDChecker,
+		RetryInterval:  c.Config.RetryInterval,
+		ResyncInterval: c.Config.ResyncInterval,
+		Logger:         c.Config.Logger,
 	}
 
 	err := ctrl.NewControllerManagedBy(mgr).For(&v1alpha2.Addon{}).Complete(reconciler)
@@ -117,12 +136,13 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 // control-plane count even after the Addon itself was created once),
 // installs it, and probes its pods.
 type Reconciler struct {
-	Client        client.Client
-	Installer     Installer
-	PodProber     PodProber
-	CRDChecker    CRDChecker
-	RetryInterval time.Duration
-	Logger        *slog.Logger
+	Client         client.Client
+	Installer      Installer
+	PodProber      PodProber
+	CRDChecker     CRDChecker
+	RetryInterval  time.Duration
+	ResyncInterval time.Duration
+	Logger         *slog.Logger
 }
 
 // Reconcile implements reconcile.Reconciler.
@@ -343,9 +363,15 @@ func (r *Reconciler) probeHealthy(
 }
 
 // setReady sets addon's Ready condition and persists status — False
-// requeues at RetryInterval; True doesn't (stop actively polling once
-// healthy — nothing yet forces periodic re-checks of an already-healthy
-// addon).
+// requeues at RetryInterval; True requeues at the longer ResyncInterval
+// instead of stopping entirely, so an already-healthy addon still gets
+// re-resolved (see resolveInstallRequest) and re-installed periodically —
+// installViaHelm's own `helm upgrade --install` is idempotent, so this is
+// a no-op against the cluster whenever nothing changed, but it's what
+// picks up a built-in chart version bump (see values/*.yaml) on an addon
+// that was already installed and Ready before the controller carrying
+// that bump was ever deployed — otherwise nothing would ever re-trigger
+// Reconcile for it again.
 //
 // The Status().Update is skipped when SetStatusCondition reports nothing
 // actually changed. This controller's own Addon watch (see
@@ -372,7 +398,7 @@ func (r *Reconciler) setReady(
 	}
 
 	if status == metav1.ConditionTrue {
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: r.ResyncInterval}, nil
 	}
 
 	return ctrl.Result{RequeueAfter: r.RetryInterval}, nil
