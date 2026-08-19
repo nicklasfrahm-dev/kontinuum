@@ -17,6 +17,7 @@ import (
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/taloscluster"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/zonelease"
 )
 
 const (
@@ -149,6 +150,12 @@ type Config struct {
 	// anyway — see teardown.go's own doc. Defaults to fifteen minutes when
 	// zero.
 	TeardownTimeout time.Duration
+	// ZoneLease is this process's own zonelease.Locker identity — see
+	// zonelease.Identity's own doc. Reconcile refuses to mutate a Zone it
+	// doesn't hold this lease for, so the hub and every joined zone sharing
+	// the same central storage never reconcile the same Zone at once, and a
+	// zone's own process never reconciles its own Zone at all.
+	ZoneLease zonelease.Identity
 }
 
 // AuthConfig mirrors the hub's own authentication choice onto every joined
@@ -219,7 +226,9 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		GRPCInsecureSkipVerify:  c.Config.GRPCInsecureSkipVerify,
 		RetryInterval:           c.Config.RetryInterval,
 		TeardownTimeout:         c.Config.TeardownTimeout,
-		Logger:                  c.Config.Logger,
+		Locker: zonelease.NewLocker(
+			mgr.GetClient(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
+		Logger: c.Config.Logger,
 	}
 
 	err := ctrl.NewControllerManagedBy(mgr).
@@ -258,7 +267,10 @@ type Reconciler struct {
 	GRPCInsecureSkipVerify  string
 	RetryInterval           time.Duration
 	TeardownTimeout         time.Duration
-	Logger                  *slog.Logger
+	// Locker gates every write below against zonelease — see
+	// Config.ZoneLease's own doc.
+	Locker *zonelease.Locker
+	Logger *slog.Logger
 }
 
 // Reconcile implements reconcile.Reconciler.
@@ -272,6 +284,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to get zone %q: %w", req.Name, err)
+	}
+
+	acquired, err := r.Locker.TryAcquire(ctx, zonelease.Key(zoneObj.Spec.Region, zoneObj.Spec.Zone))
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to acquire zone lease for %q: %w", zoneObj.Name, err)
+	}
+
+	if !acquired {
+		return ctrl.Result{RequeueAfter: zonelease.Jitter(r.RetryInterval)}, nil
 	}
 
 	if !zoneObj.DeletionTimestamp.IsZero() {

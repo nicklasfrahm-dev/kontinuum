@@ -17,6 +17,7 @@ import (
 
 	"github.com/kommodity-io/kommodity/pkg/libkapi"
 	"github.com/spf13/cobra"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -36,6 +37,7 @@ import (
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/registry"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/taloscluster"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/zone"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/zonelease"
 	"github.com/nicklasfrahm/kontinuum/pkg/logging"
 	"github.com/nicklasfrahm/kontinuum/pkg/ui"
 )
@@ -293,7 +295,12 @@ func loadServeConfig(cmd *cobra.Command, addr string, storage string) (*config.C
 // adminrbac.Runnable's client.Client, built off this scheme, and the UI's
 // own per-request client — kontinuumListerFactory, which the IAM page also
 // uses to list ClusterRoleBindings, see handleIAM — both resolve
-// ClusterRole/ClusterRoleBinding's GVKs against it).
+// ClusterRole/ClusterRoleBinding's GVKs against it), and coordination.k8s.io/v1
+// (zonelease.Locker's own client.Client, built off this same scheme,
+// resolves Lease's GVK against it — the type itself is already served
+// server-side regardless of this scheme, see pkg/libkapi/leaderelection.go's
+// own doc, but a controller-runtime client still needs it registered
+// locally to marshal/unmarshal one).
 func buildScheme() (*runtime.Scheme, error) {
 	scheme := runtime.NewScheme()
 
@@ -315,6 +322,11 @@ func buildScheme() (*runtime.Scheme, error) {
 	err = rbacv1.AddToScheme(scheme)
 	if err != nil {
 		return nil, fmt.Errorf("failed to register rbac.authorization.k8s.io/v1 scheme: %w", err)
+	}
+
+	err = coordinationv1.AddToScheme(scheme)
+	if err != nil {
+		return nil, fmt.Errorf("failed to register coordination.k8s.io/v1 scheme: %w", err)
 	}
 
 	return scheme, nil
@@ -351,7 +363,12 @@ func buildServer(
 		zoneClientFactory(cfg.Server.Addr, scheme),
 		version, cfg.Redact(), oidcHandler != nil, invalidateSession)
 
-	registryOpts, registryController, err := registryOptions(cfg, logger, scheme)
+	zoneLease := zonelease.Identity{
+		HolderIdentity: registry.InstanceName(os.Hostname()),
+		SelfZoneKey:    zonelease.Key(cfg.Server.Region, cfg.Server.Zone),
+	}
+
+	registryOpts, registryController, err := registryOptions(cfg, logger, scheme, zoneLease)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -385,8 +402,9 @@ func buildServer(
 		libkapi.WithLogger(logger),
 		libkapi.WithServerFactory(customHandlers(uiRouter, oidcHandler, scheme)),
 		libkapi.WithGarbageCollector(libkapi.GarbageCollectorConfig{}),
-	}, authOpts, registryOpts, instanceOptions(logger), instancePoolOptions(logger), talosClusterOptions(logger),
-		addonOptions(logger), zoneOptions(cfg, logger), adminRBACOptions(cfg, logger))
+	}, authOpts, registryOpts, instanceOptions(logger, zoneLease), instancePoolOptions(logger, zoneLease),
+		talosClusterOptions(logger, zoneLease), addonOptions(logger, zoneLease), zoneOptions(cfg, logger, zoneLease),
+		adminRBACOptions(cfg, logger, zoneLease))
 
 	// Storage is resolved against a background context so the backend
 	// is only torn down by Server.Shutdown, not by the signal context
@@ -483,7 +501,7 @@ func resolveStorageDSN(configured, insecureSkipVerify string) (string, func(), e
 // returned *registry.Controller is buildServer's own return value, passed
 // through unchanged — see its doc.
 func registryOptions(
-	cfg *config.Config, logger *slog.Logger, scheme *runtime.Scheme,
+	cfg *config.Config, logger *slog.Logger, scheme *runtime.Scheme, zoneLease zonelease.Identity,
 ) ([]libkapi.Option, *registry.Controller, error) {
 	role, err := registry.Role(cfg.Server.Region, cfg.Server.Zone)
 	if err != nil {
@@ -510,6 +528,7 @@ func registryOptions(
 		Version:       version,
 		Storage:       cfg.Server.Storage,
 		DisplayConfig: displayConfig(cfg),
+		ZoneLease:     zoneLease,
 	})
 
 	ensureCRD := func(ctx context.Context, loopbackConfig *rest.Config) error {
@@ -534,10 +553,10 @@ func registryOptions(
 // lifecycle. Unlike registryOptions, this needs no WithScheme call (scheme
 // already carries these kinds — see buildServer's v1alpha2.AddToScheme) and
 // no webhook server (none of these four kinds have a conversion webhook).
-func instanceOptions(logger *slog.Logger) []libkapi.Option {
+func instanceOptions(logger *slog.Logger, zoneLease zonelease.Identity) []libkapi.Option {
 	instanceLogger := logger.With("component", "instance")
 
-	controller := instance.NewController(instance.Config{Logger: instanceLogger})
+	controller := instance.NewController(instance.Config{Logger: instanceLogger, ZoneLease: zoneLease})
 
 	ensureCRDs := func(ctx context.Context, loopbackConfig *rest.Config) error {
 		return instance.EnsureCRDs(ctx, loopbackConfig, instanceLogger)
@@ -553,8 +572,11 @@ func instanceOptions(logger *slog.Logger) []libkapi.Option {
 // claim reconciler (see pkg/domain/instancepool) onto the Server. No
 // WithPostStartHook is needed — instancepool.kontinuum.sh's CRD is already
 // ensured by instanceOptions' own ensureCRDs call.
-func instancePoolOptions(logger *slog.Logger) []libkapi.Option {
-	controller := instancepool.NewController(instancepool.Config{Logger: logger.With("component", "instancepool")})
+func instancePoolOptions(logger *slog.Logger, zoneLease zonelease.Identity) []libkapi.Option {
+	controller := instancepool.NewController(instancepool.Config{
+		Logger:    logger.With("component", "instancepool"),
+		ZoneLease: zoneLease,
+	})
 
 	return []libkapi.Option{libkapi.WithController(controller)}
 }
@@ -568,8 +590,11 @@ func instancePoolOptions(logger *slog.Logger) []libkapi.Option {
 // top-level *Options function. No WithPostStartHook is needed —
 // talosclusters.kontinuum.sh's and instances.kontinuum.sh's CRDs are
 // already ensured by instanceOptions' own ensureCRDs call.
-func talosClusterOptions(logger *slog.Logger) []libkapi.Option {
-	controller := taloscluster.NewController(taloscluster.Config{Logger: logger.With("component", "taloscluster")})
+func talosClusterOptions(logger *slog.Logger, zoneLease zonelease.Identity) []libkapi.Option {
+	controller := taloscluster.NewController(taloscluster.Config{
+		Logger:    logger.With("component", "taloscluster"),
+		ZoneLease: zoneLease,
+	})
 	instanceResetController := taloscluster.NewInstanceResetController(
 		taloscluster.InstanceResetConfig{Logger: logger.With("component", "taloscluster-instance-reset")})
 
@@ -580,8 +605,8 @@ func talosClusterOptions(logger *slog.Logger) []libkapi.Option {
 // health-probe reconciler (see pkg/domain/addon) onto the Server. No
 // WithPostStartHook is needed — addons.kontinuum.sh's CRD is already
 // ensured by instanceOptions' own ensureCRDs call.
-func addonOptions(logger *slog.Logger) []libkapi.Option {
-	controller := addon.NewController(addon.Config{Logger: logger.With("component", "addon")})
+func addonOptions(logger *slog.Logger, zoneLease zonelease.Identity) []libkapi.Option {
+	controller := addon.NewController(addon.Config{Logger: logger.With("component", "addon"), ZoneLease: zoneLease})
 
 	return []libkapi.Option{libkapi.WithController(controller)}
 }
@@ -596,7 +621,7 @@ const zoneImageRepo = "ghcr.io/nicklasfrahm-dev/kontinuum"
 // install reconciler (see pkg/domain/zone) onto the Server. No
 // WithPostStartHook is needed — zones.kontinuum.sh's CRD is already
 // ensured by instanceOptions' own ensureCRDs call.
-func zoneOptions(cfg *config.Config, logger *slog.Logger) []libkapi.Option {
+func zoneOptions(cfg *config.Config, logger *slog.Logger, zoneLease zonelease.Identity) []libkapi.Option {
 	controller := zone.NewController(zone.Config{
 		Logger:     logger.With("component", "zone"),
 		ACMEEmail:  cfg.ACME.Email,
@@ -610,6 +635,7 @@ func zoneOptions(cfg *config.Config, logger *slog.Logger) []libkapi.Option {
 		ImageRepo:              zoneImageRepo,
 		GRPCEndpoint:           cfg.Server.GRPC.Endpoint,
 		GRPCInsecureSkipVerify: cfg.Server.GRPC.InsecureTLSSkipVerify,
+		ZoneLease:              zoneLease,
 	})
 
 	return []libkapi.Option{libkapi.WithController(controller)}
@@ -622,7 +648,7 @@ func zoneOptions(cfg *config.Config, logger *slog.Logger) []libkapi.Option {
 // configureOIDC) actually evaluates on every request — see issue #41. Only
 // wired when OIDC is configured; with no OIDC there's no notion of an admin
 // group to bind, and no authorizer is wired either (see configureOIDC).
-func adminRBACOptions(cfg *config.Config, logger *slog.Logger) []libkapi.Option {
+func adminRBACOptions(cfg *config.Config, logger *slog.Logger, zoneLease zonelease.Identity) []libkapi.Option {
 	if cfg.OIDC.IssuerURL == "" {
 		return nil
 	}
@@ -630,6 +656,7 @@ func adminRBACOptions(cfg *config.Config, logger *slog.Logger) []libkapi.Option 
 	controller := adminrbac.NewController(adminrbac.Config{
 		Logger:      logger.With("component", "adminrbac"),
 		AdminGroups: cfg.OIDC.AdminGroups,
+		ZoneLease:   zoneLease,
 	})
 
 	return []libkapi.Option{libkapi.WithController(controller)}

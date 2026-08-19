@@ -32,6 +32,7 @@ import (
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/addon"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/zonelease"
 )
 
 const (
@@ -128,6 +129,10 @@ type Config struct {
 	// teardown.go's own reconcileTeardown. Defaults to fifteen minutes
 	// when zero.
 	TeardownTimeout time.Duration
+	// ZoneLease is this process's own zonelease.Locker identity — see
+	// zonelease.Identity's own doc. Reconcile refuses to mutate a
+	// TalosCluster it doesn't hold its own zone lease for.
+	ZoneLease zonelease.Identity
 }
 
 // Controller wires the TalosCluster bootstrap reconciler onto a
@@ -177,7 +182,9 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		RetryInterval:       c.Config.RetryInterval,
 		HealthCheckInterval: c.Config.HealthCheckInterval,
 		TeardownTimeout:     c.Config.TeardownTimeout,
-		Logger:              c.Config.Logger,
+		Locker: zonelease.NewLocker(
+			mgr.GetClient(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
+		Logger: c.Config.Logger,
 	}
 
 	err := ctrl.NewControllerManagedBy(mgr).For(&v1alpha2.TalosCluster{}).Complete(reconciler)
@@ -200,7 +207,10 @@ type Reconciler struct {
 	RetryInterval       time.Duration
 	HealthCheckInterval time.Duration
 	TeardownTimeout     time.Duration
-	Logger              *slog.Logger
+	// Locker gates every write below against zonelease — see
+	// Config.ZoneLease's own doc.
+	Locker *zonelease.Locker
+	Logger *slog.Logger
 }
 
 // Reconcile implements reconcile.Reconciler. Once the cluster is fully
@@ -210,15 +220,14 @@ type Reconciler struct {
 // otherwise leave every control-plane member's MemberReadyConditionType
 // stale forever.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var cluster v1alpha2.TalosCluster
-
-	err := r.Client.Get(ctx, req.NamespacedName, &cluster)
-	if apierrors.IsNotFound(err) {
-		return ctrl.Result{}, nil
+	cluster, found, err := r.fetchCluster(ctx, req.NamespacedName)
+	if !found {
+		return ctrl.Result{}, err
 	}
 
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to get talos cluster %q: %w", req.Name, err)
+	result, acquired, err := r.acquireZoneLease(ctx, &cluster)
+	if !acquired {
+		return result, err
 	}
 
 	if !cluster.DeletionTimestamp.IsZero() {
@@ -251,6 +260,44 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	return r.recheckControlPlaneHealth(ctx, &cluster, bundle)
+}
+
+// fetchCluster fetches the TalosCluster named by key, folding NotFound and
+// any real Get error into one found=false return — a single decision point
+// in Reconcile (mirrors acquireZoneLease's own doc) purely to keep its own
+// cyclomatic complexity down. err is always nil alongside a NotFound
+// (nothing to reconcile, not a failure); Reconcile doesn't need to tell the
+// two apart, only whether to stop.
+func (r *Reconciler) fetchCluster(ctx context.Context, key client.ObjectKey) (v1alpha2.TalosCluster, bool, error) {
+	var cluster v1alpha2.TalosCluster
+
+	err := r.Client.Get(ctx, key, &cluster)
+	if apierrors.IsNotFound(err) {
+		return cluster, false, nil
+	}
+
+	if err != nil {
+		return cluster, false, fmt.Errorf("failed to get talos cluster %q: %w", key.Name, err)
+	}
+
+	return cluster, true, nil
+}
+
+// acquireZoneLease gates every write below against zonelease — see
+// Config.ZoneLease's own doc — factored out purely to keep Reconcile's own
+// cyclomatic complexity down. The bool is always false alongside a non-nil
+// error, so callers only need to check it, not `err != nil || !acquired`.
+func (r *Reconciler) acquireZoneLease(ctx context.Context, cluster *v1alpha2.TalosCluster) (ctrl.Result, bool, error) {
+	acquired, err := r.Locker.TryAcquire(ctx, cluster.Name)
+	if err != nil {
+		return ctrl.Result{}, false, fmt.Errorf("failed to acquire zone lease for talos cluster %q: %w", cluster.Name, err)
+	}
+
+	if !acquired {
+		return ctrl.Result{RequeueAfter: zonelease.Jitter(r.RetryInterval)}, false, nil
+	}
+
+	return ctrl.Result{}, true, nil
 }
 
 // reconcileTeardown's real implementation lives in teardown.go — every

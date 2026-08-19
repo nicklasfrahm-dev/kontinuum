@@ -13,6 +13,7 @@ import (
 	conversionwebhook "sigs.k8s.io/controller-runtime/pkg/webhook/conversion"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/zonelease"
 )
 
 const (
@@ -58,6 +59,14 @@ type Config struct {
 	// written to status.config on every heartbeat — see
 	// v1alpha2.KontinuumConfigStatus.
 	DisplayConfig v1alpha2.KontinuumConfigStatus
+	// ZoneLease is this process's own zonelease.Locker identity — see
+	// zonelease.Identity's own doc. Only TTLReconciler's fleet-wide
+	// staleness sweep is gated by it (via zonelease.GlobalKey — deleting a
+	// stale Kontinuum isn't any one zone's own resource to reconcile,
+	// hub-owned like adminrbac's ClusterRoleBindings); Heartbeat's own
+	// self-registration is never gated — see CombinedReconciler.Reconcile's
+	// own doc for why.
+	ZoneLease zonelease.Identity
 }
 
 // Controller wires kontinuum's server registry — the kontinuums.kontinuum.sh
@@ -105,7 +114,9 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 	reconciler := &TTLReconciler{
 		Client:         mgr.GetClient(),
 		StaleThreshold: c.Config.StaleThreshold,
-		Logger:         c.Config.Logger,
+		Locker: zonelease.NewLocker(
+			mgr.GetClient(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
+		Logger: c.Config.Logger,
 	}
 
 	heartbeat := &Heartbeat{

@@ -27,6 +27,7 @@ import (
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/addon"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/taloscluster"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/zonelease"
 )
 
 // e2eTalosImage is pinned for the same reason
@@ -319,6 +320,7 @@ func setupE2ECluster(
 		Bootstrapper:       taloscluster.NewTalosBootstrapper(logger),
 		HealthCheckTimeout: e2eHealthCheckTimeout,
 		RetryInterval:      e2eRetryInterval,
+		Locker:             zonelease.NewLocker(fakeClient, "test-hub", "", 0),
 		Logger:             logger,
 	}
 
@@ -328,6 +330,7 @@ func setupE2ECluster(
 		PodProber:     addon.NewPodProber(),
 		CRDChecker:    addon.NewCRDChecker(),
 		RetryInterval: e2eRetryInterval,
+		Locker:        zonelease.NewLocker(fakeClient, "test-hub", "", 0),
 		Logger:        logger,
 	}
 

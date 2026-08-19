@@ -25,6 +25,7 @@ import (
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/zonelease"
 )
 
 const (
@@ -65,6 +66,10 @@ type Config struct {
 	// leaving InsufficientCapacity set. Defaults to thirty seconds when
 	// zero.
 	RetryInterval time.Duration
+	// ZoneLease is this process's own zonelease.Locker identity — see
+	// zonelease.Identity's own doc. Reconcile refuses to mutate an
+	// InstancePool it doesn't hold its own zone lease for.
+	ZoneLease zonelease.Identity
 }
 
 // Controller wires the InstancePool claim reconciler onto a
@@ -96,7 +101,9 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 	reconciler := &Reconciler{
 		Client:        mgr.GetClient(),
 		RetryInterval: c.Config.RetryInterval,
-		Logger:        c.Config.Logger,
+		Locker: zonelease.NewLocker(
+			mgr.GetClient(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
+		Logger: c.Config.Logger,
 	}
 
 	err := ctrl.NewControllerManagedBy(mgr).
@@ -115,7 +122,10 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 type Reconciler struct {
 	Client        client.Client
 	RetryInterval time.Duration
-	Logger        *slog.Logger
+	// Locker gates every write below against zonelease — see
+	// Config.ZoneLease's own doc.
+	Locker *zonelease.Locker
+	Logger *slog.Logger
 }
 
 // Reconcile implements reconcile.Reconciler: it releases any claimed
@@ -123,15 +133,14 @@ type Reconciler struct {
 // spec.replicas, then writes status.readyReplicas and
 // InsufficientCapacityConditionType.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var pool v1alpha2.InstancePool
-
-	err := r.Client.Get(ctx, req.NamespacedName, &pool)
-	if apierrors.IsNotFound(err) {
-		return ctrl.Result{}, nil
+	pool, found, err := r.fetchPool(ctx, req.NamespacedName)
+	if !found {
+		return ctrl.Result{}, err
 	}
 
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to get instance pool %q: %w", req.Name, err)
+	result, acquired, err := r.acquireZoneLease(ctx, &pool)
+	if !acquired {
+		return result, err
 	}
 
 	if !pool.DeletionTimestamp.IsZero() {
@@ -167,6 +176,44 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	return r.updateStatus(ctx, &pool, claimed, insufficient)
+}
+
+// fetchPool fetches the InstancePool named by key, folding NotFound and any
+// real Get error into one found=false return — a single decision point in
+// Reconcile (mirrors acquireZoneLease's own doc) purely to keep its own
+// cyclomatic complexity down. err is always nil alongside a NotFound
+// (nothing to reconcile, not a failure); Reconcile doesn't need to tell the
+// two apart, only whether to stop.
+func (r *Reconciler) fetchPool(ctx context.Context, key client.ObjectKey) (v1alpha2.InstancePool, bool, error) {
+	var pool v1alpha2.InstancePool
+
+	err := r.Client.Get(ctx, key, &pool)
+	if apierrors.IsNotFound(err) {
+		return pool, false, nil
+	}
+
+	if err != nil {
+		return pool, false, fmt.Errorf("failed to get instance pool %q: %w", key.Name, err)
+	}
+
+	return pool, true, nil
+}
+
+// acquireZoneLease gates every write below against zonelease — see
+// Config.ZoneLease's own doc — factored out purely to keep Reconcile's own
+// cyclomatic complexity down. The bool is always false alongside a non-nil
+// error, so callers only need to check it, not `err != nil || !acquired`.
+func (r *Reconciler) acquireZoneLease(ctx context.Context, pool *v1alpha2.InstancePool) (ctrl.Result, bool, error) {
+	acquired, err := r.Locker.TryAcquire(ctx, pool.Name)
+	if err != nil {
+		return ctrl.Result{}, false, fmt.Errorf("failed to acquire zone lease for instance pool %q: %w", pool.Name, err)
+	}
+
+	if !acquired {
+		return ctrl.Result{RequeueAfter: zonelease.Jitter(r.RetryInterval)}, false, nil
+	}
+
+	return ctrl.Result{}, true, nil
 }
 
 // ensureFinalizer adds InstancePoolFinalizer to pool and persists that, if

@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/zonelease"
 )
 
 const (
@@ -52,6 +53,14 @@ type Config struct {
 	// already-Discovered Instance that's still unclaimed — see Reconcile's
 	// own doc. Defaults to five minutes when zero.
 	RecheckInterval time.Duration
+	// ZoneLease is this process's own zonelease.Locker identity — see
+	// zonelease.Identity's own doc. Reconcile refuses to probe/mutate an
+	// Instance it doesn't hold the right lease for: a zone-labeled
+	// candidate (v1alpha2.LabelRegion/LabelZone) uses that zone's own key,
+	// an unlabeled one (the hub's general discovery pool) uses
+	// zonelease.GlobalKey — either way, a zone's own process never touches
+	// it.
+	ZoneLease zonelease.Identity
 }
 
 // Controller wires the Instance discovery reconciler onto a
@@ -94,7 +103,9 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		DialTimeout:     c.Config.DialTimeout,
 		RetryInterval:   c.Config.RetryInterval,
 		RecheckInterval: c.Config.RecheckInterval,
-		Logger:          c.Config.Logger,
+		Locker: zonelease.NewLocker(
+			mgr.GetClient(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
+		Logger: c.Config.Logger,
 	}
 
 	err := ctrl.NewControllerManagedBy(mgr).For(&v1alpha2.Instance{}).Complete(reconciler)
@@ -114,7 +125,10 @@ type Reconciler struct {
 	DialTimeout     time.Duration
 	RetryInterval   time.Duration
 	RecheckInterval time.Duration
-	Logger          *slog.Logger
+	// Locker gates every write below against zonelease — see
+	// Config.ZoneLease's own doc.
+	Locker *zonelease.Locker
+	Logger *slog.Logger
 }
 
 // Reconcile implements reconcile.Reconciler. Once an Instance is claimed
@@ -146,6 +160,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	if _, claimed := inst.Labels[v1alpha2.LabelClaimedBy]; claimed {
 		return ctrl.Result{}, nil
+	}
+
+	zoneKey := zonelease.Key(inst.Labels[v1alpha2.LabelRegion], inst.Labels[v1alpha2.LabelZone])
+
+	acquired, err := r.Locker.TryAcquire(ctx, zoneKey)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to acquire zone lease for instance %q: %w", inst.Name, err)
+	}
+
+	if !acquired {
+		return ctrl.Result{RequeueAfter: zonelease.Jitter(r.RetryInterval)}, nil
 	}
 
 	if len(inst.Spec.Interfaces) == 0 {

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -27,6 +28,7 @@ import (
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/etcdproxy"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/taloscluster"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/zone"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/zonelease"
 )
 
 const (
@@ -180,6 +182,7 @@ func newHubFakeClient(t *testing.T, objects ...client.Object) client.Client {
 
 	require.NoError(t, v1alpha2.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, coordinationv1.AddToScheme(scheme))
 
 	return secretAdmissionClient{fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -284,6 +287,7 @@ func newReconciler(hubClient client.Client, downstreamBuilder zone.DownstreamCli
 		GRPCEndpoint:            testGRPCEndpoint,
 		GRPCInsecureSkipVerify:  "true",
 		RetryInterval:           testRetryInterval,
+		Locker:                  zonelease.NewLocker(hubClient, "test-hub", "", 0),
 		Logger:                  slog.Default(),
 	}
 }
