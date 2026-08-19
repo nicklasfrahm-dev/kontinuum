@@ -13,7 +13,7 @@
 # package's own doc).
 chart:
   name: "oci://docker.io/envoyproxy/gateway-crds-helm"
-  version: 1.8.3
+  version: 1.9.0
 namespace:
   name: kontinuum-system
 lifecycle:
