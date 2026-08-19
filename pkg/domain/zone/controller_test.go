@@ -198,10 +198,16 @@ func newDownstreamFakeClient(t *testing.T) client.Client {
 	require.NoError(t, gatewayv1.Install(scheme))
 	require.NoError(t, certmanagerv1.AddToScheme(scheme))
 
-	return fake.NewClientBuilder().
+	// Wrapped the same way newHubFakeClient is (see secretAdmissionClient's
+	// own doc) — ensureEtcdIdentity's own re-reconcile path (see auth.go)
+	// reads a downstream identity Secret's .Data back to decide whether to
+	// rotate it, which only ever gets populated by real admission
+	// converting an earlier .StringData write; without this, a second
+	// Reconcile pass would see an apparently cert-less Secret.
+	return secretAdmissionClient{fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&certmanagerv1.Certificate{}).
-		Build()
+		Build()}
 }
 
 func testZoneObject() *v1alpha2.Zone {
@@ -373,8 +379,9 @@ func TestReconcileWaitsForTalosClusterReady(t *testing.T) {
 // TestReconcileReportsNoStorageSecretFound covers zoneStorageDSN's own
 // errGRPCEndpointNotConfigured path: an operator who hasn't set
 // KONTINUUM_SERVER_GRPC_ENDPOINT on the hub has nothing to point a newly
-// joined zone's own storage at, even though its auth keys (see
-// reconcileAuthKeys, which runs regardless) are already in place.
+// joined zone's own storage at, even though its etcd proxy identity (see
+// ensureEtcdIdentity, which runs earlier in the same reconcileInstall
+// pass) is already in place.
 func TestReconcileReportsNoStorageSecretFound(t *testing.T) {
 	t.Parallel()
 
@@ -422,6 +429,74 @@ func TestReconcileInstallsDownstreamObjectsAndWaitsForCertificate(t *testing.T) 
 	assertReadyMirrors(t, got, metav1.ConditionFalse, "WaitingForCertificate")
 
 	assertDownstreamFootprintInstalled(t, downstream)
+}
+
+// etcdIdentityRestartAnnotation mirrors the zone package's own unexported
+// constant of the same name (see workload.go) — this file is package
+// zone_test, so it can't reference it directly.
+const etcdIdentityRestartAnnotation = "kontinuum.sh/etcd-identity-restarted-at"
+
+// TestReconcileRotatesEtcdIdentityAndBumpsRestartAnnotation covers the
+// core rotation contract at the controller level: once a zone's own
+// identity is due (backdated here to simulate etcdproxy.IdentityRotationInterval
+// having elapsed), the next Reconcile pass must deliver a brand-new
+// keypair downstream and bump the Deployment's own pod-template restart
+// annotation so the already-running pod actually picks it up — and that
+// annotation must survive ensureDeployment's own wholesale Spec.Template
+// overwrite (see workload.go's own doc on etcdIdentityRestartAnnotation
+// for why ordering matters here).
+func TestReconcileRotatesEtcdIdentityAndBumpsRestartAnnotation(t *testing.T) {
+	t.Parallel()
+
+	kontinuum, kontinuumSecret := registeredKontinuum("hub")
+	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
+		kontinuum, kontinuumSecret)
+	downstream := newDownstreamFakeClient(t)
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: downstream})
+
+	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	var deploymentBefore appsv1.Deployment
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &deploymentBefore))
+	assert.NotContains(t, deploymentBefore.Spec.Template.Annotations, etcdIdentityRestartAnnotation)
+
+	var downstreamIdentityBefore corev1.Secret
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: etcdproxy.IdentitySecretName, Namespace: testDownstreamNamespace}, &downstreamIdentityBefore))
+
+	var hubIdentitySecret corev1.Secret
+	require.NoError(t, hubClient.Get(t.Context(),
+		client.ObjectKey{Name: etcdproxy.AuthSecretName(testZoneName), Namespace: v1alpha2.KontinuumSystemNamespace},
+		&hubIdentitySecret))
+
+	pair, ok := etcdproxy.ParsePublicSecret(&hubIdentitySecret)
+	require.True(t, ok)
+
+	// Backdate Current past its own DueAt, as if IdentityRotationInterval
+	// had genuinely elapsed since the first Reconcile issued it.
+	staleCurrent := pair.Current
+	staleCurrent.IssuedAt = time.Now().Add(-etcdproxy.IdentityRotationInterval - time.Minute)
+	backdated := etcdproxy.BuildPublicSecret(testZoneName, v1alpha2.KontinuumSystemNamespace,
+		etcdproxy.IdentityPair{Current: staleCurrent, Previous: pair.Previous})
+	backdated.ResourceVersion = hubIdentitySecret.ResourceVersion
+	require.NoError(t, hubClient.Update(t.Context(), backdated))
+
+	_, err = reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	var downstreamIdentityAfter corev1.Secret
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: etcdproxy.IdentitySecretName, Namespace: testDownstreamNamespace}, &downstreamIdentityAfter))
+	assert.NotEqual(t, downstreamIdentityBefore.Data[corev1.TLSCertKey], downstreamIdentityAfter.Data[corev1.TLSCertKey],
+		"rotation must deliver a brand-new private key downstream")
+
+	var deploymentAfter appsv1.Deployment
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &deploymentAfter))
+	assert.Contains(t, deploymentAfter.Spec.Template.Annotations, etcdIdentityRestartAnnotation,
+		"a rotation must force a rolling restart so the already-running pod picks up its new key")
 }
 
 // TestReconcileSkipsNetworkInstallWhenDomainUnset covers issue #98's own
@@ -561,14 +636,22 @@ func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) 
 	require.NoError(t, downstream.Get(t.Context(),
 		client.ObjectKey{Name: testDownstreamEnvName, Namespace: testDownstreamNamespace}, &secret))
 	// The zone's own storage no longer carries a copy of the hub's raw
-	// database DSN (see zoneStorageDSN's own doc) — it's an
+	// database DSN (see zoneStorageDSN's own doc) — it's a plain
 	// etcdproxy.BuildRelayDSN pointing back at the hub's own etcd gRPC
-	// proxy, carrying this zone's own (randomly generated, so not
-	// asserted verbatim) current auth key.
-	zoneName, _, hubEndpoint, ok := etcdproxy.ParseRelayDSN(secret.StringData["KONTINUUM_SERVER_STORAGE"])
+	// proxy, carrying no credential of its own (see that function's own
+	// doc for why — the zone's actual identity lives in its own mounted
+	// kubernetes.io/tls Secret instead, asserted separately below).
+	zoneName, hubEndpoint, ok := etcdproxy.ParseRelayDSN(string(secret.Data["KONTINUUM_SERVER_STORAGE"]))
 	require.True(t, ok, "KONTINUUM_SERVER_STORAGE must be a valid etcdproxy relay DSN")
 	assert.Equal(t, testZoneName, zoneName)
 	assert.Equal(t, testGRPCEndpoint, hubEndpoint)
+
+	var identitySecret corev1.Secret
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: etcdproxy.IdentitySecretName, Namespace: testDownstreamNamespace}, &identitySecret))
+	assert.Equal(t, corev1.SecretTypeTLS, identitySecret.Type)
+	assert.NotEmpty(t, identitySecret.Data[corev1.TLSCertKey])
+	assert.NotEmpty(t, identitySecret.Data[corev1.TLSPrivateKeyKey])
 
 	var configMap corev1.ConfigMap
 	require.NoError(t, downstream.Get(t.Context(),
@@ -715,12 +798,12 @@ func TestReconcileFlipsReadyOnceKontinuumJoinsRegistry(t *testing.T) {
 
 	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
-	// No longer a bare 0s once fully Ready: reconcileAuthKeys' own requeue
-	// deadline (see Reconcile) now always folds in, keeping the Zone
-	// reconciling for its whole lifetime so its auth keys keep rotating —
-	// see TestReconcileKeepsRequeuingForAuthKeyRotationOnceReady for that
-	// behavior's own dedicated coverage.
-	assert.LessOrEqual(t, result.RequeueAfter, 5*time.Minute)
+	// No longer a bare 0s once fully Ready: reconcileIdentityRotationSchedule's
+	// own requeue deadline (see Reconcile) now always folds in, keeping the
+	// Zone reconciling for its whole lifetime so its etcd proxy identity
+	// keeps rotating. 30*time.Minute mirrors the zone package's own
+	// unexported identityCheckInterval.
+	assert.LessOrEqual(t, result.RequeueAfter, 30*time.Minute)
 	assert.Positive(t, result.RequeueAfter)
 
 	var got v1alpha2.Zone

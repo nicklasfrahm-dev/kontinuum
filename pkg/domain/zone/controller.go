@@ -285,26 +285,26 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
-	// Ensured/rotated regardless of install progress — a zone's own auth
-	// credential needs to exist (and later, keep rotating) for the whole
-	// lifetime of the Zone, not just while it's still being brought up. Its
-	// own requeue deadline is folded into whatever the rest of Reconcile
-	// decides below (see earliestRequeue), including once everything else
-	// is fully Ready and would otherwise stop requeuing altogether.
-	authRequeue, err := r.reconcileAuthKeys(ctx, &zoneObj)
+	// Checked regardless of install progress — a zone's own etcd proxy
+	// identity needs to keep rotating for the whole lifetime of the Zone,
+	// not just while it's still being brought up. Its own requeue deadline
+	// is folded into whatever the rest of Reconcile decides below (see
+	// earliestRequeue), including once everything else is fully Ready and
+	// would otherwise stop requeuing altogether.
+	identityRequeue, err := r.reconcileIdentityRotationSchedule(ctx, &zoneObj)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to reconcile auth keys for zone %q: %w", zoneObj.Name, err)
+		return ctrl.Result{}, fmt.Errorf("failed to check identity rotation schedule for zone %q: %w", zoneObj.Name, err)
 	}
 
 	result, err := r.reconcileClusterAndInstall(ctx, &zoneObj)
 
-	return earliestRequeue(result, authRequeue), err
+	return earliestRequeue(result, identityRequeue), err
 }
 
 // reconcileClusterAndInstall is Reconcile's own former body, factored out
-// so reconcileAuthKeys' own requeue deadline (see Reconcile) can be folded
-// into whatever this decides without every early return inside it needing
-// to know about that separately.
+// purely to keep Reconcile's own cyclomatic complexity down — see
+// Reconcile's own doc for identityRequeue, folded in by its one caller
+// there rather than threaded through every branch here.
 func (r *Reconciler) reconcileClusterAndInstall(ctx context.Context, zoneObj *v1alpha2.Zone) (ctrl.Result, error) {
 	var cluster v1alpha2.TalosCluster
 
@@ -332,20 +332,44 @@ func (r *Reconciler) reconcileClusterAndInstall(ctx context.Context, zoneObj *v1
 	return r.reconcileInstall(ctx, zoneObj, &cluster)
 }
 
-// earliestRequeue folds authRequeue (see reconcileAuthKeys) into result,
-// keeping whichever of the two would fire sooner. A zero authRequeue means
-// "no preference" (reconcileAuthKeys hit an error, already surfaced by its
-// own caller) and leaves result untouched.
-func earliestRequeue(result ctrl.Result, authRequeue time.Duration) ctrl.Result {
-	if authRequeue <= 0 {
+// earliestRequeue folds identityRequeue (see
+// reconcileIdentityRotationSchedule) into result, keeping whichever of the
+// two would fire sooner. A zero identityRequeue means "no preference" (no
+// identity issued yet, or reconcileIdentityRotationSchedule hit an error
+// already surfaced by its own caller) and leaves result untouched.
+func earliestRequeue(result ctrl.Result, identityRequeue time.Duration) ctrl.Result {
+	if identityRequeue <= 0 {
 		return result
 	}
 
-	if result.RequeueAfter == 0 || authRequeue < result.RequeueAfter {
-		result.RequeueAfter = authRequeue
+	if result.RequeueAfter == 0 || identityRequeue < result.RequeueAfter {
+		result.RequeueAfter = identityRequeue
 	}
 
 	return result
+}
+
+// prepareZoneStorage ensures zoneObj's own etcd proxy identity (see
+// ensureEtcdIdentity) and resolves the KONTINUUM_SERVER_STORAGE value that
+// depends on it (see zoneStorageDSN) — split out of reconcileInstall
+// purely to keep its own cyclomatic complexity down; both steps report
+// failure identically to their one caller (Installed=False/
+// NoStorageSecretFound), so collapsing them into a single error return
+// here removes a duplicated branch there.
+func (r *Reconciler) prepareZoneStorage(
+	ctx context.Context, downstream client.Client, zoneObj *v1alpha2.Zone,
+) (string, bool, error) {
+	rotatedIdentity, err := r.ensureEtcdIdentity(ctx, downstream, zoneObj)
+	if err != nil {
+		return "", false, err
+	}
+
+	storage, err := r.zoneStorageDSN(zoneObj)
+	if err != nil {
+		return "", false, err
+	}
+
+	return storage, rotatedIdentity, nil
 }
 
 // reconcileInstall installs kontinuum's downstream footprint onto zoneObj's own
@@ -376,7 +400,7 @@ func (r *Reconciler) reconcileInstall(
 		return ctrl.Result{}, fmt.Errorf("failed to build downstream client for %q: %w", zoneObj.Name, err)
 	}
 
-	storage, err := r.zoneStorageDSN(ctx, zoneObj)
+	storage, rotatedIdentity, err := r.prepareZoneStorage(ctx, downstream, zoneObj)
 	if err != nil {
 		r.Logger.Warn("no storage credentials to propagate yet", "zone", zoneObj.Name, "error", err)
 
@@ -409,6 +433,17 @@ func (r *Reconciler) reconcileInstall(
 	err = r.installWorkload(ctx, downstream, zoneObj, storage, image, hostname)
 	if err != nil {
 		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonInstallFailed, err.Error())
+	}
+
+	// Must come after installWorkload: ensureDeployment's own update path
+	// replaces the pod template wholesale (see workload.go's own doc on
+	// etcdIdentityRestartAnnotation), which would otherwise discard this
+	// annotation if it were set any earlier in this same pass.
+	if rotatedIdentity {
+		err = bumpEtcdIdentityRestartAnnotation(ctx, downstream, time.Now())
+		if err != nil {
+			return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonInstallFailed, err.Error())
+		}
 	}
 
 	if !hasDomain {

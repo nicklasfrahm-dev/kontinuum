@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"golang.org/x/mod/semver"
 	appsv1 "k8s.io/api/apps/v1"
@@ -12,6 +13,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/etcdproxy"
 )
 
 // downstreamNamespace is the namespace this package installs everything
@@ -190,6 +193,12 @@ const (
 	tmpVolumeMountPath = "/tmp"
 )
 
+// etcdIdentityVolumeName names the read-only volume buildDeployment mounts
+// etcdproxy.IdentitySecretName's own kubernetes.io/tls Secret through, at
+// etcdproxy.IdentityMountPath — see that constant's own doc for why the
+// mount path itself lives in pkg/domain/etcdproxy rather than here.
+const etcdIdentityVolumeName = "etcd-identity"
+
 // podSecurityContext and containerSecurityContext satisfy the
 // "restricted" Pod Security Standard: no privilege escalation, every
 // Linux capability dropped, a non-root user, the runtime's default
@@ -282,11 +291,15 @@ func buildDeployment(namespace, image string) *appsv1.Deployment {
 						},
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: tmpVolumeName, MountPath: tmpVolumeMountPath},
+							{Name: etcdIdentityVolumeName, MountPath: etcdproxy.IdentityMountPath, ReadOnly: true},
 						},
 					}},
 					Volumes: []corev1.Volume{
 						{Name: tmpVolumeName, VolumeSource: corev1.VolumeSource{
 							EmptyDir: &corev1.EmptyDirVolumeSource{},
+						}},
+						{Name: etcdIdentityVolumeName, VolumeSource: corev1.VolumeSource{
+							Secret: &corev1.SecretVolumeSource{SecretName: etcdproxy.IdentitySecretName},
 						}},
 					},
 				},
@@ -320,6 +333,44 @@ func ensureDeployment(ctx context.Context, downstream client.Client, namespace, 
 
 	if err != nil {
 		return fmt.Errorf("failed to create %q deployment: %w", deploymentName, err)
+	}
+
+	return nil
+}
+
+// etcdIdentityRestartAnnotation is bumped on the kontinuum Deployment's own
+// pod template whenever ensureEtcdIdentity rotates a zone's identity — the
+// zone's own kontinuum-server caches its private key in memory at startup
+// (see pkg/cli/serve.go's resolveStorageDSN), so a rotated key only takes
+// effect once the pod restarts; bumping this annotation is what forces
+// that rolling restart. Must be applied *after* ensureDeployment in any
+// given reconcile pass — ensureDeployment's own update path replaces
+// Spec.Template wholesale (see its own Update call above), which would
+// otherwise silently discard this annotation.
+const etcdIdentityRestartAnnotation = "kontinuum.sh/etcd-identity-restarted-at"
+
+// bumpEtcdIdentityRestartAnnotation forces a rolling restart of the
+// kontinuum Deployment by stamping its own pod template with restartedAt
+// — see etcdIdentityRestartAnnotation's own doc.
+func bumpEtcdIdentityRestartAnnotation(ctx context.Context, downstream client.Client, restartedAt time.Time) error {
+	var deployment appsv1.Deployment
+
+	key := client.ObjectKey{Name: deploymentName, Namespace: downstreamNamespace}
+
+	err := downstream.Get(ctx, key, &deployment)
+	if err != nil {
+		return fmt.Errorf("failed to get %q deployment: %w", deploymentName, err)
+	}
+
+	if deployment.Spec.Template.Annotations == nil {
+		deployment.Spec.Template.Annotations = map[string]string{}
+	}
+
+	deployment.Spec.Template.Annotations[etcdIdentityRestartAnnotation] = restartedAt.Format(time.RFC3339Nano)
+
+	err = downstream.Update(ctx, &deployment)
+	if err != nil {
+		return fmt.Errorf("failed to bump restart annotation on %q deployment: %w", deploymentName, err)
 	}
 
 	return nil

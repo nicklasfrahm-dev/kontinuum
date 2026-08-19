@@ -122,6 +122,29 @@
             {{end}}
         </dl>
     </div>
+
+    {{if .HasIdentity}}
+    <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+        <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
+            {{template "icon-key"}}
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider">Etcd proxy identity</h2>
+        </div>
+        <dl class="divide-y divide-neutral-800">
+            <div class="px-6 py-3 flex items-center justify-between gap-4">
+                <dt class="text-sm text-neutral-500">Algorithm</dt>
+                <dd class="text-sm font-medium text-white">Ed25519</dd>
+            </div>
+            <div class="px-6 py-3 flex items-center justify-between gap-4">
+                <dt class="text-sm text-neutral-500">Thumbprint</dt>
+                <dd class="text-xs font-mono font-medium text-white break-all text-right">{{.IdentityThumbprint}}</dd>
+            </div>
+            <div class="px-6 py-3 flex items-center justify-between gap-4">
+                <dt class="text-sm text-neutral-500">Issued</dt>
+                <dd class="text-sm font-medium text-white">{{.IdentityIssuedAge}}</dd>
+            </div>
+        </dl>
+    </div>
+    {{end}}
 </div>
 
 <!-- Deliberately outside #zone-detail-content: that div's own 15s poll

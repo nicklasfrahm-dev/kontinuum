@@ -2,6 +2,7 @@ package etcdproxy
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
 	"fmt"
 	"net"
@@ -12,20 +13,27 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// bearerCredentials attaches "Authorization: Bearer <token>" to every
-// outbound RPC over the connection it's installed on — grpc-go's
-// PerRPCCredentials hook, the client-side counterpart of
-// Proxy.authenticate's own incoming-metadata check.
-type bearerCredentials struct {
-	token                    string
+// jwtCredentials attaches "Authorization: Bearer <jwt>" to every outbound
+// RPC over the connection it's installed on, minting a fresh, short-lived
+// JWT (see SignToken) on every single call — grpc-go's PerRPCCredentials
+// hook is already invoked per-RPC, and ed25519 signing is cheap enough
+// that there's no need to cache and refresh a token instead.
+type jwtCredentials struct {
+	zone                     string
+	key                      ed25519.PrivateKey
 	requireTransportSecurity bool
 }
 
-func (c bearerCredentials) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
-	return map[string]string{AuthorizationMetadataKey: BearerPrefix + c.token}, nil
+func (c jwtCredentials) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
+	token, err := SignToken(c.zone, c.key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign etcd proxy token: %w", err)
+	}
+
+	return map[string]string{AuthorizationMetadataKey: BearerPrefix + token}, nil
 }
 
-func (c bearerCredentials) RequireTransportSecurity() bool {
+func (c jwtCredentials) RequireTransportSecurity() bool {
 	return c.requireTransportSecurity
 }
 
@@ -37,9 +45,9 @@ func (c bearerCredentials) RequireTransportSecurity() bool {
 // ever dials, via libkapi's already-supported "unix://" storage scheme
 // (see storage.Resolve) — from the apiserver's own point of view, this is
 // indistinguishable from talking to a local Kine instance. Every call
-// Relay receives there is forwarded straight through to the hub, with the
-// zone's own bearer credential (see EncodeToken) attached on every
-// outbound RPC. Relay's own local listener needs no authentication of its
+// Relay receives there is forwarded straight through to the hub, with a
+// fresh JWT signed by the zone's own identity key (see SignToken) attached
+// on every outbound RPC. Relay's own local listener needs no authentication of its
 // own — see Proxy's own doc for why Authenticator is left nil here: the
 // only caller able to reach a loopback Unix socket inside this same
 // container is this same process's own apiserver.
@@ -57,11 +65,12 @@ type RelayConfig struct {
 	// see ParseRelayDSN for how a zone's own KONTINUUM_SERVER_STORAGE
 	// value carries this.
 	HubEndpoint string
-	// Zone and Key identify this zone to the hub (see EncodeToken) — Key
-	// is one of the zone's own two currently-valid bearer keys (see
-	// pkg/domain/zone's reconcileAuthKeys).
-	Zone string
-	Key  string
+	// Zone and PrivateKey identify this zone to the hub (see SignToken) —
+	// PrivateKey is this zone's own ed25519 identity key (see
+	// GenerateIdentity and pkg/domain/zone's ensureEtcdIdentity), loaded
+	// from its own mounted kubernetes.io/tls identity Secret.
+	Zone       string
+	PrivateKey ed25519.PrivateKey
 	// Insecure skips TLS entirely on the connection to HubEndpoint — for
 	// local development only; a real deployment's HubEndpoint is expected
 	// to terminate TLS, the same as every other kind of traffic the hub
@@ -109,8 +118,9 @@ func StartRelay(cfg RelayConfig) (*Relay, error) {
 
 	upstream, err := grpc.NewClient(cfg.HubEndpoint,
 		grpc.WithTransportCredentials(transportCreds),
-		grpc.WithPerRPCCredentials(bearerCredentials{
-			token:                    EncodeToken(cfg.Zone, cfg.Key),
+		grpc.WithPerRPCCredentials(jwtCredentials{
+			zone:                     cfg.Zone,
+			key:                      cfg.PrivateKey,
 			requireTransportSecurity: !cfg.Insecure,
 		}),
 	)

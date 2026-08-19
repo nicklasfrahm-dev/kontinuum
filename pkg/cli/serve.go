@@ -417,11 +417,12 @@ const storageRelaySocketPath = "/tmp/kontinuum-storage-relay.sock"
 // that's configured unchanged — postgres://, sqlite://, mysql://, nats://,
 // etcd://, and unix:// are all libkapi's own concern, not this package's.
 // A RelayScheme DSN (see etcdproxy.ParseRelayDSN) is different: it isn't a
-// real storage backend at all, but a zone's own hub-issued credential for
-// reaching the hub's etcd gRPC proxy (see pkg/domain/etcdproxy's own doc
-// for why a zone is given this instead of a database connection string it
-// likely can't use directly) — resolveStorageDSN starts the local
-// etcdproxy.Relay that credential dials through, and returns a plain
+// real storage backend at all, but a zone's own name and its hub's etcd
+// gRPC proxy address (see pkg/domain/etcdproxy's own doc for why a zone is
+// given this instead of a database connection string it likely can't use
+// directly) — resolveStorageDSN loads this zone's own ed25519 private key
+// off its mounted identity Secret (see etcdproxy.IdentityMountPath) and
+// starts the local etcdproxy.Relay that signs with it, returning a plain
 // "unix://" DSN pointed at it instead, which libkapi's own storage
 // resolution already knows how to handle unchanged. The returned cleanup
 // func is always safe to call — a no-op unless a Relay was actually
@@ -433,7 +434,7 @@ const storageRelaySocketPath = "/tmp/kontinuum-storage-relay.sock"
 func resolveStorageDSN(configured, insecureSkipVerify string) (string, func(), error) {
 	noopCleanup := func() {}
 
-	zoneName, key, hubEndpoint, ok := etcdproxy.ParseRelayDSN(configured)
+	zoneName, hubEndpoint, ok := etcdproxy.ParseRelayDSN(configured)
 	if !ok {
 		return configured, noopCleanup, nil
 	}
@@ -444,11 +445,21 @@ func resolveStorageDSN(configured, insecureSkipVerify string) (string, func(), e
 			fmt.Errorf("failed to parse KONTINUUM_SERVER_GRPC_INSECURE_TLS_SKIP_VERIFY: %w", err)
 	}
 
+	keyPEM, err := os.ReadFile(filepath.Join(etcdproxy.IdentityMountPath, corev1.TLSPrivateKeyKey))
+	if err != nil {
+		return "", noopCleanup, fmt.Errorf("failed to read etcd proxy identity key: %w", err)
+	}
+
+	privateKey, err := etcdproxy.LoadPrivateKey(keyPEM)
+	if err != nil {
+		return "", noopCleanup, fmt.Errorf("failed to parse etcd proxy identity key: %w", err)
+	}
+
 	relay, err := etcdproxy.StartRelay(etcdproxy.RelayConfig{
 		SocketPath:         storageRelaySocketPath,
 		HubEndpoint:        hubEndpoint,
 		Zone:               zoneName,
-		Key:                key,
+		PrivateKey:         privateKey,
 		InsecureSkipVerify: skipVerify,
 	})
 	if err != nil {

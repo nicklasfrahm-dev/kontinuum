@@ -24,15 +24,6 @@ import (
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/etcdproxy"
 )
 
-// testCurrentSecretKey/testPreviousSecretKey are the bearer key values this
-// package's tests build fixture zone auth Secrets around — shared across
-// proxy_test.go and verifier_test.go so both draw from the same package-wide
-// constant rather than repeating the literal.
-const (
-	testCurrentSecretKey  = "current-secret"
-	testPreviousSecretKey = "previous-secret"
-)
-
 // fakeKV is a minimal etcdserverpb.KVServer standing in for a hub's own
 // local Kine instance — enough to prove a call issued through
 // Relay -> hub Proxy -> this actually reaches the "real" backend and its
@@ -92,12 +83,12 @@ func newProxyTestHubClient(t *testing.T, objects ...client.Object) client.Client
 	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 }
 
-// admittedAuthSecret builds a zone auth Secret and simulates the real
-// apiserver's own StringData->Data admission conversion, which the fake
-// client doesn't replicate — see TestBuildAndParseAuthSecretRoundTrip's
+// admittedPublicSecret builds a hub-side identity Secret and simulates the
+// real apiserver's own StringData->Data admission conversion, which the
+// fake client doesn't replicate — see TestBuildAndParsePublicSecretRoundTrip's
 // identical note.
-func admittedAuthSecret(zone string, pair etcdproxy.AuthKeyPair) *corev1.Secret {
-	secret := etcdproxy.BuildAuthSecret(zone, "kontinuum-system", pair)
+func admittedPublicSecret(zone string, pair etcdproxy.IdentityPair) *corev1.Secret {
+	secret := etcdproxy.BuildPublicSecret(zone, "kontinuum-system", pair)
 	secret.Data = map[string][]byte{}
 
 	for k, v := range secret.StringData {
@@ -142,20 +133,25 @@ func TestRelayForwardsAuthenticatedCallsToHub(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
-	secret := admittedAuthSecret("eu-eu-1a", etcdproxy.AuthKeyPair{
-		Current:  etcdproxy.AuthKey{Value: testCurrentSecretKey, CreatedAt: now},
-		Previous: etcdproxy.AuthKey{Value: testPreviousSecretKey, CreatedAt: now},
+	current := generateTestIdentity(t)
+	previous := generateTestIdentity(t)
+	secret := admittedPublicSecret("eu-eu-1a", etcdproxy.IdentityPair{
+		Current:  etcdproxy.Identity{CertPEM: current.certPEM, IssuedAt: now},
+		Previous: etcdproxy.Identity{CertPEM: previous.certPEM, IssuedAt: now},
 	})
 
 	hubAddr, store := startTestHub(t, newProxyTestHubClient(t, secret))
 
 	socketPath := filepath.Join(t.TempDir(), "relay.sock")
 
+	currentKey, err := etcdproxy.LoadPrivateKey(current.keyPEM)
+	require.NoError(t, err)
+
 	relay, err := etcdproxy.StartRelay(etcdproxy.RelayConfig{
 		SocketPath:  socketPath,
 		HubEndpoint: hubAddr,
 		Zone:        "eu-eu-1a",
-		Key:         testCurrentSecretKey,
+		PrivateKey:  currentKey,
 		Insecure:    true,
 	})
 	require.NoError(t, err)
@@ -177,28 +173,35 @@ func TestRelayForwardsAuthenticatedCallsToHub(t *testing.T) {
 	assert.Equal(t, []byte("bar"), resp.GetKvs()[0].Value)
 }
 
-// TestRelayAcceptsPreviousKeyDuringOverlap covers Relay presenting the
-// zone's *previous* key (the shape it would still hold, briefly, right
-// after a hub-side rotation it hasn't yet re-read — see
-// pkg/domain/zone's reconcileAuthKeys) — the hub must still accept it.
-func TestRelayAcceptsPreviousKeyDuringOverlap(t *testing.T) {
+// TestRelayAcceptsPreviousIdentityDuringOverlap covers Relay presenting
+// the zone's *previous* identity (the shape it would still hold, briefly,
+// mid-rolling-restart right after a hub-side rotation — see
+// pkg/domain/zone's ensureEtcdIdentity) — the hub must still accept it.
+func TestRelayAcceptsPreviousIdentityDuringOverlap(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
-	secret := admittedAuthSecret("eu-eu-1a", etcdproxy.AuthKeyPair{
-		Current:  etcdproxy.AuthKey{Value: "new-current", CreatedAt: now},
-		Previous: etcdproxy.AuthKey{Value: "still-good-previous", CreatedAt: now.Add(-etcdproxy.RotationInterval)},
+	newCurrent := generateTestIdentity(t)
+	stillGoodPrevious := generateTestIdentity(t)
+	secret := admittedPublicSecret("eu-eu-1a", etcdproxy.IdentityPair{
+		Current: etcdproxy.Identity{CertPEM: newCurrent.certPEM, IssuedAt: now},
+		Previous: etcdproxy.Identity{
+			CertPEM: stillGoodPrevious.certPEM, IssuedAt: now.Add(-etcdproxy.IdentityRotationInterval),
+		},
 	})
 
 	hubAddr, _ := startTestHub(t, newProxyTestHubClient(t, secret))
 
 	socketPath := filepath.Join(t.TempDir(), "relay.sock")
 
+	previousKey, err := etcdproxy.LoadPrivateKey(stillGoodPrevious.keyPEM)
+	require.NoError(t, err)
+
 	relay, err := etcdproxy.StartRelay(etcdproxy.RelayConfig{
 		SocketPath:  socketPath,
 		HubEndpoint: hubAddr,
 		Zone:        "eu-eu-1a",
-		Key:         "still-good-previous",
+		PrivateKey:  previousKey,
 		Insecure:    true,
 	})
 	require.NoError(t, err)
@@ -208,22 +211,24 @@ func TestRelayAcceptsPreviousKeyDuringOverlap(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = localConn.Close() })
 
-	kv := etcdserverpb.NewKVClient(localConn)
+	kvClient := etcdserverpb.NewKVClient(localConn)
 
-	_, err = kv.Range(t.Context(), &etcdserverpb.RangeRequest{Key: []byte("/anything")})
+	_, err = kvClient.Range(t.Context(), &etcdserverpb.RangeRequest{Key: []byte("/anything")})
 	require.NoError(t, err)
 }
 
 // TestHubRejectsWrongBearerKey covers a call reaching the hub's own Proxy
-// directly (bypassing Relay) with a credential that doesn't match either
-// of the zone's two currently-valid keys.
+// directly (bypassing Relay) with a credential signed by a key that isn't
+// either of the zone's two currently-valid identities.
 func TestHubRejectsWrongBearerKey(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
-	secret := admittedAuthSecret("eu-eu-1a", etcdproxy.AuthKeyPair{
-		Current:  etcdproxy.AuthKey{Value: testCurrentSecretKey, CreatedAt: now},
-		Previous: etcdproxy.AuthKey{Value: testPreviousSecretKey, CreatedAt: now},
+	current := generateTestIdentity(t)
+	previous := generateTestIdentity(t)
+	secret := admittedPublicSecret("eu-eu-1a", etcdproxy.IdentityPair{
+		Current:  etcdproxy.Identity{CertPEM: current.certPEM, IssuedAt: now},
+		Previous: etcdproxy.Identity{CertPEM: previous.certPEM, IssuedAt: now},
 	})
 
 	hubAddr, _ := startTestHub(t, newProxyTestHubClient(t, secret))
@@ -232,12 +237,13 @@ func TestHubRejectsWrongBearerKey(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 
-	kv := etcdserverpb.NewKVClient(conn)
+	kvClient := etcdserverpb.NewKVClient(conn)
 
-	bearer := "Bearer " + etcdproxy.EncodeToken("eu-eu-1a", "not-the-right-key")
+	unrelated := generateTestIdentity(t)
+	bearer := "Bearer " + signTestToken(t, unrelated)
 	ctx := metadata.AppendToOutgoingContext(t.Context(), "authorization", bearer)
 
-	_, err = kv.Range(ctx, &etcdserverpb.RangeRequest{Key: []byte("/anything")})
+	_, err = kvClient.Range(ctx, &etcdserverpb.RangeRequest{Key: []byte("/anything")})
 	require.Error(t, err)
 	assert.Equal(t, codes.Unauthenticated, status.Code(err))
 }
@@ -253,9 +259,9 @@ func TestHubRejectsMissingBearerToken(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 
-	kv := etcdserverpb.NewKVClient(conn)
+	kvClient := etcdserverpb.NewKVClient(conn)
 
-	_, err = kv.Range(t.Context(), &etcdserverpb.RangeRequest{Key: []byte("/anything")})
+	_, err = kvClient.Range(t.Context(), &etcdserverpb.RangeRequest{Key: []byte("/anything")})
 	require.Error(t, err)
 	assert.Equal(t, codes.Unauthenticated, status.Code(err))
 }
