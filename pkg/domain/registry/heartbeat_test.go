@@ -3,6 +3,7 @@ package registry_test
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -242,6 +243,129 @@ func TestHeartbeatReregistersIfDeletedExternally(t *testing.T) {
 	assert.Equal(t, v1alpha2.RoleWorker, recreated.Status.Role)
 	assert.Equal(t, "eu", recreated.Spec.Region)
 	assert.Equal(t, e2eZone, recreated.Spec.Zone)
+}
+
+// hammerReconcile repeatedly calls heartbeat.Reconcile for duration, racing
+// Start's own ticker-driven beat — the two entry points
+// TestHeartbeatConcurrentBeatAndReconcileStayConsistent exercises together.
+func hammerReconcile(heartbeat *registry.Heartbeat, req ctrl.Request, duration time.Duration) {
+	deadline := time.Now().Add(duration)
+	for time.Now().Before(deadline) {
+		_, _ = heartbeat.Reconcile(context.Background(), req)
+	}
+}
+
+// churnDelete repeatedly deletes key's Kontinuum object out from under beat
+// and Reconcile for duration — standing in for kubectl/the UI's delete
+// button — so both keep observing the same NotFound at once.
+func churnDelete(fakeClient client.Client, key types.NamespacedName, duration time.Duration) {
+	deadline := time.Now().Add(duration)
+	for time.Now().Before(deadline) {
+		var server v1alpha2.Kontinuum
+
+		err := fakeClient.Get(context.Background(), key, &server)
+		if err == nil {
+			_ = fakeClient.Delete(context.Background(), &server)
+		}
+
+		time.Sleep(testHeartbeatInterval / 2)
+	}
+}
+
+// assertSecretOwnerMatchesServer waits for name's config Secret to settle on
+// an owner reference matching whatever Kontinuum UID is actually stored —
+// the invariant that used to break under the race h.mu now closes.
+func assertSecretOwnerMatchesServer(t *testing.T, fakeClient client.Client, name string) {
+	t.Helper()
+
+	serverKey := types.NamespacedName{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace}
+	secretKey := types.NamespacedName{Name: "kontinuum-" + name, Namespace: v1alpha2.KontinuumSystemNamespace}
+
+	require.Eventually(t, func() bool {
+		var server v1alpha2.Kontinuum
+
+		err := fakeClient.Get(context.Background(), serverKey, &server)
+		if err != nil {
+			return false
+		}
+
+		var secret corev1.Secret
+
+		err = fakeClient.Get(context.Background(), secretKey, &secret)
+		if err != nil {
+			return false
+		}
+
+		return len(secret.OwnerReferences) == 1 && secret.OwnerReferences[0].UID == server.UID
+	}, time.Second, time.Millisecond,
+		"secret's owner reference must settle on whatever Kontinuum UID is actually stored")
+}
+
+// TestHeartbeatConcurrentBeatAndReconcileStayConsistent is the regression
+// test for the intra-process race h.mu closes: before it existed, Start's
+// own ticker (beat) and controller-runtime's watch-triggered Reconcile ran
+// on separate goroutines with no coordination between them, so both could
+// observe the same external deletion at once and each race through
+// reregister/ensureSecret with their own stale in-memory copy — in
+// production this showed up as a Secret whose owner-reference UID pointed
+// at a Kontinuum UID that no longer matched what was actually stored. This
+// drives Start's ticker and a hammering loop of direct Reconcile calls
+// concurrently against an object an independent goroutine keeps deleting
+// out from under both, then asserts the Secret's own owner reference
+// matches whatever Kontinuum UID is actually stored once things settle.
+func TestHeartbeatConcurrentBeatAndReconcileStayConsistent(t *testing.T) {
+	t.Parallel()
+
+	fakeClient := newFakeClient(t)
+
+	heartbeat := &registry.Heartbeat{
+		Client:     fakeClient,
+		Name:       testServerName,
+		Role:       v1alpha2.RoleWorker,
+		Spec:       v1alpha2.KontinuumSpec{Region: "eu", Zone: e2eZone},
+		Interval:   testHeartbeatInterval,
+		Logger:     slog.Default(),
+		SecretData: map[string]string{"KONTINUUM_SERVER_STORAGE": testSecretDataValue},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- heartbeat.Start(ctx) }()
+
+	req := ctrl.Request{NamespacedName: testServerKey()}
+
+	const churnDuration = 50 * testHeartbeatInterval
+
+	var churnGroup sync.WaitGroup
+
+	churnGroup.Add(2)
+
+	go func() {
+		defer churnGroup.Done()
+
+		hammerReconcile(heartbeat, req, churnDuration)
+	}()
+
+	go func() {
+		defer churnGroup.Done()
+
+		churnDelete(fakeClient, testServerKey(), churnDuration)
+	}()
+
+	churnGroup.Wait()
+
+	assertSecretOwnerMatchesServer(t, fakeClient, testServerName)
+
+	cancel()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Start did not return after ctx was canceled")
+	}
 }
 
 func TestHeartbeatReconcileReregistersOnDelete(t *testing.T) {
