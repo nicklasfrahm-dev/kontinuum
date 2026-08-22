@@ -28,6 +28,15 @@ const (
 	//
 	//nolint:gosec // false positive: an env var / secret key name, not a credential value
 	storageSecretKey = "KONTINUUM_SERVER_STORAGE"
+
+	// dnsCredentialSecretKey is the key Config.DNSCredential is stored under
+	// in the Secret status.secretRef points to — extends storageSecretKey's
+	// own convention (matching pkg/config's KONTINUUM_SERVER_DNS_CREDENTIAL
+	// env var name exactly) rather than inventing a new credential-delivery
+	// path — see v1alpha2.KontinuumDNSConfigStatus.Credential's own doc.
+	//
+	//nolint:gosec // false positive: an env var / secret key name, not a credential value
+	dnsCredentialSecretKey = "KONTINUUM_SERVER_DNS_CREDENTIAL"
 )
 
 // Config configures a Controller.
@@ -54,6 +63,12 @@ type Config struct {
 	// it's kept out of status and instead stored in a Secret status.secretRef
 	// points to — see Heartbeat.SecretData.
 	Storage string
+	// DNSCredential is this process's own DNS provider credential, in that
+	// provider's own native format — see
+	// v1alpha2.KontinuumDNSConfigStatus.Credential's own doc. Confidential,
+	// same as Storage, so it's kept out of status and instead stored
+	// alongside it in the Secret status.secretRef points to.
+	DNSCredential string
 	// DisplayConfig is this process's own non-confidential configuration,
 	// written to status.config on every heartbeat — see
 	// v1alpha2.KontinuumConfigStatus.
@@ -109,15 +124,18 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 	}
 
 	heartbeat := &Heartbeat{
-		Client:     mgr.GetClient(),
-		Name:       InstanceName(os.Hostname()),
-		Role:       c.Config.Role,
-		Spec:       v1alpha2.KontinuumSpec{Region: c.Config.Region, Zone: c.Config.Zone},
-		Interval:   c.Config.HeartbeatInterval,
-		Logger:     c.Config.Logger,
-		Version:    c.Config.Version,
-		SecretData: map[string]string{storageSecretKey: c.Config.Storage},
-		Config:     c.Config.DisplayConfig,
+		Client:   mgr.GetClient(),
+		Name:     InstanceName(os.Hostname()),
+		Role:     c.Config.Role,
+		Spec:     v1alpha2.KontinuumSpec{Region: c.Config.Region, Zone: c.Config.Zone},
+		Interval: c.Config.HeartbeatInterval,
+		Logger:   c.Config.Logger,
+		Version:  c.Config.Version,
+		SecretData: map[string]string{
+			storageSecretKey:       c.Config.Storage,
+			dnsCredentialSecretKey: c.Config.DNSCredential,
+		},
+		Config: c.Config.DisplayConfig,
 	}
 
 	combined := &CombinedReconciler{TTL: reconciler, Heartbeat: heartbeat}

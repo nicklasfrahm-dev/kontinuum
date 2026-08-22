@@ -68,14 +68,23 @@ Fans out a new zone's hub-side objects and, once its `TalosCluster` is bootstrap
    `TalosCluster.status.Ready` is true.
 3. **Downstream install** (`pkg/domain/zone`'s `Reconciler`) — once
    `ClusterReady`, builds a client against the zone's own cluster (from the
-   kubeconfig `TalosCluster.status.secretRef` points at) and installs, in
-   order: the `kontinuum-system` namespace; a `kontinuum-env`
-   Secret/ConfigMap; the `kontinuum` Deployment/Service; a cert-manager
-   `ClusterIssuer`; a `Gateway`; a `Certificate`; and an `HTTPRoute` —
-   exposing that zone's own kontinuum-server at
-   `<zone>.<region>.<domain>`. `Installed` only flips `True` once
-   cert-manager's own `Certificate` reports `Ready` — a real signal that
-   TLS issuance actually succeeded, not just that the object was created.
+   kubeconfig `TalosCluster.status.secretRef` points at) and installs the
+   `kontinuum-system` namespace, a `kontinuum-env` Secret/ConfigMap, and the
+   `kontinuum` Deployment/Service unconditionally, then — only once the hub
+   has both a `KONTINUUM_SERVER_DNS_PROVIDER` and `KONTINUUM_SERVER_DNS_CREDENTIAL`
+   configured (see [DNS](#dns-cloudflare-auto-wiring-or-bring-your-own)
+   below) — a cert-manager `ClusterIssuer`; a `Gateway`; a `Certificate`;
+   and an `HTTPRoute`, exposing that zone's own kontinuum-server at
+   `<zone>.<region>.<domain>`. That gate exists because none of those four
+   objects mean anything without DNS actually resolving: the `Certificate`'s
+   own ACME HTTP-01 challenge can only succeed once `<zone>.<region>.<domain>`
+   points at the `Gateway`'s own address, and nothing makes that happen
+   without a DNS provider configured to eventually pick it up — creating
+   them earlier would just leave the `Certificate` stuck `Provisioning`
+   forever, with no actionable next step. `Installed` only flips `True`
+   once cert-manager's own `Certificate` reports `Ready` — a real signal
+   that TLS issuance actually succeeded, not just that the object was
+   created.
 4. **Registry join** (`pkg/domain/zone`'s `Reconciler`, once `Installed`) —
    the reconciler checks the hub's own registry for a `Kontinuum` matching
    this zone's `region`/`zone` with a non-zero heartbeat (see
@@ -144,6 +153,62 @@ controller. This is an unverified assumption worth checking with `kubectl
 get gatewayclass cilium` against a real added zone; if it's ever missing,
 the `Gateway` simply never reports `Accepted`, which is a visible, easy to
 diagnose failure rather than a silent one.
+
+### DNS: Cloudflare auto-wiring, or bring your own
+
+`<zone>.<region>.<domain>` needs to actually resolve to the downstream
+`Gateway`'s own address before the ACME HTTP-01 challenge above can
+succeed, so the `zone` controller requires both `KONTINUUM_SERVER_DNS_PROVIDER`
+and `KONTINUUM_SERVER_DNS_CREDENTIAL` to be configured on the hub before it
+creates the `ClusterIssuer`/`Gateway`/`Certificate`/`HTTPRoute` at all (see
+stage 3 above) — without them, nothing would ever make
+`<zone>.<region>.<domain>` resolve, and a `Certificate` created anyway
+would just sit `Provisioning` forever. Until both are set, a Zone with
+`spec.domain` configured stays `Installed=False/WaitingForDNSConfiguration`.
+
+What happens once they're set depends on `_PROVIDER`:
+
+- **`cloudflare`**: the `zone` controller wires up a working
+  [external-dns](https://github.com/kubernetes-sigs/external-dns) install
+  for you — no `Addon` of your own to write. It upserts
+  `_CREDENTIAL` (a Cloudflare API token) into a `external-dns-cloudflare`
+  Secret on the zone's own downstream cluster, and seeds an `Addon` named
+  `<cluster>-external-dns` (owned by the zone's own `TalosCluster`, so it's
+  garbage-collected with everything else on teardown) whose values set
+  `provider.name: cloudflare` and wire `CF_API_TOKEN` from that Secret. The
+  Secret is kept continuously in sync if `_CREDENTIAL` ever rotates; the
+  Addon's own values are seeded once and left alone after that, so
+  customizing it further (extra flags, a pinned chart version) doesn't get
+  fought on the next reconcile — same hands-off-after-creation convention
+  as the built-in Cilium/cert-manager/gateway-api-crds addons (see
+  `pkg/domain/addon.EnsureBuiltinSeeds`'s own doc).
+- **Anything else**: `_PROVIDER`/`_CREDENTIAL` still unblock `installNetwork`
+  above, but wiring up external-dns itself is left to you — install and
+  configure it yourself against the zone's own downstream cluster. Creating
+  your own `Addon` named `external-dns` (see
+  `pkg/domain/addon/values/external-dns.yaml`) gets you the `crd`-source
+  scaffolding every provider needs in common for free; `spec.values`
+  supplies the provider name/credential, in whatever shape that provider's
+  own external-dns configuration expects. Cloudflare is only the first
+  provider kontinuum auto-wires, not the only one it'll ever support.
+
+Either way, once the downstream `Gateway` has an address, the `zone`
+controller creates/updates a `DNSEndpoint` (the CRD external-dns' own `crd`
+source watches) requesting an A/AAAA/CNAME record — whichever matches the
+`Gateway`'s own address shape — for the zone's hostname. This part stays
+provider-agnostic even for the Cloudflare auto-wiring above: kontinuum
+itself never talks to Route53/Azure DNS/Cloudflare/etc. directly, it just
+makes sure *some* external-dns instance is running and watching that
+`DNSEndpoint`. `Zone`'s own `DNSRecord` status condition tracks this
+independently of `Installed` — see `DNSRecordConditionType`'s own doc in
+`pkg/domain/zone/controller.go`.
+
+`KONTINUUM_SERVER_DNS_DOMAIN`/`_PROVIDER` are non-confidential and show up
+on a registered `Kontinuum`'s own `status.config.server.dns`;
+`KONTINUUM_SERVER_DNS_CREDENTIAL` is opaque (an API token, an access/secret
+key pair, a JSON config blob — whatever the provider you name in
+`_PROVIDER` expects) and, like storage, is redacted from status and instead
+stored in the Secret `status.secretRef` points to.
 
 ### Cluster bootstrap details
 

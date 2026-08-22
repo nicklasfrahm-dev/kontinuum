@@ -146,6 +146,26 @@ type KontinuumDNSConfigStatus struct {
 	// mirroring how it infers Storage from that Secret.
 	// +optional
 	Domain string `default:"" json:"domain"`
+	// Provider selects the external-dns provider a zone's own DNS record is
+	// managed through (e.g. "route53", "azure", "cloudflare") — passed
+	// through untouched to whatever external-dns Addon the operator
+	// configures for it (see pkg/domain/addon/values/external-dns.yaml's own
+	// doc for why kontinuum doesn't wire this in itself). Not confidential,
+	// so — like Domain — it's published here directly. Empty means no DNS
+	// provider is configured; see pkg/domain/zone's own doc for what that
+	// means for a Zone's own DNSEndpoint management.
+	// +optional
+	Provider string `default:"" json:"provider"`
+	// Credential is this provider's own credential, in that provider's own
+	// native format (an API token, an access/secret key pair, a JSON config
+	// blob — whatever that provider expects; kontinuum defines no encoding
+	// of its own for it — see issue #51's own architecture). Confidential:
+	// unlike Domain/Provider, this is never populated here — Config.Redact
+	// always strips it before a value reaches status.config, and the raw
+	// original instead lives in the Secret KontinuumStatus.SecretRef points
+	// to, extending storageSecretKey's own convention.
+	// +optional
+	Credential string `default:"" json:"credential"`
 }
 
 // KontinuumGRPCConfigStatus groups this process's own etcd gRPC proxy

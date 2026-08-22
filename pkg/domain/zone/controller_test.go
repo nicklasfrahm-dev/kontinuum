@@ -47,6 +47,8 @@ const (
 	// testGRPCEndpoint is newReconciler's own Reconciler.GRPCEndpoint —
 	// zoneStorageDSN's own KONTINUUM_SERVER_GRPC_ENDPOINT stand-in.
 	testGRPCEndpoint = "hub.example.com:8080"
+	testACMEEmail    = "ops@example.com"
+	testACMEServer   = "https://acme-v02.api.letsencrypt.org/directory"
 
 	// testDownstreamNamespace/testDownstreamResourceName mirror
 	// pkg/domain/zone's own unexported downstreamNamespace/deploymentName
@@ -197,6 +199,7 @@ func newDownstreamFakeClient(t *testing.T) client.Client {
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	require.NoError(t, gatewayv1.Install(scheme))
 	require.NoError(t, certmanagerv1.AddToScheme(scheme))
+	zone.AddExternalDNSToScheme(scheme)
 
 	// Wrapped the same way newHubFakeClient is (see secretAdmissionClient's
 	// own doc) — ensureEtcdIdentity's own re-reconcile path (see auth.go)
@@ -273,12 +276,33 @@ func joinedKontinuum(name string) (*v1alpha2.Kontinuum, *corev1.Secret) {
 	return kontinuum, secret
 }
 
+// testDNSCredential is a fake DNS provider credential, not a real one.
+//
+//nolint:gosec // false positive: fixture data, not a real credential
+const testDNSCredential = "AKIAEXAMPLE:secret"
+
+// registeredKontinuumWithDNS extends registeredKontinuum with a DNS
+// provider name (non-confidential, published directly on status — see
+// v1alpha2.KontinuumDNSConfigStatus.Provider's own doc) and credential
+// stored under the same Secret as Provider's own doc for why it lives
+// alongside Storage. Named "hub", not parameterized beyond provider: every
+// dns_test.go caller wants the same fixture otherwise, mirroring how those
+// tests never need registeredKontinuum's own multi-Kontinuum flexibility
+// either.
+func registeredKontinuumWithDNS(provider string) (*v1alpha2.Kontinuum, *corev1.Secret) {
+	kontinuum, secret := registeredKontinuum("hub")
+	kontinuum.Status.Config.Server.DNS.Provider = provider
+	secret.Data["KONTINUUM_SERVER_DNS_CREDENTIAL"] = []byte(testDNSCredential)
+
+	return kontinuum, secret
+}
+
 func newReconciler(hubClient client.Client, downstreamBuilder zone.DownstreamClientBuilder) *zone.Reconciler {
 	return &zone.Reconciler{
 		Client:                  hubClient,
 		DownstreamClientBuilder: downstreamBuilder,
-		ACMEEmail:               "ops@example.com",
-		ACMEServer:              "https://acme-v02.api.letsencrypt.org/directory",
+		ACMEEmail:               testACMEEmail,
+		ACMEServer:              testACMEServer,
 		Auth:                    zone.AuthConfig{InsecureAllowAnonymous: "true"},
 		ImageRepo:               testImageRepo,
 		GRPCEndpoint:            testGRPCEndpoint,
@@ -405,7 +429,7 @@ func TestReconcileReportsNoStorageSecretFound(t *testing.T) {
 func TestReconcileInstallsDownstreamObjectsAndWaitsForCertificate(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuum("hub")
+	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderRoute53)
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
 		kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)
@@ -688,7 +712,7 @@ func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) 
 
 	var issuer certmanagerv1.ClusterIssuer
 	require.NoError(t, downstream.Get(t.Context(), client.ObjectKey{Name: testDownstreamResourceName}, &issuer))
-	assert.Equal(t, "ops@example.com", issuer.Spec.ACME.Email)
+	assert.Equal(t, testACMEEmail, issuer.Spec.ACME.Email)
 
 	var gateway gatewayv1.Gateway
 	require.NoError(t, downstream.Get(t.Context(),
@@ -720,7 +744,7 @@ func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) 
 func TestReconcileFlipsInstalledOnceCertificateReady(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuum("hub")
+	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderRoute53)
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
 		kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)
@@ -771,7 +795,7 @@ func TestReconcileFlipsInstalledOnceCertificateReady(t *testing.T) {
 func TestReconcileFlipsReadyOnceKontinuumJoinsRegistry(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuum("hub")
+	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderRoute53)
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
 		kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)
