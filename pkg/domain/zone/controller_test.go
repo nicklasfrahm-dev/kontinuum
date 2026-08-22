@@ -14,6 +14,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -214,6 +215,7 @@ func newDownstreamFakeClient(t *testing.T) client.Client {
 
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, appsv1.AddToScheme(scheme))
+	require.NoError(t, rbacv1.AddToScheme(scheme))
 	require.NoError(t, gatewayv1.Install(scheme))
 	require.NoError(t, certmanagerv1.AddToScheme(scheme))
 
@@ -490,21 +492,16 @@ func TestReconcileInstallsDownstreamObjectsAndWaitsForCertificate(t *testing.T) 
 	assertDownstreamFootprintInstalled(t, downstream)
 }
 
-// etcdIdentityRestartAnnotation mirrors the zone package's own unexported
-// constant of the same name (see workload.go) — this file is package
-// zone_test, so it can't reference it directly.
-const etcdIdentityRestartAnnotation = "kontinuum.sh/etcd-identity-restarted-at"
-
-// TestReconcileRotatesEtcdIdentityAndBumpsRestartAnnotation covers the
-// core rotation contract at the controller level: once a zone's own
-// identity is due (backdated here to simulate etcdproxy.IdentityRotationInterval
-// having elapsed), the next Reconcile pass must deliver a brand-new
-// keypair downstream and bump the Deployment's own pod-template restart
-// annotation so the already-running pod actually picks it up — and that
-// annotation must survive ensureDeployment's own wholesale Spec.Template
-// overwrite (see workload.go's own doc on etcdIdentityRestartAnnotation
-// for why ordering matters here).
-func TestReconcileRotatesEtcdIdentityAndBumpsRestartAnnotation(t *testing.T) {
+// TestReconcileRotatesEtcdIdentity covers the core rotation contract at
+// the controller level: once a zone's own identity is due (backdated here
+// to simulate etcdproxy.IdentityRotationInterval having elapsed), the next
+// Reconcile pass must deliver a brand-new keypair downstream. Unlike the
+// pod-restart scheme this replaced, nothing on the Deployment itself needs
+// to change for that new keypair to take effect — the already-running
+// pod's own etcdproxy.WatchIdentity picks it up directly (exercised at the
+// etcdproxy package level, not here: this controller has no way to run
+// that pod's own process against the fake downstream client).
+func TestReconcileRotatesEtcdIdentity(t *testing.T) {
 	t.Parallel()
 
 	kontinuum, kontinuumSecret := registeredKontinuum("hub")
@@ -515,11 +512,6 @@ func TestReconcileRotatesEtcdIdentityAndBumpsRestartAnnotation(t *testing.T) {
 
 	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
-
-	var deploymentBefore appsv1.Deployment
-	require.NoError(t, downstream.Get(t.Context(),
-		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &deploymentBefore))
-	assert.NotContains(t, deploymentBefore.Spec.Template.Annotations, etcdIdentityRestartAnnotation)
 
 	var downstreamIdentityBefore corev1.Secret
 	require.NoError(t, downstream.Get(t.Context(),
@@ -550,12 +542,6 @@ func TestReconcileRotatesEtcdIdentityAndBumpsRestartAnnotation(t *testing.T) {
 		client.ObjectKey{Name: etcdproxy.IdentitySecretName, Namespace: testDownstreamNamespace}, &downstreamIdentityAfter))
 	assert.NotEqual(t, downstreamIdentityBefore.Data[corev1.TLSCertKey], downstreamIdentityAfter.Data[corev1.TLSCertKey],
 		"rotation must deliver a brand-new private key downstream")
-
-	var deploymentAfter appsv1.Deployment
-	require.NoError(t, downstream.Get(t.Context(),
-		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &deploymentAfter))
-	assert.Contains(t, deploymentAfter.Spec.Template.Annotations, etcdIdentityRestartAnnotation,
-		"a rotation must force a rolling restart so the already-running pod picks up its new key")
 }
 
 // TestReconcileSkipsNetworkInstallWhenDomainUnset covers issue #98's own
@@ -768,6 +754,40 @@ func assertDownstreamEnvConfigMap(t *testing.T, configMap corev1.ConfigMap) {
 // Reconcile pass installs onto the zone's own downstream cluster exists
 // with the expected content — namespace, env Secret/ConfigMap, Deployment/
 // Service, ClusterIssuer, Gateway, and Certificate.
+// etcdIdentityServiceAccountName mirrors the zone package's own unexported
+// constant of the same name (see workload.go) — this file is package
+// zone_test, so it can't reference it directly.
+const etcdIdentityServiceAccountName = "kontinuum-etcd-identity-watcher"
+
+// assertIdentityRBACInstalled checks the ServiceAccount, Role, and
+// RoleBinding ensureIdentityRBAC installs, scoping a joined zone's own pod
+// to read/watch exactly its own identity Secret and nothing else in
+// namespace — see workload.go's own doc for why this replaced the former
+// mounted-Secret-volume approach.
+func assertIdentityRBACInstalled(t *testing.T, downstream client.Client) {
+	t.Helper()
+
+	var sa corev1.ServiceAccount
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: etcdIdentityServiceAccountName, Namespace: testDownstreamNamespace}, &sa))
+
+	var role rbacv1.Role
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: etcdIdentityServiceAccountName, Namespace: testDownstreamNamespace}, &role))
+	require.Len(t, role.Rules, 1)
+	assert.Equal(t, []string{"secrets"}, role.Rules[0].Resources)
+	assert.Equal(t, []string{etcdproxy.IdentitySecretName}, role.Rules[0].ResourceNames,
+		"must be scoped to exactly this one Secret, not every Secret in the namespace")
+	assert.ElementsMatch(t, []string{"get", "list", "watch"}, role.Rules[0].Verbs)
+
+	var binding rbacv1.RoleBinding
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: etcdIdentityServiceAccountName, Namespace: testDownstreamNamespace}, &binding))
+	require.Len(t, binding.Subjects, 1)
+	assert.Equal(t, etcdIdentityServiceAccountName, binding.Subjects[0].Name)
+	assert.Equal(t, etcdIdentityServiceAccountName, binding.RoleRef.Name)
+}
+
 func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) {
 	t.Helper()
 
@@ -795,6 +815,8 @@ func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) 
 	assert.NotEmpty(t, identitySecret.Data[corev1.TLSCertKey])
 	assert.NotEmpty(t, identitySecret.Data[corev1.TLSPrivateKeyKey])
 
+	assertIdentityRBACInstalled(t, downstream)
+
 	var configMap corev1.ConfigMap
 	require.NoError(t, downstream.Get(t.Context(),
 		client.ObjectKey{Name: testDownstreamEnvName, Namespace: testDownstreamNamespace}, &configMap))
@@ -806,6 +828,8 @@ func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) 
 	assert.Equal(t, testImage, deployment.Spec.Template.Spec.Containers[0].Image)
 	assert.Equal(t, corev1.PullIfNotPresent, deployment.Spec.Template.Spec.Containers[0].ImagePullPolicy,
 		"a real semver tag is immutable once published — safe to cache")
+	assert.Equal(t, etcdIdentityServiceAccountName, deployment.Spec.Template.Spec.ServiceAccountName,
+		"the pod must run as the narrowly scoped identity-watching ServiceAccount, not the namespace default")
 
 	var service corev1.Service
 	assert.NoError(t, downstream.Get(t.Context(),

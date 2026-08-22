@@ -81,12 +81,11 @@ func (r *Reconciler) reconcileIdentityRotationSchedule(
 // both sides agree does it check whether rotation is actually due.
 //
 // Returns rotated=true only when this pass actually minted and delivered
-// a brand-new keypair — the caller (see reconcileInstall) still needs to
-// force a rolling restart of the zone's own Deployment so its already-
-// running pod (which only ever reads its mounted private key once, at
-// startup) picks the new one up, but only *after* installWorkload's own
-// ensureDeployment call, which would otherwise overwrite the restart
-// annotation this bumps.
+// a brand-new keypair — purely informational for the caller (see
+// reconcileInstall), which just logs it: the zone's own already-running
+// pod watches its own identity Secret directly (see
+// etcdproxy.WatchIdentity) and picks up the new key on its own, with no
+// restart needed.
 func (r *Reconciler) ensureEtcdIdentity(
 	ctx context.Context, downstream client.Client, zoneObj *v1alpha2.Zone,
 ) (bool, error) {
@@ -110,11 +109,11 @@ func (r *Reconciler) ensureEtcdIdentity(
 
 // issueInitialEtcdIdentity mints zoneObj's very first identity — Current
 // and Previous start out identical, since there's no real "previous" one
-// yet (mirrors the bearer-token scheme this replaced). No restart
-// annotation is needed here: installWorkload's own ensureDeployment call,
-// later in the same reconcileInstall pass, creates the Deployment fresh
-// with this Secret already mounted, rather than restarting an
-// already-running pod.
+// yet (mirrors the bearer-token scheme this replaced). No restart is ever
+// needed here: installWorkload's own ensureDeployment call, later in the
+// same reconcileInstall pass, creates the Deployment fresh, and its pod
+// watches this Secret from the moment it starts (see
+// etcdproxy.WatchIdentity).
 func (r *Reconciler) issueInitialEtcdIdentity(
 	ctx context.Context, downstream client.Client, zoneObj *v1alpha2.Zone,
 ) error {
@@ -203,8 +202,8 @@ func (r *Reconciler) resyncHubPublicSecret(
 
 // rotateEtcdIdentity mints a fresh keypair, delivers its private half to
 // downstream, and demotes oldCurrent into the hub's own Previous slot —
-// see ensureEtcdIdentity's own doc for why the caller, not this function,
-// is responsible for the resulting rolling restart.
+// see ensureEtcdIdentity's own doc for why the caller needs nothing more
+// than this to make the rotation take effect.
 func (r *Reconciler) rotateEtcdIdentity(
 	ctx context.Context, downstream client.Client, zoneObj *v1alpha2.Zone, oldCurrent etcdproxy.Identity,
 ) error {

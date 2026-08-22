@@ -11,13 +11,19 @@
 // storage scheme), no different in shape from talking to a local Kine
 // instance.
 //
-// Each zone's identity is a long-lived ed25519 keypair issued once (see
-// GenerateIdentity), never rotated: the hub keeps only the public half,
-// wrapped in a self-signed certificate (see BuildPublicSecret), and the
-// zone's own downstream cluster keeps the full keypair as a
-// kubernetes.io/tls Secret (see BuildDownstreamIdentitySecret). What
-// actually bounds credential freshness is the JWT's own short exp, not the
-// certificate's — see jwt.go's own doc.
+// Each zone's identity is a long-lived ed25519 keypair, periodically
+// rotated (see IdentityRotationInterval): the hub keeps only the public
+// half of whichever keypair is current (plus the just-superseded one, for
+// a brief overlap window — see IdentityPair), wrapped in a self-signed
+// certificate (see BuildPublicSecret), and the zone's own downstream
+// cluster keeps the full current keypair as a kubernetes.io/tls Secret
+// (see BuildDownstreamIdentitySecret). What actually bounds a single JWT's
+// own freshness is its own short exp, not the certificate's — see jwt.go's
+// own doc — but the certificate itself is what's rotated, and needs
+// verifying, since it's what SignToken's key traces back to. A zone's own
+// Relay reads its own private key through WatchIdentity, not once at
+// startup, so a rotation delivered to its downstream Secret takes effect
+// immediately, with no restart of the process running Relay.
 //
 // The proxy relays KV/Watch/Lease calls verbatim to whatever Kine already
 // exposes on the hub — it never interprets or transforms them — so it

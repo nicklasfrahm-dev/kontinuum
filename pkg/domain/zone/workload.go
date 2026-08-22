@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"golang.org/x/mod/semver"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -227,11 +227,119 @@ const (
 	tmpVolumeMountPath = "/tmp"
 )
 
-// etcdIdentityVolumeName names the read-only volume buildDeployment mounts
-// etcdproxy.IdentitySecretName's own kubernetes.io/tls Secret through, at
-// etcdproxy.IdentityMountPath — see that constant's own doc for why the
-// mount path itself lives in pkg/domain/etcdproxy rather than here.
-const etcdIdentityVolumeName = "etcd-identity"
+// etcdIdentityServiceAccountName names the ServiceAccount buildDeployment
+// runs its pod template as — narrowly scoped, via ensureIdentityRBAC's own
+// Role/RoleBinding, to get/list/watch access on exactly one Secret
+// (etcdproxy.IdentitySecretName). Kubernetes automatically projects a
+// short-lived, audience-bound token for this ServiceAccount into the pod
+// (the "projected service account token" every pod gets once
+// spec.serviceAccountName names one — see corev1.PodSpec's own doc), which
+// etcdproxy.NewInClusterIdentityWatcher uses to authenticate against this
+// same downstream cluster's own API server. This replaces the former
+// mounted-Secret-volume approach (read once at process startup, requiring
+// a rolling restart — see etcdproxy.WatchIdentity's own doc — to pick up a
+// rotated key) with a live watch that needs no restart at all.
+const etcdIdentityServiceAccountName = "kontinuum-etcd-identity-watcher"
+
+// ensureIdentityServiceAccount upserts the ServiceAccount
+// etcdIdentityServiceAccountName names — see that constant's own doc.
+func ensureIdentityServiceAccount(ctx context.Context, downstream client.Client, namespace string) error {
+	sa := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: etcdIdentityServiceAccountName, Namespace: namespace},
+	}
+
+	err := downstream.Create(ctx, sa)
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("failed to ensure %q service account: %w", etcdIdentityServiceAccountName, err)
+	}
+
+	return nil
+}
+
+// ensureIdentityRole upserts the Role granting
+// etcdIdentityServiceAccountName's own ServiceAccount read/watch access to
+// exactly one Secret — etcdproxy.IdentitySecretName, named explicitly via
+// ResourceNames rather than granted over every Secret in namespace, since
+// that's also where ensureSecret's own kontinuum-env Secret (carrying this
+// zone's full configuration, including its storage credential) lives.
+func ensureIdentityRole(ctx context.Context, downstream client.Client, namespace string) error {
+	role := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: etcdIdentityServiceAccountName, Namespace: namespace},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups:     []string{""},
+			Resources:     []string{"secrets"},
+			ResourceNames: []string{etcdproxy.IdentitySecretName},
+			Verbs:         []string{"get", "list", "watch"},
+		}},
+	}
+
+	err := downstream.Create(ctx, role)
+	if apierrors.IsAlreadyExists(err) {
+		var existing rbacv1.Role
+
+		err = downstream.Get(ctx, client.ObjectKeyFromObject(role), &existing)
+		if err != nil {
+			return fmt.Errorf("failed to fetch existing %q role: %w", etcdIdentityServiceAccountName, err)
+		}
+
+		existing.Rules = role.Rules
+
+		err = downstream.Update(ctx, &existing)
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to ensure %q role: %w", etcdIdentityServiceAccountName, err)
+	}
+
+	return nil
+}
+
+// ensureIdentityRoleBinding upserts the RoleBinding tying
+// etcdIdentityServiceAccountName's own ServiceAccount to the Role
+// ensureIdentityRole grants — its own RoleRef/Subjects never change once
+// created, so unlike its sibling ensure funcs this has nothing to update
+// on an already-exists conflict.
+func ensureIdentityRoleBinding(ctx context.Context, downstream client.Client, namespace string) error {
+	binding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: etcdIdentityServiceAccountName, Namespace: namespace},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "Role",
+			Name:     etcdIdentityServiceAccountName,
+		},
+		Subjects: []rbacv1.Subject{{
+			Kind:      rbacv1.ServiceAccountKind,
+			Name:      etcdIdentityServiceAccountName,
+			Namespace: namespace,
+		}},
+	}
+
+	err := downstream.Create(ctx, binding)
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("failed to ensure %q role binding: %w", etcdIdentityServiceAccountName, err)
+	}
+
+	return nil
+}
+
+// ensureIdentityRBAC upserts the ServiceAccount, Role, and RoleBinding
+// buildDeployment's pod template needs to watch its own identity Secret
+// directly — see etcdIdentityServiceAccountName's own doc. Must run before
+// ensureDeployment: a Pod referencing a ServiceAccount that doesn't exist
+// yet fails admission.
+func ensureIdentityRBAC(ctx context.Context, downstream client.Client, namespace string) error {
+	err := ensureIdentityServiceAccount(ctx, downstream, namespace)
+	if err != nil {
+		return err
+	}
+
+	err = ensureIdentityRole(ctx, downstream, namespace)
+	if err != nil {
+		return err
+	}
+
+	return ensureIdentityRoleBinding(ctx, downstream, namespace)
+}
 
 // podSecurityContext and containerSecurityContext satisfy the
 // "restricted" Pod Security Standard: no privilege escalation, every
@@ -308,7 +416,8 @@ func buildDeployment(namespace, image string) *appsv1.Deployment {
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{
-					SecurityContext: podSecurityContext(),
+					ServiceAccountName: etcdIdentityServiceAccountName,
+					SecurityContext:    podSecurityContext(),
 					Containers: []corev1.Container{{
 						Name:            deploymentName,
 						Image:           image,
@@ -325,15 +434,11 @@ func buildDeployment(namespace, image string) *appsv1.Deployment {
 						},
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: tmpVolumeName, MountPath: tmpVolumeMountPath},
-							{Name: etcdIdentityVolumeName, MountPath: etcdproxy.IdentityMountPath, ReadOnly: true},
 						},
 					}},
 					Volumes: []corev1.Volume{
 						{Name: tmpVolumeName, VolumeSource: corev1.VolumeSource{
 							EmptyDir: &corev1.EmptyDirVolumeSource{},
-						}},
-						{Name: etcdIdentityVolumeName, VolumeSource: corev1.VolumeSource{
-							Secret: &corev1.SecretVolumeSource{SecretName: etcdproxy.IdentitySecretName},
 						}},
 					},
 				},
@@ -367,44 +472,6 @@ func ensureDeployment(ctx context.Context, downstream client.Client, namespace, 
 
 	if err != nil {
 		return fmt.Errorf("failed to create %q deployment: %w", deploymentName, err)
-	}
-
-	return nil
-}
-
-// etcdIdentityRestartAnnotation is bumped on the kontinuum Deployment's own
-// pod template whenever ensureEtcdIdentity rotates a zone's identity — the
-// zone's own kontinuum-server caches its private key in memory at startup
-// (see pkg/cli/serve.go's resolveStorageDSN), so a rotated key only takes
-// effect once the pod restarts; bumping this annotation is what forces
-// that rolling restart. Must be applied *after* ensureDeployment in any
-// given reconcile pass — ensureDeployment's own update path replaces
-// Spec.Template wholesale (see its own Update call above), which would
-// otherwise silently discard this annotation.
-const etcdIdentityRestartAnnotation = "kontinuum.sh/etcd-identity-restarted-at"
-
-// bumpEtcdIdentityRestartAnnotation forces a rolling restart of the
-// kontinuum Deployment by stamping its own pod template with restartedAt
-// — see etcdIdentityRestartAnnotation's own doc.
-func bumpEtcdIdentityRestartAnnotation(ctx context.Context, downstream client.Client, restartedAt time.Time) error {
-	var deployment appsv1.Deployment
-
-	key := client.ObjectKey{Name: deploymentName, Namespace: downstreamNamespace}
-
-	err := downstream.Get(ctx, key, &deployment)
-	if err != nil {
-		return fmt.Errorf("failed to get %q deployment: %w", deploymentName, err)
-	}
-
-	if deployment.Spec.Template.Annotations == nil {
-		deployment.Spec.Template.Annotations = map[string]string{}
-	}
-
-	deployment.Spec.Template.Annotations[etcdIdentityRestartAnnotation] = restartedAt.Format(time.RFC3339Nano)
-
-	err = downstream.Update(ctx, &deployment)
-	if err != nil {
-		return fmt.Errorf("failed to bump restart annotation on %q deployment: %w", deploymentName, err)
 	}
 
 	return nil

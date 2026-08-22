@@ -31,10 +31,11 @@ const IdentityRotationInterval = 6 * time.Hour
 
 // IdentityOverlapWindow is how much longer a just-superseded identity
 // keeps being accepted (see Identity.ExpiresAt) after rotation — long
-// enough to cover a rolling restart of the zone's own kontinuum-server
-// Deployment (see pkg/domain/zone's own bumpEtcdIdentityRestartAnnotation),
-// during which the old and new pod may briefly run side by side, each
-// presenting a different identity.
+// enough to cover the delay between the hub delivering a fresh keypair to
+// a zone's own downstream identity Secret and that zone's own Relay
+// actually observing the change through its watch on it (see
+// WatchIdentity), during which it may still sign outbound RPCs with the
+// key it had cached from before.
 const IdentityOverlapWindow = 5 * time.Minute
 
 // certSecretField/issuedAtSecretField name a single identity's own fields

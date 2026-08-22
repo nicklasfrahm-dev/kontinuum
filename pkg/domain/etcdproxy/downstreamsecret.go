@@ -21,13 +21,6 @@ import (
 //nolint:gosec // false positive: an object name, not a credential value
 const IdentitySecretName = "kontinuum-etcd-identity"
 
-// IdentityMountPath is where a zone's own kontinuum-server container mounts
-// its IdentitySecretName volume — shared between
-// pkg/domain/zone/workload.go (which wires the volume/mount onto the
-// Deployment) and pkg/cli/serve.go (which reads the private key back off
-// disk at this same path to build a Relay).
-const IdentityMountPath = "/etc/kontinuum/etcd-identity"
-
 // BuildDownstreamIdentitySecret builds the kubernetes.io/tls Secret a
 // zone's own downstream cluster holds its full ed25519 identity keypair
 // under (see GenerateIdentity) — the private half never leaves this
@@ -48,9 +41,9 @@ func BuildDownstreamIdentitySecret(namespace string, certPEM, keyPEM []byte) *co
 var ErrNoPrivateKey = errors.New("no private key found in PEM data")
 
 // LoadPrivateKey parses the ed25519 private key
-// BuildDownstreamIdentitySecret stored PEM(PKCS8)-encoded — used by a
-// zone's own relay (see pkg/cli/serve.go's resolveStorageDSN) to load its
-// own mounted identity Secret off disk.
+// BuildDownstreamIdentitySecret stored PEM(PKCS8)-encoded — used by
+// WatchIdentity to load a zone's own identity Secret, fetched live off its
+// own downstream cluster's API rather than a mounted file.
 func LoadPrivateKey(keyPEM []byte) (ed25519.PrivateKey, error) {
 	block, _ := pem.Decode(keyPEM)
 	if block == nil {
