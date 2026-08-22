@@ -519,32 +519,39 @@ func deleteDNSEndpoint(ctx context.Context, downstream client.Client, namespace,
 //     wiring is needed here: reconcileInstall's own certReady-driven
 //     requeue already covers it.
 //   - DNSEndpoint upserted successfully: True/reasonDNSRecordCreated.
+//
+// The returned bool is whatever the meta.SetStatusCondition call below
+// reported (see setInstalledCondition's own otherChanged doc for why the
+// caller needs it): DNSRecordConditionType is written here, not through
+// its own persistStatus call, so without threading this back, a pass where
+// DNSRecordConditionType changes but InstalledConditionType's own
+// Status/Reason/Message happen not to would never actually get persisted.
 func (r *Reconciler) reconcileDNS(
 	ctx context.Context, zoneObj *v1alpha2.Zone, downstream client.Client, hostname string,
-) error {
+) (bool, error) {
 	address, recordType, ready, err := gatewayAddress(ctx, downstream, downstreamNamespace, gatewayName)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	if !ready {
-		meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
+		changed := meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
 			Type: DNSRecordConditionType, Status: metav1.ConditionFalse, Reason: reasonWaitingForGatewayAddress,
 			Message: "waiting for the downstream gateway to be assigned an address",
 		})
 
-		return nil
+		return changed, nil
 	}
 
 	err = ensureDNSEndpoint(ctx, downstream, downstreamNamespace, dnsEndpointName, hostname, address, recordType)
 	if err != nil {
-		return err
+		return false, err
 	}
 
-	meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
+	changed := meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
 		Type: DNSRecordConditionType, Status: metav1.ConditionTrue, Reason: reasonDNSRecordCreated,
 		Message: "created dns record for " + hostname,
 	})
 
-	return nil
+	return changed, nil
 }
