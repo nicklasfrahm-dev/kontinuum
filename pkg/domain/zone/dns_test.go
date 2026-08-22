@@ -277,7 +277,7 @@ func TestReconcileWiresCloudflareExternalDNSAddon(t *testing.T) {
 
 	var secret corev1.Secret
 	require.NoError(t, downstream.Get(t.Context(), cloudflareCredentialSecretKey(), &secret))
-	assert.Equal(t, testDNSCredential, secret.StringData["apiToken"])
+	assert.Equal(t, testDNSCredential, string(secret.Data["apiToken"]))
 
 	var addon v1alpha2.Addon
 	require.NoError(t, hubClient.Get(t.Context(), externalDNSAddonKey(), &addon))
