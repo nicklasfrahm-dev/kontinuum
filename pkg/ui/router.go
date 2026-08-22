@@ -14,7 +14,10 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"regexp"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,12 +50,14 @@ type NamespaceLister interface {
 type NamespaceListerFactory func(ctx context.Context) (NamespaceLister, error)
 
 // KontinuumClient is the subset of the Kubernetes API the UI needs to get,
-// list, and delete registered kontinuum instances (see pkg/domain/registry,
-// which owns the kontinuums.kontinuum.sh CRD and the objects it acts on).
+// list, create, and delete registered kontinuum instances (see
+// pkg/domain/registry, which owns the kontinuums.kontinuum.sh CRD and the
+// objects it acts on) as well as RBAC objects (see the IAM handlers below).
 // It is satisfied by a controller-runtime client.Client.
 type KontinuumClient interface {
 	Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error
 	List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error
+	Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error
 	Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error
 }
 
@@ -104,9 +109,10 @@ const (
 	pageTalosCluster   = "taloscluster"
 	// pageZoneDetail backs /app/kontinuum.sh/namespaces/{ns}/zones/{name} —
 	// see handleZoneDetail.
-	pageZoneDetail = "zone-detail"
-	pageIAM        = "iam"
-	pageConnect    = "connect"
+	pageZoneDetail   = "zone-detail"
+	pageIAMNamespace = "iam-namespace"
+	pageIAMCluster   = "iam-cluster"
+	pageConnect      = "connect"
 )
 
 // Template data-map keys every page's own render() call shares — layout.html
@@ -196,6 +202,7 @@ func mustParsePage(content ...string) *template.Template {
 		"templates/components/icon_kubernetes.html",
 		"templates/components/icon_shield.html",
 		"templates/components/icon_unplug.html",
+		"templates/components/icon_key.html",
 		"templates/components/icon_logout.html",
 		"templates/components/icon_book_open_text.html",
 		"templates/components/icon_external_link.html",
@@ -209,9 +216,9 @@ func mustParsePage(content ...string) *template.Template {
 	files = append(files, shared...)
 	files = append(files, content...)
 
-	// dict is the only template func made available to every page's
-	// template tree — see templateDict's own doc for why.
-	funcs := template.FuncMap{"dict": templateDict}
+	// dict/hasVerb are the only template funcs made available to every
+	// page's template tree — see templateDict/hasVerb's own docs for why.
+	funcs := template.FuncMap{"dict": templateDict, "hasVerb": hasVerb}
 
 	return template.Must(template.New("").Funcs(funcs).ParseFS(templatesFS, files...))
 }
@@ -276,8 +283,12 @@ func NewRouter(
 			"templates/components/icon_kubernetes.html", "templates/components/icon_server.html",
 			"templates/components/icon_list_checks.html", "templates/components/icon_trash.html",
 			"templates/components/icon_key.html", "templates/components/conditions_table.html"),
-		pageIAM: mustParsePage("templates/iam_content.html",
-			"templates/components/icon_key.html", "templates/components/icon_info.html"),
+		pageIAMNamespace: mustParsePage("templates/iam_namespace_content.html",
+			"templates/components/icon_info.html", "templates/components/role_rows.html",
+			"templates/components/role_add_modal.html", "templates/components/rolebinding_add_modal.html"),
+		pageIAMCluster: mustParsePage("templates/iam_cluster_content.html",
+			"templates/components/icon_info.html", "templates/components/role_rows.html",
+			"templates/components/role_add_modal.html", "templates/components/rolebinding_add_modal.html"),
 		pageConnect: mustParsePage("templates/connect_content.html",
 			"templates/components/icon_terminal.html",
 			"templates/components/copy_snippet.html", "templates/components/icon_copy.html",
@@ -354,7 +365,15 @@ func (r *Router) RegisterRoutes(
 	mux.HandleFunc("DELETE /app/kontinuum.sh/namespaces/{ns}/talosclusters/{name}", wrap(r.handleDeleteTalosCluster))
 	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/talosclusters/{name}/kubeconfig",
 		wrap(r.handleTalosClusterKubeconfigDownload))
-	mux.HandleFunc("GET /app/iam", wrap(r.handleIAM))
+	mux.HandleFunc("GET /app/iam", handleIAMRedirect)
+	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/iam/roles", wrap(r.handleIAMNamespaceRoles))
+	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/iam/rolebindings", wrap(r.handleIAMNamespaceRoleBindings))
+	mux.HandleFunc("POST /app/kontinuum.sh/namespaces/{ns}/iam/roles", wrap(r.handleRoleAdd))
+	mux.HandleFunc("POST /app/kontinuum.sh/namespaces/{ns}/iam/rolebindings", wrap(r.handleRoleBindingAdd))
+	mux.HandleFunc("GET /app/iam/cluster/roles", wrap(r.handleIAMClusterRoles))
+	mux.HandleFunc("GET /app/iam/cluster/rolebindings", wrap(r.handleIAMClusterRoleBindings))
+	mux.HandleFunc("POST /app/iam/cluster/roles", wrap(r.handleClusterRoleAdd))
+	mux.HandleFunc("POST /app/iam/cluster/rolebindings", wrap(r.handleClusterRoleBindingAdd))
 	mux.HandleFunc("GET /app/connect", wrap(r.handleConnect))
 	mux.HandleFunc("GET /app/registry/kubeconfig", wrap(r.handleRegistryKubeconfigDownload))
 
@@ -500,6 +519,17 @@ func handleAppRoot(writer http.ResponseWriter, request *http.Request) {
 // defaultInstancesPath.
 func handleAppHome(writer http.ResponseWriter, request *http.Request) {
 	http.Redirect(writer, request, defaultInstancesPath, http.StatusFound)
+}
+
+// handleIAMRedirect is GET /app/iam's handler — the old IAM page's own URL,
+// kept as a redirect to /app/iam/cluster/rolebindings (the closest
+// equivalent under the new namespaced/cluster-scoped split — see
+// handleIAMClusterRoleBindings) so old bookmarks/links keep working. Left
+// unprotected/unauthenticated like handleAppRoot/handleAppHome: it's a pure
+// redirect that touches no Kubernetes API, so there's nothing here for
+// `protect` to guard.
+func handleIAMRedirect(writer http.ResponseWriter, request *http.Request) {
+	http.Redirect(writer, request, "/app/iam/cluster/rolebindings", http.StatusFound)
 }
 
 // acceptsHTML reports whether request's Accept header prefers HTML, the
@@ -1423,44 +1453,22 @@ func secretDataToYAML(data map[string][]byte) (string, error) {
 	return string(out), nil
 }
 
-// binding is a group-to-role grant rendered as a row on the IAM page — see
-// handleIAM. It reflects a live rbacv1.ClusterRoleBinding kontinuum's
-// admin-group controller manages (see pkg/domain/adminrbac): Subject is the
-// OIDC group, read back from the binding's adminrbac.AdminGroupAnnotation
-// rather than its name, since OIDC group names aren't always valid
-// Kubernetes object names — see adminrbac's own doc. Name and Age identify
-// the underlying ClusterRoleBinding object itself.
-type binding struct {
-	Name    string
-	Subject string
-	Role    string
-	Age     string
+// roleRuleRow is one rbacv1.PolicyRule rendered as a rule's badges on a
+// Role/ClusterRole row — see roleRow.
+type roleRuleRow struct {
+	APIGroups []string
+	Resources []string
+	Verbs     []string
 }
 
-// handleIAM is GET /app/iam's handler. When OIDC is configured, it lists
-// the live ClusterRoleBindings kontinuum's admin-group controller manages
-// (see pkg/domain/adminrbac) — real RBAC objects a cluster-admin can also
-// inspect with `kubectl get clusterrolebindings`, rather than rows
-// recomputed from cfg.OIDC.AdminGroups.
-func (r *Router) handleIAM(writer http.ResponseWriter, request *http.Request) {
-	var bindings []binding
-
-	if r.authEnabled {
-		var err error
-
-		bindings, err = r.listAdminGroupBindings(writer, request)
-		if err != nil {
-			return
-		}
+// roleRuleRowsFrom maps rules to their display form, preserving order.
+func roleRuleRowsFrom(rules []rbacv1.PolicyRule) []roleRuleRow {
+	rows := make([]roleRuleRow, 0, len(rules))
+	for _, rule := range rules {
+		rows = append(rows, roleRuleRow{APIGroups: rule.APIGroups, Resources: rule.Resources, Verbs: rule.Verbs})
 	}
 
-	r.render(writer, request, pageIAM, map[string]any{
-		dataKeyTitle:       "IAM",
-		dataKeyActiveMenu:  "iam",
-		dataKeyVersion:     r.version,
-		dataKeyAuthEnabled: r.authEnabled,
-		"Bindings":         bindings,
-	})
+	return rows
 }
 
 // handleConnect is GET /app/connect's handler — it renders the kubectl
@@ -1479,52 +1487,824 @@ func (r *Router) handleConnect(writer http.ResponseWriter, request *http.Request
 	})
 }
 
-// listAdminGroupBindings lists the ClusterRoleBindings labeled as managed by
-// adminrbac.ManagedByValue and maps them to binding rows, sorted by
-// subject. On error, it writes the appropriate HTTP response itself (same
-// as renderRegistry) and returns a non-nil error so the caller knows not to
-// render the page.
-func (r *Router) listAdminGroupBindings(writer http.ResponseWriter, request *http.Request) ([]binding, error) {
-	kontinuums, err := r.kontinuumsFor(request.Context())
-	if err != nil {
-		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+// roleRow is a Role or ClusterRole rendered as a row on the IAM "Roles"
+// tabs — see handleIAMNamespaceRoles/handleIAMClusterRoles. Namespace is
+// empty for a ClusterRole.
+type roleRow struct {
+	Name      string
+	Namespace string
+	Rules     []roleRuleRow
+	Age       string
+}
 
-		return nil, err
+// roleNames extracts every roles' Name, in the same order — used to
+// populate the "Add role binding" modal's role-ref dropdown.
+func roleNames(roles []roleRow) []string {
+	names := make([]string, 0, len(roles))
+	for _, role := range roles {
+		names = append(names, role.Name)
 	}
 
-	var list rbacv1.ClusterRoleBindingList
+	return names
+}
 
-	err = kontinuums.List(request.Context(), &list,
-		client.MatchingLabels{v1alpha2.LabelManagedBy: adminrbac.ManagedByValue})
+// roleBindingRow is a RoleBinding or ClusterRoleBinding rendered as a row
+// on the IAM "Role bindings" tabs — see
+// handleIAMNamespaceRoleBindings/handleIAMClusterRoleBindings. Namespace is
+// empty for a ClusterRoleBinding. Managed is true for ClusterRoleBindings
+// kontinuum's admin-group controller manages (see pkg/domain/adminrbac) —
+// rendered as a distinct read-only subsection on the cluster bindings page
+// rather than mixed in with everything else.
+type roleBindingRow struct {
+	Name        string
+	Namespace   string
+	Subjects    []string
+	RoleRefKind string
+	RoleRefName string
+	Age         string
+	Managed     bool
+}
+
+// subjectStrings renders subjects as "Kind: Name" display strings.
+func subjectStrings(subjects []rbacv1.Subject) []string {
+	out := make([]string, 0, len(subjects))
+	for _, subject := range subjects {
+		out = append(out, subject.Kind+": "+subject.Name)
+	}
+
+	return out
+}
+
+// listNamespaceRoles lists the Roles in namespace and maps them to rows,
+// sorted by name. On error, it writes the appropriate HTTP response itself
+// (same as renderRegistry) and returns a non-nil error so the caller knows
+// not to render the page.
+func (r *Router) listNamespaceRoles(
+	writer http.ResponseWriter, request *http.Request, kontinuums KontinuumClient, namespace string,
+) ([]roleRow, error) {
+	var list rbacv1.RoleList
+
+	err := kontinuums.List(request.Context(), &list, client.InNamespace(namespace))
 	if err != nil {
-		// Forbidden means the signed-in identity is authenticated but not
-		// authorized — the session itself isn't the problem, but there's
-		// no reason to keep it either, so send the caller back to sign in
-		// rather than leave them stuck on a page they can't use.
 		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
 			r.invalidateSession(writer, request, auth.MapError(err))
 
 			return nil, fmt.Errorf("forbidden: %w", err)
 		}
 
-		http.Error(writer, "failed to list admin group bindings: "+err.Error(), http.StatusBadGateway)
+		http.Error(writer, "failed to list roles: "+err.Error(), http.StatusBadGateway)
 
-		return nil, fmt.Errorf("failed to list admin group bindings: %w", err)
+		return nil, fmt.Errorf("failed to list roles: %w", err)
 	}
 
-	bindings := make([]binding, 0, len(list.Items))
+	roles := make([]roleRow, 0, len(list.Items))
 	for _, item := range list.Items {
-		bindings = append(bindings, binding{
-			Name:    item.Name,
-			Subject: item.Annotations[adminrbac.AdminGroupAnnotation],
-			Role:    item.RoleRef.Name,
-			Age:     formatAge(item.CreationTimestamp.Time),
+		roles = append(roles, roleRow{
+			Name: item.Name, Namespace: item.Namespace,
+			Rules: roleRuleRowsFrom(item.Rules), Age: formatAge(item.CreationTimestamp.Time),
 		})
 	}
 
-	sort.Slice(bindings, func(i, j int) bool { return bindings[i].Subject < bindings[j].Subject })
+	sort.Slice(roles, func(i, j int) bool { return roles[i].Name < roles[j].Name })
+
+	return roles, nil
+}
+
+// listNamespaceRoleBindings lists the RoleBindings in namespace and maps
+// them to rows, sorted by name — see listNamespaceRoles' own doc for the
+// error-handling contract.
+func (r *Router) listNamespaceRoleBindings(
+	writer http.ResponseWriter, request *http.Request, kontinuums KontinuumClient, namespace string,
+) ([]roleBindingRow, error) {
+	var list rbacv1.RoleBindingList
+
+	err := kontinuums.List(request.Context(), &list, client.InNamespace(namespace))
+	if err != nil {
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return nil, fmt.Errorf("forbidden: %w", err)
+		}
+
+		http.Error(writer, "failed to list role bindings: "+err.Error(), http.StatusBadGateway)
+
+		return nil, fmt.Errorf("failed to list role bindings: %w", err)
+	}
+
+	bindings := make([]roleBindingRow, 0, len(list.Items))
+	for _, item := range list.Items {
+		bindings = append(bindings, roleBindingRow{
+			Name: item.Name, Namespace: item.Namespace, Subjects: subjectStrings(item.Subjects),
+			RoleRefKind: item.RoleRef.Kind, RoleRefName: item.RoleRef.Name,
+			Age: formatAge(item.CreationTimestamp.Time),
+		})
+	}
+
+	sort.Slice(bindings, func(i, j int) bool { return bindings[i].Name < bindings[j].Name })
 
 	return bindings, nil
+}
+
+// listClusterRoles lists every ClusterRole and maps them to rows, sorted by
+// name — see listNamespaceRoles' own doc for the error-handling contract.
+// Unfiltered: kontinuum doesn't bootstrap upstream's default ClusterRoles
+// (see pkg/domain/adminrbac's own doc), so this list stays short even
+// without narrowing it to admin-group-managed ones the way the old IAM page
+// did.
+func (r *Router) listClusterRoles(
+	writer http.ResponseWriter, request *http.Request, kontinuums KontinuumClient,
+) ([]roleRow, error) {
+	var list rbacv1.ClusterRoleList
+
+	err := kontinuums.List(request.Context(), &list)
+	if err != nil {
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return nil, fmt.Errorf("forbidden: %w", err)
+		}
+
+		http.Error(writer, "failed to list cluster roles: "+err.Error(), http.StatusBadGateway)
+
+		return nil, fmt.Errorf("failed to list cluster roles: %w", err)
+	}
+
+	roles := make([]roleRow, 0, len(list.Items))
+	for _, item := range list.Items {
+		roles = append(roles, roleRow{
+			Name: item.Name, Rules: roleRuleRowsFrom(item.Rules), Age: formatAge(item.CreationTimestamp.Time),
+		})
+	}
+
+	sort.Slice(roles, func(i, j int) bool { return roles[i].Name < roles[j].Name })
+
+	return roles, nil
+}
+
+// listClusterRoleBindings lists every ClusterRoleBinding and maps them to
+// rows, sorted by name — see listNamespaceRoles' own doc for the
+// error-handling contract. Unlike the old handleIAM/listAdminGroupBindings
+// this replaces, the list is unfiltered — every ClusterRoleBinding is
+// shown, with Managed marking the ones kontinuum's admin-group controller
+// owns (see roleBindingRow's own doc) rather than hiding everything else.
+func (r *Router) listClusterRoleBindings(
+	writer http.ResponseWriter, request *http.Request, kontinuums KontinuumClient,
+) ([]roleBindingRow, error) {
+	var list rbacv1.ClusterRoleBindingList
+
+	err := kontinuums.List(request.Context(), &list)
+	if err != nil {
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return nil, fmt.Errorf("forbidden: %w", err)
+		}
+
+		http.Error(writer, "failed to list cluster role bindings: "+err.Error(), http.StatusBadGateway)
+
+		return nil, fmt.Errorf("failed to list cluster role bindings: %w", err)
+	}
+
+	bindings := make([]roleBindingRow, 0, len(list.Items))
+	for _, item := range list.Items {
+		bindings = append(bindings, roleBindingRow{
+			Name: item.Name, Subjects: subjectStrings(item.Subjects),
+			RoleRefKind: item.RoleRef.Kind, RoleRefName: item.RoleRef.Name,
+			Age:     formatAge(item.CreationTimestamp.Time),
+			Managed: item.Labels[v1alpha2.LabelManagedBy] == adminrbac.ManagedByValue,
+		})
+	}
+
+	sort.Slice(bindings, func(i, j int) bool { return bindings[i].Name < bindings[j].Name })
+
+	return bindings, nil
+}
+
+// handleIAMNamespaceRoles is GET .../iam/roles's handler.
+func (r *Router) handleIAMNamespaceRoles(writer http.ResponseWriter, request *http.Request) {
+	r.renderIAMNamespace(writer, request, "roles")
+}
+
+// handleIAMNamespaceRoleBindings is GET .../iam/rolebindings's handler.
+func (r *Router) handleIAMNamespaceRoleBindings(writer http.ResponseWriter, request *http.Request) {
+	r.renderIAMNamespace(writer, request, "bindings")
+}
+
+// renderIAMNamespace renders pageIAMNamespace for view ("roles" or
+// "bindings"), listing the namespaced Role/RoleBinding objects for the
+// current tenant. Like the old handleIAM, it skips every Kubernetes call
+// when OIDC isn't configured — see iam_namespace_content.html's own notice
+// for why: every request already has full access, so there's nothing
+// meaningful to show or manage.
+func (r *Router) renderIAMNamespace(writer http.ResponseWriter, request *http.Request, view string) {
+	namespace := request.PathValue("ns")
+
+	data := map[string]any{
+		"Title": "IAM", "ActiveMenu": "iam-namespace", "Version": r.version,
+		"AuthEnabled": r.authEnabled, "Namespace": namespace, "View": view,
+	}
+
+	roles, ok := r.loadIAMNamespace(writer, request, namespace, view, data)
+	if !ok {
+		return
+	}
+
+	maps.Copy(data, r.roleAddFormData(namespace, roleAddFields{}, "", ""))
+	maps.Copy(data, r.roleBindingAddFormData(namespace, roleNames(roles), roleBindingAddFields{}, "", ""))
+
+	r.render(writer, request, pageIAMNamespace, data)
+}
+
+// loadIAMNamespace populates data with the namespaced Role list (and, for
+// view "bindings", the RoleBinding list too) renderIAMNamespace needs —
+// split out purely to keep that function's nesting/complexity down. It
+// skips every Kubernetes call and returns (nil, true) when OIDC isn't
+// configured — see renderIAMNamespace's own doc for why. ok is false only
+// when this has already written the response itself (an error or a
+// forbidden-redirect), same contract as listNamespaceRoles.
+func (r *Router) loadIAMNamespace(
+	writer http.ResponseWriter, request *http.Request, namespace, view string, data map[string]any,
+) ([]roleRow, bool) {
+	if !r.authEnabled {
+		return nil, true
+	}
+
+	kontinuums, err := r.kontinuumsFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return nil, false
+	}
+
+	roles, err := r.listNamespaceRoles(writer, request, kontinuums, namespace)
+	if err != nil {
+		return nil, false
+	}
+
+	data["Roles"] = roles
+
+	if view != "bindings" {
+		return roles, true
+	}
+
+	bindings, err := r.listNamespaceRoleBindings(writer, request, kontinuums, namespace)
+	if err != nil {
+		return nil, false
+	}
+
+	data["RoleBindings"] = bindings
+
+	return roles, true
+}
+
+// handleIAMClusterRoles is GET /app/iam/cluster/roles's handler.
+func (r *Router) handleIAMClusterRoles(writer http.ResponseWriter, request *http.Request) {
+	r.renderIAMCluster(writer, request, "roles")
+}
+
+// handleIAMClusterRoleBindings is GET /app/iam/cluster/rolebindings's
+// handler.
+func (r *Router) handleIAMClusterRoleBindings(writer http.ResponseWriter, request *http.Request) {
+	r.renderIAMCluster(writer, request, "bindings")
+}
+
+// renderIAMCluster renders pageIAMCluster for view ("roles" or "bindings")
+// — see renderIAMNamespace's own doc, which this mirrors at cluster scope.
+func (r *Router) renderIAMCluster(writer http.ResponseWriter, request *http.Request, view string) {
+	data := map[string]any{
+		"Title": "IAM", "ActiveMenu": "iam-cluster", "Version": r.version,
+		"AuthEnabled": r.authEnabled, "View": view,
+	}
+
+	roles, ok := r.loadIAMCluster(writer, request, view, data)
+	if !ok {
+		return
+	}
+
+	maps.Copy(data, r.clusterRoleAddFormData(roleAddFields{}, "", ""))
+	maps.Copy(data, r.clusterRoleBindingAddFormData(roleNames(roles), roleBindingAddFields{}, "", ""))
+
+	r.render(writer, request, pageIAMCluster, data)
+}
+
+// loadIAMCluster is loadIAMNamespace's cluster-scoped counterpart.
+func (r *Router) loadIAMCluster(
+	writer http.ResponseWriter, request *http.Request, view string, data map[string]any,
+) ([]roleRow, bool) {
+	if !r.authEnabled {
+		return nil, true
+	}
+
+	kontinuums, err := r.kontinuumsFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return nil, false
+	}
+
+	roles, err := r.listClusterRoles(writer, request, kontinuums)
+	if err != nil {
+		return nil, false
+	}
+
+	data["Roles"] = roles
+
+	if view != "bindings" {
+		return roles, true
+	}
+
+	bindings, err := r.listClusterRoleBindings(writer, request, kontinuums)
+	if err != nil {
+		return nil, false
+	}
+
+	data["RoleBindings"] = bindings
+
+	return roles, true
+}
+
+// maxRoleAddFormBytes bounds the "Add role"/"Add role binding" forms' own
+// body — a handful of short values (plus a modest number of rule rows), not
+// a bulk upload.
+const maxRoleAddFormBytes = 1 << 16
+
+// ruleFieldPattern matches the rule builder's "rules[N][field]" form field
+// names — see role_add_modal.html's own doc for how its "+ Add rule" script
+// produces them, and parseRuleFields for how they're read back.
+var ruleFieldPattern = regexp.MustCompile(`^rules\[(\d+)]\[(apiGroups|resources|verbs)]$`)
+
+// roleRuleFields is one rule row's raw submitted values, preserved as-is
+// (not yet split into a rbacv1.PolicyRule) so a rejected submission can be
+// redisplayed exactly as typed — see buildPolicyRules for the conversion
+// used once a submission is accepted.
+type roleRuleFields struct {
+	APIGroups string
+	Resources string
+	Verbs     []string
+}
+
+// parseRuleFields extracts the rule builder's row values from a parsed
+// form's PostForm, in ascending index order regardless of what order the
+// browser submitted them in.
+func parseRuleFields(form map[string][]string) []roleRuleFields {
+	rows := make(map[int]*roleRuleFields)
+
+	for key, values := range form {
+		matches := ruleFieldPattern.FindStringSubmatch(key)
+		if matches == nil {
+			continue
+		}
+
+		index, err := strconv.Atoi(matches[1])
+		if err != nil {
+			continue
+		}
+
+		row, ok := rows[index]
+		if !ok {
+			row = &roleRuleFields{}
+			rows[index] = row
+		}
+
+		applyRuleField(row, matches[2], values)
+	}
+
+	indices := make([]int, 0, len(rows))
+	for index := range rows {
+		indices = append(indices, index)
+	}
+
+	sort.Ints(indices)
+
+	out := make([]roleRuleFields, 0, len(indices))
+	for _, index := range indices {
+		out = append(out, *rows[index])
+	}
+
+	return out
+}
+
+// applyRuleField stores one "rules[N][field]" form value into row — split
+// out of parseRuleFields purely to keep that function's cyclomatic
+// complexity down.
+func applyRuleField(row *roleRuleFields, field string, values []string) {
+	switch field {
+	case "apiGroups":
+		if len(values) > 0 {
+			row.APIGroups = values[0]
+		}
+	case "resources":
+		if len(values) > 0 {
+			row.Resources = values[0]
+		}
+	case "verbs":
+		row.Verbs = values
+	}
+}
+
+// splitAPIGroups splits s (comma-separated) into apiGroups entries — a
+// blank field means the core API group, rbacv1.PolicyRule's own convention
+// for APIGroups: [""].
+func splitAPIGroups(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return []string{""}
+	}
+
+	return splitCommaList(s)
+}
+
+// splitCommaList splits s on commas, trims whitespace from each part, and
+// drops empty parts.
+func splitCommaList(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+
+		out = append(out, trimmed)
+	}
+
+	return out
+}
+
+// buildPolicyRules converts the rule builder's raw rows into
+// rbacv1.PolicyRules, ready to attach to a new Role/ClusterRole.
+func buildPolicyRules(rules []roleRuleFields) []rbacv1.PolicyRule {
+	out := make([]rbacv1.PolicyRule, 0, len(rules))
+	for _, rule := range rules {
+		out = append(out, rbacv1.PolicyRule{
+			APIGroups: splitAPIGroups(rule.APIGroups),
+			Resources: splitCommaList(rule.Resources),
+			Verbs:     rule.Verbs,
+		})
+	}
+
+	return out
+}
+
+// hasVerb reports whether verbs contains verb — used by the rule builder's
+// verb checkboxes to restore their checked state when redisplaying a
+// rejected "Add role" submission.
+func hasVerb(verbs []string, verb string) bool {
+	return slices.Contains(verbs, verb)
+}
+
+// roleAddFields is "Add role"/"Add cluster role"'s parsed form fields.
+type roleAddFields struct {
+	name  string
+	rules []roleRuleFields
+}
+
+// roleAddFormData is the "role-add-modal-body" fragment's template data for
+// the namespaced Role form, following zoneAddFormData's own pattern.
+// RoleAddURL points the form's hx-post at the right route for namespace, so
+// the same "role-add-modal-body" template works for both the namespaced and
+// cluster-scoped forms.
+func (r *Router) roleAddFormData(namespace string, fields roleAddFields, createdRole, formErr string) map[string]any {
+	return map[string]any{
+		"RoleAddURL": "/app/kontinuum.sh/namespaces/" + namespace + "/iam/roles", "RoleKind": "role",
+		"RoleName": fields.name, "Rules": fields.rules,
+		"CreatedRole": createdRole, "RoleError": formErr,
+	}
+}
+
+// clusterRoleAddFormData is roleAddFormData's cluster-scoped counterpart.
+func (r *Router) clusterRoleAddFormData(fields roleAddFields, createdRole, formErr string) map[string]any {
+	return map[string]any{
+		"RoleAddURL": "/app/iam/cluster/roles", "RoleKind": "cluster role",
+		"RoleName": fields.name, "Rules": fields.rules,
+		"CreatedRole": createdRole, "RoleError": formErr,
+	}
+}
+
+// renderRoleAddModalBody renders just the "role-add-modal-body" fragment
+// (not a full page via layout.html) from page's own template tree — see
+// renderZoneAddModalBody, the precedent this follows.
+func (r *Router) renderRoleAddModalBody(writer http.ResponseWriter, page string, data map[string]any) {
+	var buf bytes.Buffer
+
+	err := r.pages[page].ExecuteTemplate(&buf, "role-add-modal-body", data)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = buf.WriteTo(writer)
+}
+
+// handleRoleAdd is POST .../iam/roles's handler — it creates the submitted
+// Role in the current tenant namespace. On success it swaps the modal body
+// to a success message; on failure it re-renders the form with the
+// submitted values preserved and an error message — see handleZoneAdd, the
+// precedent this follows.
+func (r *Router) handleRoleAdd(writer http.ResponseWriter, request *http.Request) {
+	request.Body = http.MaxBytesReader(writer, request.Body, maxRoleAddFormBytes)
+
+	err := request.ParseForm()
+	if err != nil {
+		http.Error(writer, "failed to parse form: "+err.Error(), http.StatusBadRequest)
+
+		return
+	}
+
+	namespace := request.PathValue("ns")
+	fields := roleAddFields{
+		name: strings.TrimSpace(request.PostFormValue("name")), rules: parseRuleFields(request.PostForm),
+	}
+
+	if fields.name == "" {
+		r.renderRoleAddModalBody(writer, pageIAMNamespace, r.roleAddFormData(namespace, fields, "", "Name is required."))
+
+		return
+	}
+
+	kontinuums, err := r.kontinuumsFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	role := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: fields.name, Namespace: namespace},
+		Rules:      buildPolicyRules(fields.rules),
+	}
+
+	err = kontinuums.Create(request.Context(), role)
+	if err != nil {
+		r.renderRoleAddModalBody(writer, pageIAMNamespace, r.roleAddFormData(namespace, fields, "", err.Error()))
+
+		return
+	}
+
+	r.renderRoleAddModalBody(writer, pageIAMNamespace, r.roleAddFormData(namespace, roleAddFields{}, role.Name, ""))
+}
+
+// handleClusterRoleAdd is POST /app/iam/cluster/roles's handler — see
+// handleRoleAdd, its namespaced counterpart.
+func (r *Router) handleClusterRoleAdd(writer http.ResponseWriter, request *http.Request) {
+	request.Body = http.MaxBytesReader(writer, request.Body, maxRoleAddFormBytes)
+
+	err := request.ParseForm()
+	if err != nil {
+		http.Error(writer, "failed to parse form: "+err.Error(), http.StatusBadRequest)
+
+		return
+	}
+
+	fields := roleAddFields{
+		name: strings.TrimSpace(request.PostFormValue("name")), rules: parseRuleFields(request.PostForm),
+	}
+
+	if fields.name == "" {
+		r.renderRoleAddModalBody(writer, pageIAMCluster, r.clusterRoleAddFormData(fields, "", "Name is required."))
+
+		return
+	}
+
+	kontinuums, err := r.kontinuumsFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	role := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{Name: fields.name},
+		Rules:      buildPolicyRules(fields.rules),
+	}
+
+	err = kontinuums.Create(request.Context(), role)
+	if err != nil {
+		r.renderRoleAddModalBody(writer, pageIAMCluster, r.clusterRoleAddFormData(fields, "", err.Error()))
+
+		return
+	}
+
+	r.renderRoleAddModalBody(writer, pageIAMCluster, r.clusterRoleAddFormData(roleAddFields{}, role.Name, ""))
+}
+
+// roleBindingAddFields is "Add role binding"/"Add cluster role binding"'s
+// parsed form fields.
+type roleBindingAddFields struct {
+	name             string
+	subjectKind      string
+	subjectName      string
+	subjectNamespace string
+	roleRefName      string
+}
+
+// validateRoleBindingFields returns a human-readable error if fields is
+// incomplete/invalid, or "" if it's ready to submit.
+func validateRoleBindingFields(fields roleBindingAddFields) string {
+	validKind := fields.subjectKind == rbacv1.UserKind ||
+		fields.subjectKind == rbacv1.GroupKind || fields.subjectKind == rbacv1.ServiceAccountKind
+
+	switch {
+	case fields.name == "":
+		return "Name is required."
+	case fields.subjectName == "":
+		return "Subject name is required."
+	case fields.roleRefName == "":
+		return "A role is required."
+	case !validKind:
+		return "Subject kind must be User, Group, or ServiceAccount."
+	case fields.subjectKind == rbacv1.ServiceAccountKind && fields.subjectNamespace == "":
+		return "Subject namespace is required for ServiceAccount subjects."
+	default:
+		return ""
+	}
+}
+
+// buildSubject converts fields' subject into a rbacv1.Subject, following
+// the same {Kind, APIGroup: rbacv1.GroupName} shape adminrbac's own
+// createBinding uses for User/Group subjects — ServiceAccount subjects
+// carry no APIGroup but do carry an explicit Namespace instead (Kubernetes
+// never defaults it from the binding's own namespace).
+func buildSubject(fields roleBindingAddFields) rbacv1.Subject {
+	subject := rbacv1.Subject{Kind: fields.subjectKind, Name: fields.subjectName}
+
+	if fields.subjectKind == rbacv1.ServiceAccountKind {
+		subject.Namespace = fields.subjectNamespace
+	} else {
+		subject.APIGroup = rbacv1.GroupName
+	}
+
+	return subject
+}
+
+// roleBindingAddFormData is the "rolebinding-add-modal-body" fragment's
+// template data for the namespaced RoleBinding form — see roleAddFormData's
+// own doc for why AddURL is computed per scope.
+func (r *Router) roleBindingAddFormData(
+	namespace string, roleOptions []string, fields roleBindingAddFields, createdBinding, formErr string,
+) map[string]any {
+	return map[string]any{
+		"RoleBindingAddURL": "/app/kontinuum.sh/namespaces/" + namespace + "/iam/rolebindings",
+		"RoleBindingKind":   "role binding", "Namespace": namespace,
+		"RoleOptions": roleOptions,
+		"BindingName": fields.name, "SubjectKind": fields.subjectKind,
+		"SubjectName": fields.subjectName, "SubjectNamespace": fields.subjectNamespace, "RoleRefName": fields.roleRefName,
+		"CreatedBinding": createdBinding, "BindingError": formErr,
+	}
+}
+
+// clusterRoleBindingAddFormData is roleBindingAddFormData's cluster-scoped
+// counterpart.
+func (r *Router) clusterRoleBindingAddFormData(
+	roleOptions []string, fields roleBindingAddFields, createdBinding, formErr string,
+) map[string]any {
+	return map[string]any{
+		"RoleBindingAddURL": "/app/iam/cluster/rolebindings",
+		"RoleBindingKind":   "cluster role binding",
+		"RoleOptions":       roleOptions,
+		"BindingName":       fields.name, "SubjectKind": fields.subjectKind,
+		"SubjectName": fields.subjectName, "SubjectNamespace": fields.subjectNamespace, "RoleRefName": fields.roleRefName,
+		"CreatedBinding": createdBinding, "BindingError": formErr,
+	}
+}
+
+// renderRoleBindingAddModalBody renders just the "rolebinding-add-modal-body"
+// fragment — see renderRoleAddModalBody, the precedent this follows.
+func (r *Router) renderRoleBindingAddModalBody(writer http.ResponseWriter, page string, data map[string]any) {
+	var buf bytes.Buffer
+
+	err := r.pages[page].ExecuteTemplate(&buf, "rolebinding-add-modal-body", data)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = buf.WriteTo(writer)
+}
+
+// handleRoleBindingAdd is POST .../iam/rolebindings's handler — it creates
+// the submitted RoleBinding in the current tenant namespace, referencing an
+// existing namespaced Role. See handleRoleAdd for the success/failure
+// response shape this follows.
+func (r *Router) handleRoleBindingAdd(writer http.ResponseWriter, request *http.Request) {
+	request.Body = http.MaxBytesReader(writer, request.Body, maxRoleAddFormBytes)
+
+	err := request.ParseForm()
+	if err != nil {
+		http.Error(writer, "failed to parse form: "+err.Error(), http.StatusBadRequest)
+
+		return
+	}
+
+	namespace := request.PathValue("ns")
+	fields := roleBindingAddFields{
+		name:             strings.TrimSpace(request.PostFormValue("name")),
+		subjectKind:      request.PostFormValue("subject-kind"),
+		subjectName:      strings.TrimSpace(request.PostFormValue("subject-name")),
+		subjectNamespace: strings.TrimSpace(request.PostFormValue("subject-namespace")),
+		roleRefName:      request.PostFormValue("role-ref"),
+	}
+
+	kontinuums, err := r.kontinuumsFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	roles, err := r.listNamespaceRoles(writer, request, kontinuums, namespace)
+	if err != nil {
+		return
+	}
+
+	roleOptions := roleNames(roles)
+
+	if formErr := validateRoleBindingFields(fields); formErr != "" {
+		r.renderRoleBindingAddModalBody(writer, pageIAMNamespace,
+			r.roleBindingAddFormData(namespace, roleOptions, fields, "", formErr))
+
+		return
+	}
+
+	binding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: fields.name, Namespace: namespace},
+		Subjects:   []rbacv1.Subject{buildSubject(fields)},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: fields.roleRefName},
+	}
+
+	err = kontinuums.Create(request.Context(), binding)
+	if err != nil {
+		r.renderRoleBindingAddModalBody(writer, pageIAMNamespace,
+			r.roleBindingAddFormData(namespace, roleOptions, fields, "", err.Error()))
+
+		return
+	}
+
+	r.renderRoleBindingAddModalBody(writer, pageIAMNamespace,
+		r.roleBindingAddFormData(namespace, roleOptions, roleBindingAddFields{}, binding.Name, ""))
+}
+
+// handleClusterRoleBindingAdd is POST /app/iam/cluster/rolebindings's
+// handler — see handleRoleBindingAdd, its namespaced counterpart.
+func (r *Router) handleClusterRoleBindingAdd(writer http.ResponseWriter, request *http.Request) {
+	request.Body = http.MaxBytesReader(writer, request.Body, maxRoleAddFormBytes)
+
+	err := request.ParseForm()
+	if err != nil {
+		http.Error(writer, "failed to parse form: "+err.Error(), http.StatusBadRequest)
+
+		return
+	}
+
+	fields := roleBindingAddFields{
+		name:             strings.TrimSpace(request.PostFormValue("name")),
+		subjectKind:      request.PostFormValue("subject-kind"),
+		subjectName:      strings.TrimSpace(request.PostFormValue("subject-name")),
+		subjectNamespace: strings.TrimSpace(request.PostFormValue("subject-namespace")),
+		roleRefName:      request.PostFormValue("role-ref"),
+	}
+
+	kontinuums, err := r.kontinuumsFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	roles, err := r.listClusterRoles(writer, request, kontinuums)
+	if err != nil {
+		return
+	}
+
+	roleOptions := roleNames(roles)
+
+	if formErr := validateRoleBindingFields(fields); formErr != "" {
+		r.renderRoleBindingAddModalBody(writer, pageIAMCluster,
+			r.clusterRoleBindingAddFormData(roleOptions, fields, "", formErr))
+
+		return
+	}
+
+	binding := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: fields.name},
+		Subjects:   []rbacv1.Subject{buildSubject(fields)},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: fields.roleRefName},
+	}
+
+	err = kontinuums.Create(request.Context(), binding)
+	if err != nil {
+		r.renderRoleBindingAddModalBody(writer, pageIAMCluster,
+			r.clusterRoleBindingAddFormData(roleOptions, fields, "", err.Error()))
+
+		return
+	}
+
+	r.renderRoleBindingAddModalBody(writer, pageIAMCluster,
+		r.clusterRoleBindingAddFormData(roleOptions, roleBindingAddFields{}, binding.Name, ""))
 }
 
 // instanceRow is one api/v1alpha2.Instance object rendered as a row on the

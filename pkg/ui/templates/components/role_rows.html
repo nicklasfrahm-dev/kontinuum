@@ -1,0 +1,55 @@
+{{/*
+    role-row renders one roleRow (a Role or ClusterRole — see router.go) as
+    a card: its name/age, then every rule's API groups/resources/verbs as a
+    compact summary line. Shared by iam_namespace_content.html's and
+    iam_cluster_content.html's own "Roles" tab, since both list the exact
+    same shape of row.
+*/}}
+{{define "role-row"}}
+<div class="px-6 py-4">
+    <div class="flex items-center justify-between gap-4 flex-wrap">
+        <span class="text-sm font-medium text-white">{{.Name}}</span>
+        <span class="text-xs text-neutral-600 font-mono">{{.Age}}</span>
+    </div>
+    {{if .Rules}}
+    <div class="mt-2 space-y-1.5">
+        {{range .Rules}}
+        <div class="bg-neutral-800/40 border border-neutral-800 rounded-lg px-3 py-2 text-xs flex flex-wrap gap-x-4 gap-y-1">
+            <span><span class="text-neutral-500">API groups</span> <span class="text-neutral-300">{{range $i, $g := .APIGroups}}{{if $i}}, {{end}}{{if eq $g ""}}core{{else}}{{$g}}{{end}}{{end}}</span></span>
+            <span><span class="text-neutral-500">Resources</span> <span class="text-neutral-300">{{range $i, $x := .Resources}}{{if $i}}, {{end}}{{$x}}{{end}}</span></span>
+            <span><span class="text-neutral-500">Verbs</span> <span class="text-neutral-300">{{range $i, $v := .Verbs}}{{if $i}}, {{end}}{{$v}}{{end}}</span></span>
+        </div>
+        {{end}}
+    </div>
+    {{else}}
+    <p class="mt-2 text-xs text-neutral-600">No rules.</p>
+    {{end}}
+</div>
+{{end}}
+
+{{/*
+    role-binding-row renders one roleBindingRow (a RoleBinding or
+    ClusterRoleBinding — see router.go) as a card: every subject, the role
+    it's bound to, and the binding's own name/age — the same "row +
+    supporting detail line" shape the old iam_content.html used. Shared by
+    iam_namespace_content.html's and iam_cluster_content.html's own "Role
+    bindings" tab.
+*/}}
+{{define "role-binding-row"}}
+<div class="px-6 py-4">
+    <div class="flex items-center justify-between gap-4 flex-wrap">
+        <dt class="flex flex-wrap items-center gap-1.5 text-sm">
+            {{range .Subjects}}
+            <span class="inline-flex items-center gap-1.5 bg-accent/10 border border-accent/30 rounded-full px-2.5 py-1 text-xs font-medium text-accent">{{.}}</span>
+            {{else}}
+            <span class="text-neutral-600 text-xs">No subjects</span>
+            {{end}}
+        </dt>
+        <dd class="flex items-center gap-2 text-sm">
+            <span class="text-neutral-500">{{.RoleRefKind}}</span>
+            <span class="inline-flex items-center gap-1.5 bg-neutral-800 border border-neutral-700 rounded-full px-2.5 py-1 text-xs font-medium text-neutral-300">{{.RoleRefName}}</span>
+        </dd>
+    </div>
+    <p class="mt-2 text-xs text-neutral-600 font-mono">{{.Name}} &middot; {{.Age}}</p>
+</div>
+{{end}}
