@@ -31,6 +31,13 @@ import (
 // stream — not per message — for Watch/LeaseKeepAlive, so a given stream
 // stays pinned to the same underlying connection for its whole lifetime
 // rather than splitting across several.
+//
+// DialPool also disables the ping mechanism itself on every connection it
+// builds (see poolStreamWindowSize's own doc), not just the connection
+// count that used to multiply exposure to it — so the pool size below
+// exists purely for throughput headroom and blast-radius isolation now,
+// not to keep ping-strike risk low; that risk is zero on these connections
+// regardless of how many there are.
 type Pool struct {
 	etcdserverpb.UnimplementedKVServer
 	etcdserverpb.UnimplementedWatchServer
@@ -53,13 +60,43 @@ func NewPool(upstreams []*grpc.ClientConn, auth Authenticator) *Pool {
 	return &Pool{proxies: proxies}
 }
 
+// poolStreamWindowSize and poolConnWindowSize are static HTTP/2
+// flow-control window sizes applied to every connection DialPool builds —
+// the only way to actually turn off grpc-go's automatic bandwidth-delay-
+// product estimator, the thing sending the pings that trip Kine's
+// per-connection ping-strike policy in the first place (see Pool's own
+// doc). grpc-go's own internal/transport/http2_client.go only builds a
+// bdpEst — and only that estimator ever calls for a BDP ping — when
+// dialOptions.StaticWindowSize is false; WithInitialWindowSize and
+// WithInitialConnWindowSize are the two DialOptions that set it true.
+// Static means the window never grows dynamically past this once set, so
+// both are sized generously for a busy Watch stream up front rather than
+// left to grow on demand: poolStreamWindowSize covers one stream's own
+// buffered events, poolConnWindowSize is larger because a single pooled
+// connection carries many concurrent streams at once (see zonePoolSize's
+// own doc on up to ~1000 zones sharing zonePoolSize connections) and needs
+// headroom across all of them, not just one. Starting points, not derived
+// from a hard formula — tune based on real Watch payload sizes and fan-in
+// once deployed.
+const (
+	poolStreamWindowSize = 16 << 20 // 16 MiB
+	poolConnWindowSize   = 64 << 20 // 64 MiB
+)
+
 // DialPool dials size independent connections to target, all using
-// dialOpts, and returns a Pool spreading traffic across them plus a cleanup
+// dialOpts plus a static flow-control window (see poolStreamWindowSize's
+// own doc) that keeps every one of them from ever sending a BDP ping at
+// all, and returns a Pool spreading traffic across them plus a cleanup
 // func closing every one of them. On error, every connection dialed so far
 // is already closed before returning.
 func DialPool(
 	target string, size int, auth Authenticator, dialOpts ...grpc.DialOption,
 ) (*Pool, func(), error) {
+	opts := append([]grpc.DialOption{
+		grpc.WithInitialWindowSize(poolStreamWindowSize),
+		grpc.WithInitialConnWindowSize(poolConnWindowSize),
+	}, dialOpts...)
+
 	conns := make([]*grpc.ClientConn, 0, size)
 
 	closeAll := func() {
@@ -69,7 +106,7 @@ func DialPool(
 	}
 
 	for range size {
-		conn, err := grpc.NewClient(target, dialOpts...)
+		conn, err := grpc.NewClient(target, opts...)
 		if err != nil {
 			closeAll()
 
