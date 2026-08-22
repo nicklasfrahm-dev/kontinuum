@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	coordinationv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -21,6 +23,7 @@ import (
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/zonelease"
 )
 
 const (
@@ -131,6 +134,8 @@ func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
 
 	err := v1alpha2.AddToScheme(scheme)
 	require.NoError(t, err)
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, coordinationv1.AddToScheme(scheme))
 
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -146,6 +151,7 @@ func newReconciler(fakeClient client.Client, discoverer instance.Discoverer) *in
 		DialTimeout:     time.Second,
 		RetryInterval:   testRetryInterval,
 		RecheckInterval: testRecheckInterval,
+		Locker:          zonelease.NewLocker(fakeClient, "test-hub", "", 0),
 		Logger:          slog.Default(),
 	}
 }

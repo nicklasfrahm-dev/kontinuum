@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	coordinationv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/adminrbac"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/zonelease"
 )
 
 const testInterval = 10 * time.Millisecond
@@ -29,7 +32,14 @@ func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
 	err := rbacv1.AddToScheme(scheme)
 	require.NoError(t, err)
 
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, coordinationv1.AddToScheme(scheme))
+
 	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+}
+
+func newLocker(fakeClient client.Client) *zonelease.Locker {
+	return zonelease.NewLocker(fakeClient, "test-hub", "", 0)
 }
 
 // startRunnable starts runnable in a background goroutine and returns a
@@ -88,6 +98,7 @@ func TestReconcileCreatesRoleAndBindingsForConfiguredGroups(t *testing.T) {
 		Client:      fakeClient,
 		AdminGroups: "platform-admins, sre",
 		Interval:    testInterval,
+		Locker:      newLocker(fakeClient),
 		Logger:      slog.Default(),
 	}
 
@@ -145,6 +156,7 @@ func TestReconcileDeletesBindingForRemovedGroup(t *testing.T) {
 		Client:      fakeClient,
 		AdminGroups: "sre",
 		Interval:    testInterval,
+		Locker:      newLocker(fakeClient),
 		Logger:      slog.Default(),
 	}
 
@@ -179,6 +191,7 @@ func TestReconcileLeavesUnmanagedBindingAlone(t *testing.T) {
 		Client:      fakeClient,
 		AdminGroups: "",
 		Interval:    testInterval,
+		Locker:      newLocker(fakeClient),
 		Logger:      slog.Default(),
 	}
 

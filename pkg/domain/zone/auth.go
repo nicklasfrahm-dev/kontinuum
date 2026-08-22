@@ -309,7 +309,7 @@ var errGRPCEndpointNotConfigured = errors.New("this hub has no KONTINUUM_SERVER_
 
 // zoneStorageDSN builds the KONTINUUM_SERVER_STORAGE value zoneObj's own
 // kontinuum-server should run with: an etcdproxy.BuildRelayDSN pointing at
-// this hub's own etcd gRPC proxy (r.GRPCEndpoint — see
+// this hub's own etcd gRPC proxy (r.HubConfig.Server.GRPC.Endpoint — see
 // KontinuumGRPCConfigStatus's own doc for why this is read off the hub's
 // own config rather than inferred from a registered Kontinuum the way
 // storage/domain used to be). Carries no credential of its own — see
@@ -325,11 +325,12 @@ var errGRPCEndpointNotConfigured = errors.New("this hub has no KONTINUUM_SERVER_
 // only ever talks to the hub's own already-public endpoint, authenticated
 // with a credential scoped to that one zone.
 func (r *Reconciler) zoneStorageDSN(zoneObj *v1alpha2.Zone) (string, error) {
-	if r.GRPCEndpoint == "" {
+	endpoint := r.HubConfig.Server.GRPC.Endpoint
+	if endpoint == "" {
 		return "", errGRPCEndpointNotConfigured
 	}
 
-	return etcdproxy.BuildRelayDSN(zoneObj.Name, r.GRPCEndpoint), nil
+	return etcdproxy.BuildRelayDSN(zoneObj.Name, endpoint), nil
 }
 
 // minDuration returns whichever of a/b is smaller.

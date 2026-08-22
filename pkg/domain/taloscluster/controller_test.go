@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -26,6 +27,7 @@ import (
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/taloscluster"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/zonelease"
 )
 
 const (
@@ -155,6 +157,7 @@ func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
 
 	require.NoError(t, v1alpha2.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, coordinationv1.AddToScheme(scheme))
 
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -234,6 +237,7 @@ func newReconciler(fakeClient client.Client, bootstrapper *fakeBootstrapper) *ta
 		// own give-up test, which builds its own Reconciler with this set to
 		// zero instead.
 		TeardownTimeout: testHealthCheckInterval,
+		Locker:          zonelease.NewLocker(fakeClient, "test-hub", "", 0),
 		Logger:          slog.Default(),
 	}
 }

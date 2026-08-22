@@ -19,6 +19,7 @@ import (
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/zone"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/zonelease"
 )
 
 // testTeardownTimeout is generous enough that no test below except
@@ -89,12 +90,11 @@ func TestReconcileTeardownDeletesDownstreamAndTalosCluster(t *testing.T) {
 	reconciler := &zone.Reconciler{
 		Client:                  hubClient,
 		DownstreamClientBuilder: fakeDownstreamClientBuilder{client: downstream},
-		ACMEEmail:               "ops@example.com",
-		ACMEServer:              "https://acme-v02.api.letsencrypt.org/directory",
+		HubConfig:               testHubConfig(),
 		ImageRepo:               testImageRepo,
-		GRPCEndpoint:            testGRPCEndpoint,
 		RetryInterval:           testRetryInterval,
 		TeardownTimeout:         testTeardownTimeout,
+		Locker:                  zonelease.NewLocker(hubClient, "test-hub", "", 0),
 		Logger:                  slog.Default(),
 	}
 
@@ -156,6 +156,7 @@ func TestReconcileTeardownSkipsWhenNeverBootstrapped(t *testing.T) {
 		DownstreamClientBuilder: fakeDownstreamClientBuilder{},
 		RetryInterval:           testRetryInterval,
 		TeardownTimeout:         testTeardownTimeout,
+		Locker:                  zonelease.NewLocker(hubClient, "test-hub", "", 0),
 		Logger:                  slog.Default(),
 	}
 
@@ -185,6 +186,7 @@ func TestReconcileTeardownRemovesFinalizerWhenTalosClusterAlreadyGone(t *testing
 		DownstreamClientBuilder: fakeDownstreamClientBuilder{},
 		RetryInterval:           testRetryInterval,
 		TeardownTimeout:         testTeardownTimeout,
+		Locker:                  zonelease.NewLocker(hubClient, "test-hub", "", 0),
 		Logger:                  slog.Default(),
 	}
 
@@ -217,6 +219,7 @@ func TestReconcileTeardownRetriesWhenDownstreamUnreachable(t *testing.T) {
 		DownstreamClientBuilder: fakeDownstreamClientBuilder{err: assert.AnError},
 		RetryInterval:           testRetryInterval,
 		TeardownTimeout:         testTeardownTimeout,
+		Locker:                  zonelease.NewLocker(hubClient, "test-hub", "", 0),
 		Logger:                  slog.Default(),
 	}
 
@@ -252,6 +255,7 @@ func TestReconcileTeardownGivesUpAfterTimeout(t *testing.T) {
 		DownstreamClientBuilder: fakeDownstreamClientBuilder{err: assert.AnError},
 		RetryInterval:           testRetryInterval,
 		TeardownTimeout:         time.Nanosecond,
+		Locker:                  zonelease.NewLocker(hubClient, "test-hub", "", 0),
 		Logger:                  slog.Default(),
 	}
 

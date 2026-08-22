@@ -17,6 +17,7 @@ import (
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/registry"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/zonelease"
 )
 
 var errTestHostnameUnavailable = errors.New("hostname unavailable")
@@ -126,6 +127,7 @@ func TestCombinedReconcilerDeletesStaleOtherInstanceWithoutTouchingHeartbeat(t *
 		TTL: &registry.TTLReconciler{
 			Client:         fakeClient,
 			StaleThreshold: time.Minute,
+			Locker:         zonelease.NewLocker(fakeClient, "test-hub", "", 0),
 			Logger:         slog.Default(),
 		},
 		Heartbeat: &registry.Heartbeat{
@@ -158,6 +160,7 @@ func TestCombinedReconcilerReregistersOwnDeletedInstance(t *testing.T) {
 		TTL: &registry.TTLReconciler{
 			Client:         fakeClient,
 			StaleThreshold: time.Minute,
+			Locker:         zonelease.NewLocker(fakeClient, "test-hub", "", 0),
 			Logger:         slog.Default(),
 		},
 		Heartbeat: &registry.Heartbeat{
@@ -192,6 +195,7 @@ func TestCombinedReconcilerPreservesTTLRequeueForOwnFreshInstance(t *testing.T) 
 		TTL: &registry.TTLReconciler{
 			Client:         fakeClient,
 			StaleThreshold: time.Minute,
+			Locker:         zonelease.NewLocker(fakeClient, "test-hub", "", 0),
 			Logger:         slog.Default(),
 		},
 		Heartbeat: &registry.Heartbeat{

@@ -13,13 +13,23 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/zonelease"
 )
+
+// ttlLeaseRetryInterval is TTLReconciler's own backoff base (see
+// zonelease.Jitter) when refused zonelease.GlobalKey — this fleet-wide
+// staleness sweep is hub-owned, like adminrbac's ClusterRoleBindings, not
+// scoped to StaleThreshold's own much longer "how stale is too stale"
+// concern.
+const ttlLeaseRetryInterval = 30 * time.Second
 
 // TTLReconciler deletes a Kontinuum object once it has gone longer than
 // StaleThreshold without a heartbeat. Each Kontinuum reconciles its own expiry
-// independently (via ctrl.Result.RequeueAfter) rather than a global sweep,
-// so it is safe to run unmodified from every kontinuum instance — all
-// sharing the same storage backend — with no leader election.
+// independently (via ctrl.Result.RequeueAfter) rather than a global sweep.
+// Every kontinuum instance — the hub and every joined zone's own
+// downstream deployment alike — runs this same reconciler against the same
+// shared storage backend, so its Locker (see Config.ZoneLease's own doc)
+// gates it to only ever actually delete on the hub, via zonelease.GlobalKey.
 //
 // It also cleans up a Kontinuum's config Secret once the Kontinuum itself
 // is gone — see Reconcile's NotFound branch. That Secret already carries an
@@ -34,7 +44,12 @@ import (
 type TTLReconciler struct {
 	Client         client.Client
 	StaleThreshold time.Duration
-	Logger         *slog.Logger
+	// Locker gates every write below against zonelease, via
+	// zonelease.GlobalKey — deleting a stale Kontinuum applies fleet-wide,
+	// not to any one zone's own resources, so it's hub-owned exactly like
+	// adminrbac's ClusterRoleBindings (see Config.ZoneLease's own doc).
+	Locker *zonelease.Locker
+	Logger *slog.Logger
 }
 
 // Reconcile implements reconcile.Reconciler.
@@ -48,6 +63,15 @@ func (r *TTLReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to get server %q: %w", req.Name, err)
+	}
+
+	acquired, err := r.Locker.TryAcquire(ctx, zonelease.GlobalKey)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to acquire zone lease for ttl sweep: %w", err)
+	}
+
+	if !acquired {
+		return ctrl.Result{RequeueAfter: zonelease.Jitter(ttlLeaseRetryInterval)}, nil
 	}
 
 	last := server.Status.LastHeartbeatTime.Time

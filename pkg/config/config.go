@@ -58,6 +58,47 @@ func (c *Config) Defaults() {
 	loadStruct(reflect.ValueOf(c).Elem(), nil, false)
 }
 
+// EnvVar is one leaf field's derived KONTINUUM_-prefixed env-var name (see
+// envName), its current value, and whether the underlying
+// v1alpha2.KontinuumConfigStatus field is tagged `secret:"true"` — see
+// Config.EnvVars.
+type EnvVar struct {
+	Name   string
+	Value  string
+	Secret bool
+}
+
+// EnvVars returns every leaf string field as the KONTINUUM_-prefixed env
+// var that produced it, walking the exact same field paths Load itself
+// reads from (see walkStringFields) — so this can never miss a field Load
+// knows about, or disagree with it on a field's name.
+//
+// Built for pkg/domain/zone, which copies a hub's own configuration onto a
+// newly joined zone's kontinuum-server: hand-maintaining a separate list of
+// which env vars to forward there fell behind this struct more than once —
+// Log.Level/Format were never forwarded at all, and a hand-written
+// zone-specific override for KONTINUUM_OIDC_REDIRECT_URL produced a
+// malformed URL for any zone with no domain configured, instead of falling
+// back to this same hub value the way every other field already did.
+// Every field this struct gains from now on reaches a joined zone
+// automatically, with no change needed in that package at all — unless it
+// needs its own zone-specific override, or (see Secret above) needs
+// routing into a Secret instead of a broadly-readable ConfigMap.
+func (c *Config) EnvVars() []EnvVar {
+	var vars []EnvVar
+
+	walkStringFields(reflect.ValueOf(c).Elem(), nil,
+		func(fieldPath []string, field reflect.Value, structField reflect.StructField) {
+			vars = append(vars, EnvVar{
+				Name:   envName(fieldPath),
+				Value:  field.String(),
+				Secret: structField.Tag.Get("secret") == "true",
+			})
+		})
+
+	return vars
+}
+
 // Redact returns a copy of c with sensitive fields stripped, safe to log,
 // display, or copy onto a Kontinuum's broadly-readable status.config —
 // currently, any username/password embedded in Server.Storage (e.g.
@@ -112,23 +153,8 @@ func ParseAdminGroups(raw string) []string {
 // field from the KONTINUUM_-prefixed env var derived from path (when useEnv
 // is true and the var is non-empty) or the field's `default` tag.
 func loadStruct(structVal reflect.Value, path []string, useEnv bool) {
-	for fieldIndex := range structVal.NumField() {
-		field := structVal.Field(fieldIndex)
-		fieldPath := make([]string, len(path)+1)
-		copy(fieldPath, path)
-		fieldPath[len(path)] = structVal.Type().Field(fieldIndex).Name
-
-		if field.Kind() == reflect.Struct {
-			loadStruct(field, fieldPath, useEnv)
-
-			continue
-		}
-
-		if field.Kind() != reflect.String {
-			continue
-		}
-
-		val := structVal.Type().Field(fieldIndex).Tag.Get("default")
+	walkStringFields(structVal, path, func(fieldPath []string, field reflect.Value, structField reflect.StructField) {
+		val := structField.Tag.Get("default")
 
 		if useEnv {
 			if env := os.Getenv(envName(fieldPath)); env != "" {
@@ -137,6 +163,39 @@ func loadStruct(structVal reflect.Value, path []string, useEnv bool) {
 		}
 
 		field.SetString(val)
+	})
+}
+
+// walkStringFields recursively visits every leaf string field of
+// structVal, depth-first, passing each one's full field path alongside its
+// reflect.Value and reflect.StructField (for reading its struct tags) to
+// visit — the one definition of "which fields count" (string leaves only;
+// anything else, e.g. KontinuumOIDCConfigStatus.Enabled's bool, is
+// skipped) that loadStruct and Config.EnvVars both build on, rather than
+// two separate traversals that could disagree about it.
+func walkStringFields(
+	structVal reflect.Value, path []string,
+	visit func(fieldPath []string, field reflect.Value, structField reflect.StructField),
+) {
+	for fieldIndex := range structVal.NumField() {
+		field := structVal.Field(fieldIndex)
+		structField := structVal.Type().Field(fieldIndex)
+
+		fieldPath := make([]string, len(path)+1)
+		copy(fieldPath, path)
+		fieldPath[len(path)] = structField.Name
+
+		if field.Kind() == reflect.Struct {
+			walkStringFields(field, fieldPath, visit)
+
+			continue
+		}
+
+		if field.Kind() != reflect.String {
+			continue
+		}
+
+		visit(fieldPath, field, structField)
 	}
 }
 

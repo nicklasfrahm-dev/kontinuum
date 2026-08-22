@@ -13,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/zonelease"
 )
 
 const (
@@ -69,6 +70,10 @@ type Config struct {
 	// already-Ready addon — see setReady's own doc. Defaults to five
 	// minutes when zero.
 	ResyncInterval time.Duration
+	// ZoneLease is this process's own zonelease.Locker identity — see
+	// zonelease.Identity's own doc. Reconcile refuses to mutate an Addon it
+	// doesn't hold its owning cluster's zone lease for.
+	ZoneLease zonelease.Identity
 }
 
 // Controller wires the Addon reconciler onto a controller-runtime
@@ -119,7 +124,9 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		CRDChecker:     c.Config.CRDChecker,
 		RetryInterval:  c.Config.RetryInterval,
 		ResyncInterval: c.Config.ResyncInterval,
-		Logger:         c.Config.Logger,
+		Locker: zonelease.NewLocker(
+			mgr.GetClient(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
+		Logger: c.Config.Logger,
 	}
 
 	err := ctrl.NewControllerManagedBy(mgr).For(&v1alpha2.Addon{}).Complete(reconciler)
@@ -142,7 +149,10 @@ type Reconciler struct {
 	CRDChecker     CRDChecker
 	RetryInterval  time.Duration
 	ResyncInterval time.Duration
-	Logger         *slog.Logger
+	// Locker gates every write below against zonelease — see
+	// Config.ZoneLease's own doc.
+	Locker *zonelease.Locker
+	Logger *slog.Logger
 }
 
 // Reconcile implements reconcile.Reconciler.
@@ -164,7 +174,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil // disabled — nothing to do; TalosCluster's own aggregation skips it too
 	}
 
-	result, ready, err := r.waitForEarlierWaves(ctx, &addon)
+	result, ready, err := r.acquireZoneLease(ctx, &addon)
+	if !ready {
+		return result, err
+	}
+
+	result, ready, err = r.waitForEarlierWaves(ctx, &addon)
 	if err != nil || !ready {
 		return result, err
 	}
@@ -180,6 +195,25 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	return r.installAndVerify(ctx, &addon, kubeconfig, installReq)
+}
+
+// acquireZoneLease gates every write below against zonelease — see
+// Config.ZoneLease's own doc — folded into Reconcile's own ready/error
+// two-value shape (mirrors readyKubeconfig's own doc) purely to keep
+// Reconcile's own cyclomatic complexity down. The bool is always false
+// alongside a non-nil error, so callers only need to check it, not
+// `err != nil || !ready`.
+func (r *Reconciler) acquireZoneLease(ctx context.Context, addon *v1alpha2.Addon) (ctrl.Result, bool, error) {
+	acquired, err := r.Locker.TryAcquire(ctx, addon.Spec.TalosClusterRef.Name)
+	if err != nil {
+		return ctrl.Result{}, false, fmt.Errorf("failed to acquire zone lease for addon %q: %w", addon.Name, err)
+	}
+
+	if !acquired {
+		return ctrl.Result{RequeueAfter: zonelease.Jitter(r.RetryInterval)}, false, nil
+	}
+
+	return ctrl.Result{}, true, nil
 }
 
 // installAndVerify installs installReq's chart, then gates addon's own

@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/registry"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/zonelease"
 )
 
 const (
@@ -64,6 +66,9 @@ func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
 	err = corev1.AddToScheme(scheme)
 	require.NoError(t, err)
 
+	err = coordinationv1.AddToScheme(scheme)
+	require.NoError(t, err)
+
 	return fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&v1alpha2.Kontinuum{}).
@@ -87,6 +92,7 @@ func TestTTLReconcilerDeletesStaleServer(t *testing.T) {
 	reconciler := &registry.TTLReconciler{
 		Client:         fakeClient,
 		StaleThreshold: testStaleThreshold,
+		Locker:         zonelease.NewLocker(fakeClient, "test-hub", "", 0),
 		Logger:         slog.Default(),
 	}
 
@@ -116,6 +122,7 @@ func TestTTLReconcilerRequeuesFreshServer(t *testing.T) {
 	reconciler := &registry.TTLReconciler{
 		Client:         fakeClient,
 		StaleThreshold: testStaleThreshold,
+		Locker:         zonelease.NewLocker(fakeClient, "test-hub", "", 0),
 		Logger:         slog.Default(),
 	}
 
@@ -137,6 +144,7 @@ func TestTTLReconcilerIgnoresMissingServer(t *testing.T) {
 	reconciler := &registry.TTLReconciler{
 		Client:         fakeClient,
 		StaleThreshold: testStaleThreshold,
+		Locker:         zonelease.NewLocker(fakeClient, "test-hub", "", 0),
 		Logger:         slog.Default(),
 	}
 

@@ -24,6 +24,17 @@ const (
 	crdManifestFile = "kontinuum.sh_kontinuums.yaml"
 )
 
+// ConversionWebhookPort is the port the conversion webhook server listens
+// on — wired into libkapi.WithWebhookServer by pkg/cli/serve.go, and used
+// here to build CustomResourceDefinition's conversion webhook clientConfig
+// URL. Both must agree, since the same process serves and applies both.
+const ConversionWebhookPort = 9443
+
+// conversionWebhookDNSName is the only hostname the apiserver ever dials
+// the conversion webhook on — see EnsureCRD's doc for why "localhost" (not
+// a Service) is correct here.
+const conversionWebhookDNSName = "localhost"
+
 // conversionWebhookPath is where Controller.SetupWithManager registers the
 // conversion webhook handler on the manager's webhook server, and where
 // definition's conversion webhook clientConfig URL points.
@@ -73,12 +84,13 @@ func definition(caBundle []byte) crd.Definition {
 // markers — and patching in the one piece that manifest can't contain: the
 // conversion webhook's clientConfig. controller-gen has no marker for a
 // webhook's URL or CABundle, and CABundle in particular is only known at
-// runtime — EnsureConversionWebhookCert's result — so it can't be baked
-// into a generated file at all. Region/zone's CEL rule, the role enum,
-// printer columns, and which version is storage are all controller-gen's
-// responsibility now (see api/v1alpha2/doc.go); this function no longer
-// hand-builds any of that, so schema and markers can't drift apart the way
-// they already had once.
+// runtime — libkapi's own Server.WebhookCABundle, synced across every
+// replica sharing this same central storage (see libkapi.WithSystemNamespace)
+// — so it can't be baked into a generated file at all. Region/zone's CEL
+// rule, the role enum, printer columns, and which version is storage are
+// all controller-gen's responsibility now (see api/v1alpha2/doc.go); this
+// function no longer hand-builds any of that, so schema and markers can't
+// drift apart the way they already had once.
 func CustomResourceDefinition(caBundle []byte) *apiextensionsv1.CustomResourceDefinition {
 	return crd.Build(crdconfig.Files, definition(caBundle))
 }
@@ -96,9 +108,11 @@ func CustomResourceDefinition(caBundle []byte) *apiextensionsv1.CustomResourceDe
 // WithPostStartHook registrations run before the controller manager starts
 // (see libkapi's own doc on WithPostStartHook and WithController), this
 // closes the gap before anything downstream can lose the race. caBundle
-// comes from EnsureConversionWebhookCert, called by the caller before this
-// (see its doc for why that ordering matters). logger receives a warning
-// for every retry along the way.
+// comes from libkapi's own Server.WebhookCABundle, read by the caller's own
+// WithPostStartHook closure (registered before this one runs) — see that
+// method's own doc for why it's already synced and safe to read by the time
+// any WithPostStartHook fires. logger receives a warning for every retry
+// along the way.
 func EnsureCRD(ctx context.Context, loopbackConfig *restclient.Config, caBundle []byte, logger *slog.Logger) error {
 	def := definition(caBundle)
 

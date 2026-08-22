@@ -49,7 +49,7 @@ const (
 func (r *Reconciler) installNetwork(
 	ctx context.Context, downstream client.Client, hostname string,
 ) (bool, error) {
-	err := ensureClusterIssuer(ctx, downstream, clusterIssuerName, r.ACMEEmail, r.ACMEServer)
+	err := ensureClusterIssuer(ctx, downstream, clusterIssuerName, r.HubConfig.ACME.Email, r.HubConfig.ACME.Server)
 	if err != nil {
 		return false, err
 	}

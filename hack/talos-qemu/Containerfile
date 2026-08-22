@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1.7
+#
+# Runs a single Talos node as a real QEMU/KVM VM instead of Talos's own
+# Docker container-mode image — see compose.yaml's "talos" service for why:
+# container-mode Talos can never actually wipe or reboot on Reset, no
+# matter how it's called, since that's unconditional for
+# runtime.ModeContainer regardless of request parameters. A QEMU-booted
+# node reports runtime.ModeMetal instead (see entrypoint.sh's
+# talos.platform=metal), which resets exactly like real hardware.
+FROM debian:trixie-slim
+
+ARG TALOS_VERSION=v1.13.9
+ARG TARGETARCH
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+		qemu-system-x86 \
+		iproute2 \
+		dnsmasq \
+		ca-certificates \
+		curl \
+	&& rm -rf /var/lib/apt/lists/*
+
+# vmlinuz/initramfs are the same boot artifacts talosctl's own qemu
+# provisioner downloads — Talos always boots this way for QEMU (and for
+# real network-booted bare metal), never via a bootloader chainloaded off
+# the disk, so a Reset-wiped disk simply comes back up in maintenance mode
+# on the next boot rather than failing to find anything to chainload.
+RUN mkdir -p /opt/talos \
+	&& curl -fL -o /opt/talos/vmlinuz "https://github.com/siderolabs/talos/releases/download/${TALOS_VERSION}/vmlinuz-${TARGETARCH:-amd64}" \
+	&& curl -fL -o /opt/talos/initramfs.xz "https://github.com/siderolabs/talos/releases/download/${TALOS_VERSION}/initramfs-${TARGETARCH:-amd64}.xz"
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

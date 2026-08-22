@@ -126,6 +126,14 @@ jobs:
       # build instead of the live site, which a PR adding a brand-new page
       # would otherwise 404 against until merged and deployed.
       #
+      # The two github.com/.../blob|tree/main remaps below are the same
+      # fix for the same reason, applied to docs that link at source files
+      # or directories in this repo: those links point at main, so a PR
+      # that both adds a doc and the thing it links to 404s against GitHub
+      # until merged. Remapping to the local checkout checks the link
+      # against this PR's own tree instead — which is what such a link is
+      # actually asserting will be true once it lands anyway.
+      #
       # --max-retries/--retry-wait-time only cover lychee's own notion of a
       # transient failure (e.g. a timeout once connected). A "Connection
       # failed" (refused/DNS/no route) is classified as permanent and is
@@ -157,6 +165,8 @@ jobs:
           for ((attempt = 1; attempt <= attempts; attempt++)); do
             lychee --no-progress --exclude-loopback --root-dir "${{ github.workspace }}/site" \
               --remap "https://docs.kontinuum.sh file://${{ github.workspace }}/site" \
+              --remap "https://github.com/nicklasfrahm-dev/kontinuum/blob/main file://${{ github.workspace }}" \
+              --remap "https://github.com/nicklasfrahm-dev/kontinuum/tree/main file://${{ github.workspace }}" \
               --max-retries 5 --retry-wait-time 5 \
               site && exit 0
             status=$?

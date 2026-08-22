@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/nicklasfrahm/kontinuum/pkg/config"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/etcdproxy"
 )
 
@@ -49,14 +50,97 @@ func ensureNamespace(ctx context.Context, downstream client.Client, namespace st
 	return nil
 }
 
-// ensureSecret upserts the kontinuum-env Secret with this zone's copy of
-// the hub's own storage connection string — see findKontinuumStorage.
-// Mirrors pkg/domain/registry/heartbeat.go's own
+// zoneEnvOverrides computes the env vars a joined zone's own env can never
+// just copy from the hub's own HubConfig — either because the value is
+// inherently specific to this zone (region/zone identify this zone, never
+// the hub's own — always empty there; storage is this zone's own DSN, see
+// zoneStorageDSN; addr must stay the container's own listen address
+// regardless of whatever the hub itself happens to be configured with),
+// or because a straight copy would be wrong for this zone specifically:
+// KONTINUUM_OIDC_REDIRECT_URL, registered with the issuer for the hub's
+// own host, would never match a browser completing a login against this
+// zone's own domain. hostname is the zone's own <zone>.<region>.<domain>
+// — left empty (network layer skipped — see installNetwork's own doc)
+// when the zone has no domain configured, in which case this simply
+// doesn't override KONTINUUM_OIDC_REDIRECT_URL at all, falling back to
+// the hub's own value rather than producing a malformed "https:///app"
+// the way computing one from an empty hostname unconditionally used to.
+//
+// Everything else copies straight off hubConfig.EnvVars() — see
+// ensureEnv — including KONTINUUM_ACME_EMAIL/_SERVER (so this zone's own
+// kontinuum-server can, in turn, create a cert-manager ClusterIssuer for
+// any further zone it joins) and KONTINUUM_SERVER_GRPC_ENDPOINT/
+// _INSECURE_TLS_SKIP_VERIFY (so that same further-nested Zone controller
+// can dial this same hub's etcd proxy the exact way this one does — see
+// zoneStorageDSN).
+func zoneEnvOverrides(region, zoneName, storage, hostname string) map[string]string {
+	overrides := map[string]string{
+		"KONTINUUM_SERVER_ADDR":   ":8080",
+		"KONTINUUM_SERVER_REGION": region,
+		"KONTINUUM_SERVER_ZONE":   zoneName,
+		storageSecretKey:          storage,
+	}
+
+	if hostname != "" {
+		overrides["KONTINUUM_OIDC_REDIRECT_URL"] = "https://" + hostname + "/app"
+	}
+
+	return overrides
+}
+
+// ensureEnv upserts the kontinuum-env Secret and ConfigMap with every env
+// var hubConfig.EnvVars produces, replaced by overrides's own value where
+// present (see zoneEnvOverrides) — routed into the Secret or ConfigMap by
+// whichever api/v1alpha2.KontinuumConfigStatus field produced it is tagged
+// `secret:"true"` (currently just Server.Storage). Without
+// KONTINUUM_INSECURE_ALLOW_ANONYMOUS/OIDC_ISSUER_URL — both copied
+// straight from the hub, like everything else not in overrides — the
+// deployed process refuses to even start (see
+// pkg/config.Config.ValidateAuthentication), so it never gets as far as
+// registering itself at all.
+//
+// This replaces what used to be a hand-maintained, field-by-field env var
+// list here: that list silently fell behind pkg/config.Config more than
+// once as fields were added there — KONTINUUM_LOG_LEVEL/_FORMAT and
+// KONTINUUM_SERVER_DNS_DOMAIN were never forwarded to a joined zone at
+// all. Every field pkg/config.Config gains from now on reaches a joined
+// zone automatically, with no change needed here — unless it needs its
+// own zoneEnvOverrides entry, or (via the `secret` struct tag) needs
+// routing into the Secret instead.
+func ensureEnv(
+	ctx context.Context, downstream client.Client, namespace string, hubConfig *config.Config, overrides map[string]string,
+) error {
+	secretData := map[string]string{}
+	configData := map[string]string{}
+
+	for _, envVar := range hubConfig.EnvVars() {
+		value := envVar.Value
+		if override, ok := overrides[envVar.Name]; ok {
+			value = override
+		}
+
+		if envVar.Secret {
+			secretData[envVar.Name] = value
+		} else {
+			configData[envVar.Name] = value
+		}
+	}
+
+	err := ensureSecret(ctx, downstream, namespace, secretData)
+	if err != nil {
+		return err
+	}
+
+	return ensureConfigMap(ctx, downstream, namespace, configData)
+}
+
+// ensureSecret upserts the kontinuum-env Secret with data. Mirrors
+// pkg/domain/registry/heartbeat.go's own
 // create-then-get-and-update-on-conflict upsert idiom.
-func ensureSecret(ctx context.Context, downstream client.Client, namespace, storage string) error {
+func ensureSecret(ctx context.Context, downstream client.Client, namespace string, data map[string]string) error {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: envSecretName, Namespace: namespace},
-		StringData: map[string]string{storageSecretKey: storage},
+		StringData: data,
 	}
 
 	err := downstream.Create(ctx, secret)
@@ -85,58 +169,8 @@ func ensureSecret(ctx context.Context, downstream client.Client, namespace, stor
 	return nil
 }
 
-// ensureConfigMap upserts the kontinuum-env ConfigMap with this zone's
-// non-confidential config — KONTINUUM_SERVER_REGION/_ZONE (so this zone's
-// own kontinuum serve process registers itself as a Worker — see
-// pkg/domain/registry.Role), KONTINUUM_ACME_EMAIL/_SERVER (so it can, in
-// turn, run this same Zone controller for any further zones it joins), and
-// auth's own authentication choice (see AuthConfig's own doc) — without
-// that last part, the deployed process refuses to even start (see
-// pkg/config.Config.ValidateAuthentication), so it never gets as far as
-// registering itself at all. hostname is only used to compute a
-// zone-specific KONTINUUM_OIDC_REDIRECT_URL when auth.OIDCIssuerURL is set
-// — see AuthConfig's own doc for why the hub's own redirect URL can't be
-// reused here.
-//
-// grpcEndpoint/grpcInsecureSkipVerify mirror the hub's own
-// KONTINUUM_SERVER_GRPC_ENDPOINT/_INSECURE_TLS_SKIP_VERIFY (see
-// v1alpha2.KontinuumGRPCConfigStatus's own doc) straight onto this zone's
-// own env: this deployed process (not just the hub) also runs the full
-// kontinuum server, including its own Zone controller — reconciling any
-// Zone visible in its shared storage, this Zone included, if it ever
-// nested-joins one — and that controller's own zoneStorageDSN needs a
-// configured GRPCEndpoint the exact same way the hub's does, or every
-// reconcile logs "this hub has no KONTINUUM_SERVER_GRPC_ENDPOINT
-// configured" and any further-nested zone that hub tries to add gets no
-// working KONTINUUM_SERVER_STORAGE at all. GRPCInsecureSkipVerify's own
-// need is more immediate: this process's own relay (see etcdproxy.Relay)
-// already dials GRPCEndpoint on every KONTINUUM_SERVER_STORAGE call this
-// zone itself makes, so a hub configured to skip TLS verification against
-// a self-signed dev proxy but never propagating that choice downstream
-// left every joined zone's kontinuum-server crash-looping on a real
-// certificate verification failure instead.
-func ensureConfigMap(
-	ctx context.Context, downstream client.Client, namespace, region, zoneName, hostname, acmeEmail, acmeServer string,
-	grpcEndpoint, grpcInsecureSkipVerify string, auth AuthConfig,
-) error {
-	data := map[string]string{
-		"KONTINUUM_SERVER_ADDR":                          ":8080",
-		"KONTINUUM_SERVER_REGION":                        region,
-		"KONTINUUM_SERVER_ZONE":                          zoneName,
-		"KONTINUUM_ACME_EMAIL":                           acmeEmail,
-		"KONTINUUM_ACME_SERVER":                          acmeServer,
-		"KONTINUUM_INSECURE_ALLOW_ANONYMOUS":             auth.InsecureAllowAnonymous,
-		"KONTINUUM_SERVER_GRPC_ENDPOINT":                 grpcEndpoint,
-		"KONTINUUM_SERVER_GRPC_INSECURE_TLS_SKIP_VERIFY": grpcInsecureSkipVerify,
-	}
-
-	if auth.OIDCIssuerURL != "" {
-		data["KONTINUUM_OIDC_ISSUER_URL"] = auth.OIDCIssuerURL
-		data["KONTINUUM_OIDC_CLIENT_ID"] = auth.OIDCClientID
-		data["KONTINUUM_OIDC_ADMIN_GROUPS"] = auth.OIDCAdminGroups
-		data["KONTINUUM_OIDC_REDIRECT_URL"] = "https://" + hostname + "/app"
-	}
-
+// ensureConfigMap upserts the kontinuum-env ConfigMap with data.
+func ensureConfigMap(ctx context.Context, downstream client.Client, namespace string, data map[string]string) error {
 	configMap := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: envConfigMapName, Namespace: namespace},
 		Data:       data,

@@ -31,6 +31,7 @@ import (
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/zonelease"
 )
 
 const (
@@ -69,6 +70,12 @@ type Config struct {
 	// future config source that changes without a process restart. Defaults
 	// to thirty seconds when zero.
 	Interval time.Duration
+	// ZoneLease is this process's own zonelease.Locker identity — see
+	// zonelease.Identity's own doc. Every tick is gated by
+	// zonelease.GlobalKey — these ClusterRoleBindings are shared, hub-owned
+	// state, not any one zone's own resources, so a zone's own process
+	// never writes them.
+	ZoneLease zonelease.Identity
 }
 
 // Controller wires the admin-group RBAC reconciler onto a
@@ -96,7 +103,9 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		Client:      mgr.GetClient(),
 		AdminGroups: c.Config.AdminGroups,
 		Interval:    c.Config.Interval,
-		Logger:      c.Config.Logger,
+		Locker: zonelease.NewLocker(
+			mgr.GetClient(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
+		Logger: c.Config.Logger,
 	}
 
 	err := mgr.Add(runnable)
@@ -114,7 +123,10 @@ type Runnable struct {
 	Client      client.Client
 	AdminGroups string
 	Interval    time.Duration
-	Logger      *slog.Logger
+	// Locker gates every write below against zonelease — see
+	// Config.ZoneLease's own doc.
+	Locker *zonelease.Locker
+	Logger *slog.Logger
 }
 
 // Start implements manager.Runnable. It blocks until ctx is canceled,
@@ -137,9 +149,23 @@ func (r *Runnable) Start(ctx context.Context) error {
 
 // reconcile ensures RoleName's ClusterRole exists, then reconciles the set
 // of managed ClusterRoleBindings against AdminGroups. Failures are logged,
-// not fatal — like Heartbeat.beat, the next tick tries again.
+// not fatal — like Heartbeat.beat, the next tick tries again. Skipped
+// entirely — quietly, no log line — while r.Locker doesn't hold
+// zonelease.GlobalKey (see Config.ZoneLease's own doc); the next tick tries
+// again.
 func (r *Runnable) reconcile(ctx context.Context) {
-	err := r.ensureRole(ctx)
+	acquired, err := r.Locker.TryAcquire(ctx, zonelease.GlobalKey)
+	if err != nil {
+		r.Logger.Error("Failed to acquire zone lease for admin rbac", "error", err)
+
+		return
+	}
+
+	if !acquired {
+		return
+	}
+
+	err = r.ensureRole(ctx)
 	if err != nil {
 		r.Logger.Error("Failed to ensure admin cluster role", "error", err)
 

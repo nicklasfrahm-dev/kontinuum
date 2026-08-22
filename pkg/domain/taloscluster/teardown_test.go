@@ -14,6 +14,7 @@ import (
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/taloscluster"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/zonelease"
 )
 
 // clusterRequest is testClusterName's own ctrl.Request — shared by every
@@ -243,6 +244,7 @@ func TestReconcileTeardownGivesUpAfterTeardownTimeout(t *testing.T) {
 		Bootstrapper:    bootstrapper,
 		RetryInterval:   testRetryInterval,
 		TeardownTimeout: 0, // effectively already elapsed the instant DeletionTimestamp is set
+		Locker:          zonelease.NewLocker(fakeClient, "test-hub", "", 0),
 		Logger:          slog.Default(),
 	}
 

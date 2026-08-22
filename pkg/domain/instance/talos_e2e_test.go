@@ -21,6 +21,7 @@ import (
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/zonelease"
 )
 
 // e2eTalosImage is pinned to a version verified (empirically, against a
@@ -78,6 +79,7 @@ func TestE2EInstanceDiscoversRealTalosContainer(t *testing.T) {
 		Discoverer:    instance.NewTalosDiscoverer(),
 		DialTimeout:   10 * time.Second,
 		RetryInterval: testRetryInterval,
+		Locker:        zonelease.NewLocker(fakeClient, "test-hub", "", 0),
 		Logger:        slog.Default(),
 	}
 
