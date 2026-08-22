@@ -120,6 +120,23 @@ echo "talos: bridged guest onto ${HOST_IP_CIDR} via gateway ${GATEWAY_IP}" >&2
 # lease. --bind-dynamic (not --bind-interfaces) is required since br0
 # only gets its own address a few lines up, after tap0/eth0 are already
 # enslaved to it.
+#
+# dns-server hands out this container's own bridge address, not a public
+# resolver directly — dnsmasq itself forwards (via --server) to Docker's
+# embedded DNS at 127.0.0.11, which only answers from inside this
+# container's own network namespace (it's a per-container DNAT rule, not
+# reachable from the bridged guest directly). That's not just about the
+# guest resolving "talos" or "proxy" itself: once Kubernetes is up, its
+# own CoreDNS inherits the node's /etc/resolv.conf as its upstream
+# forwarder, and a joined zone's kontinuum pod dials the hub's etcd proxy
+# at a plain Compose service name (KONTINUUM_SERVER_GRPC_ENDPOINT, e.g.
+# "proxy:8443") — a real public resolver has never heard of it and
+# returns nothing ("name resolver error: produced zero addresses" is
+# what that surfaces as in kontinuum's own logs), where Docker's embedded
+# DNS resolves it correctly, same as every other container in this
+# compose stack already relies on. 127.0.0.11 still forwards on to the
+# host's own real upstream for internet names, so this doesn't cost the
+# guest anything the previous 1.1.1.1/8.8.8.8 setup had.
 dnsmasq \
 	--no-daemon \
 	--bind-dynamic \
@@ -127,7 +144,8 @@ dnsmasq \
 	--dhcp-range="${HOST_IP},${HOST_IP},${HOST_NETMASK},12h" \
 	--dhcp-host="${GUEST_MAC},${HOST_IP}" \
 	--dhcp-option="option:router,${GATEWAY_IP}" \
-	--dhcp-option="option:dns-server,1.1.1.1,8.8.8.8" \
+	--dhcp-option="option:dns-server,${BRIDGE_IDENTITY_IP}" \
+	--server=127.0.0.11 \
 	--no-resolv \
 	--no-hosts \
 	--log-dhcp &
