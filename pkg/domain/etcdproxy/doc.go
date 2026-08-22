@@ -23,4 +23,16 @@
 // exposes on the hub — it never interprets or transforms them — so it
 // works unchanged regardless of which real backend (postgres/sqlite/mysql/
 // nats) sits behind Kine there.
+//
+// This package also bounds how many real connections ever reach Kine at
+// all, on both legs — see Pool's own doc for why neither "one connection
+// per caller" nor "one connection for every caller" holds up.
+// RegisterHub uses a Pool (not a single connection) for the zone-facing
+// leg, so a fleet of zones shares a small, fixed set of real connections
+// rather than either one each (reintroducing the ping-strike problem) or
+// one shared by all of them (a single throughput ceiling and point of
+// failure at scale). LocalPool applies the same idea to the *other* leg —
+// a hub's own apiserver storage instances talking to its own local Kine —
+// interposing a local Pool between them so k8s.io/apiserver's own
+// per-resource-type client fan-out never reaches Kine's socket directly.
 package etcdproxy
