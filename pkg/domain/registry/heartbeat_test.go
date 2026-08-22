@@ -245,6 +245,62 @@ func TestHeartbeatReregistersIfDeletedExternally(t *testing.T) {
 	assert.Equal(t, e2eZone, recreated.Spec.Zone)
 }
 
+// hammerReconcile repeatedly calls heartbeat.Reconcile for duration, racing
+// Start's own ticker-driven beat — the two entry points
+// TestHeartbeatConcurrentBeatAndReconcileStayConsistent exercises together.
+func hammerReconcile(heartbeat *registry.Heartbeat, req ctrl.Request, duration time.Duration) {
+	deadline := time.Now().Add(duration)
+	for time.Now().Before(deadline) {
+		_, _ = heartbeat.Reconcile(context.Background(), req)
+	}
+}
+
+// churnDelete repeatedly deletes key's Kontinuum object out from under beat
+// and Reconcile for duration — standing in for kubectl/the UI's delete
+// button — so both keep observing the same NotFound at once.
+func churnDelete(fakeClient client.Client, key types.NamespacedName, duration time.Duration) {
+	deadline := time.Now().Add(duration)
+	for time.Now().Before(deadline) {
+		var server v1alpha2.Kontinuum
+
+		err := fakeClient.Get(context.Background(), key, &server)
+		if err == nil {
+			_ = fakeClient.Delete(context.Background(), &server)
+		}
+
+		time.Sleep(testHeartbeatInterval / 2)
+	}
+}
+
+// assertSecretOwnerMatchesServer waits for name's config Secret to settle on
+// an owner reference matching whatever Kontinuum UID is actually stored —
+// the invariant that used to break under the race h.mu now closes.
+func assertSecretOwnerMatchesServer(t *testing.T, fakeClient client.Client, name string) {
+	t.Helper()
+
+	serverKey := types.NamespacedName{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace}
+	secretKey := types.NamespacedName{Name: "kontinuum-" + name, Namespace: v1alpha2.KontinuumSystemNamespace}
+
+	require.Eventually(t, func() bool {
+		var server v1alpha2.Kontinuum
+
+		err := fakeClient.Get(context.Background(), serverKey, &server)
+		if err != nil {
+			return false
+		}
+
+		var secret corev1.Secret
+
+		err = fakeClient.Get(context.Background(), secretKey, &secret)
+		if err != nil {
+			return false
+		}
+
+		return len(secret.OwnerReferences) == 1 && secret.OwnerReferences[0].UID == server.UID
+	}, time.Second, time.Millisecond,
+		"secret's owner reference must settle on whatever Kontinuum UID is actually stored")
+}
+
 // TestHeartbeatConcurrentBeatAndReconcileStayConsistent is the regression
 // test for the intra-process race h.mu closes: before it existed, Start's
 // own ticker (beat) and controller-runtime's watch-triggered Reconcile ran
@@ -282,57 +338,25 @@ func TestHeartbeatConcurrentBeatAndReconcileStayConsistent(t *testing.T) {
 
 	const churnDuration = 50 * testHeartbeatInterval
 
-	var wg sync.WaitGroup
+	var churnGroup sync.WaitGroup
 
-	wg.Add(2)
+	churnGroup.Add(2)
 
-	// Hammers Reconcile directly, on top of Start's own ticker-driven beat —
-	// exactly the two entry points that used to race unsynchronized.
 	go func() {
-		defer wg.Done()
+		defer churnGroup.Done()
 
-		deadline := time.Now().Add(churnDuration)
-		for time.Now().Before(deadline) {
-			_, _ = heartbeat.Reconcile(context.Background(), req)
-		}
+		hammerReconcile(heartbeat, req, churnDuration)
 	}()
 
-	// An independent external actor — standing in for kubectl/the UI's
-	// delete button — deleting the object out from under both beat and
-	// Reconcile, so both keep observing the same NotFound at once.
 	go func() {
-		defer wg.Done()
+		defer churnGroup.Done()
 
-		deadline := time.Now().Add(churnDuration)
-		for time.Now().Before(deadline) {
-			var server v1alpha2.Kontinuum
-			if err := fakeClient.Get(context.Background(), testServerKey(), &server); err == nil {
-				_ = fakeClient.Delete(context.Background(), &server)
-			}
-
-			time.Sleep(testHeartbeatInterval / 2)
-		}
+		churnDelete(fakeClient, testServerKey(), churnDuration)
 	}()
 
-	wg.Wait()
+	churnGroup.Wait()
 
-	var server v1alpha2.Kontinuum
-
-	require.Eventually(t, func() bool {
-		if err := fakeClient.Get(context.Background(), testServerKey(), &server); err != nil {
-			return false
-		}
-
-		var secret corev1.Secret
-
-		secretKey := types.NamespacedName{Name: "kontinuum-" + testServerName, Namespace: v1alpha2.KontinuumSystemNamespace}
-		if err := fakeClient.Get(context.Background(), secretKey, &secret); err != nil {
-			return false
-		}
-
-		return len(secret.OwnerReferences) == 1 && secret.OwnerReferences[0].UID == server.UID
-	}, time.Second, time.Millisecond,
-		"secret's owner reference must settle on whatever Kontinuum UID is actually stored")
+	assertSecretOwnerMatchesServer(t, fakeClient, testServerName)
 
 	cancel()
 
