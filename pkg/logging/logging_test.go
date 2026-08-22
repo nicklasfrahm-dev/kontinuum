@@ -82,6 +82,7 @@ func TestNewJSON(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
+
 	logger := logging.New(slog.LevelInfo, logging.FormatJSON, &buf)
 
 	logger.Info("hello", "key", "value")
@@ -96,6 +97,7 @@ func TestNewJSONRespectsLevel(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
+
 	logger := logging.New(slog.LevelWarn, logging.FormatJSON, &buf)
 
 	logger.Info("should be filtered out")
@@ -107,6 +109,7 @@ func TestNewConsole(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
+
 	logger := logging.New(slog.LevelInfo, logging.FormatConsole, &buf)
 
 	logger.Info("hello")
@@ -118,6 +121,7 @@ func TestNewText(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
+
 	logger := logging.New(slog.LevelInfo, logging.FormatText, &buf)
 
 	logger.Info("hello")
@@ -129,6 +133,7 @@ func TestNewDefaultsToJSON(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
+
 	logger := logging.New(slog.LevelInfo, logging.Format("unknown"), &buf)
 
 	logger.Info("hello")
