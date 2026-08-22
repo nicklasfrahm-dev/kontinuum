@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -76,6 +77,17 @@ type Heartbeat struct {
 	// would immediately recreate the object Deregister is in the middle of
 	// removing.
 	shuttingDown atomic.Bool
+
+	// mu serializes every write path below (beat, Reconcile, Deregister).
+	// Start's own ticker and controller-runtime's watch-triggered Reconcile
+	// run on separate goroutines but act on the same instance's own
+	// Kontinuum object and Secret; without this, both can observe the
+	// object gone at once and each race through reregister/ensureSecret
+	// with their own stale in-memory copy, producing conflicting
+	// Status().Update calls and Secret owner-reference UID mismatches — not
+	// a cross-process/zone race (zonelease guards those), purely an
+	// intra-process one between this struct's own two entry points.
+	mu sync.Mutex
 }
 
 // Reconcile implements reconcile.Reconciler, reacting to its own object's
@@ -86,6 +98,9 @@ type Heartbeat struct {
 // state (the object exists, or a transient fetch error) needs no action:
 // Start's own ticker owns keeping it fresh.
 func (h *Heartbeat) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
 	var server v1alpha2.Kontinuum
 
 	err := h.Client.Get(ctx, req.NamespacedName, &server)
@@ -161,6 +176,9 @@ func (h *Heartbeat) Start(ctx context.Context) error {
 // already-completed delete is not an error, so calling it from both places
 // in the same shutdown is safe.
 func (h *Heartbeat) Deregister(ctx context.Context) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
 	h.shuttingDown.Store(true)
 
 	server := &v1alpha2.Kontinuum{
@@ -189,6 +207,9 @@ func (h *Heartbeat) Deregister(ctx context.Context) error {
 // permanently deregistered until the process restarts. Any other failure
 // is logged, not fatal — the next tick tries again.
 func (h *Heartbeat) beat(ctx context.Context, server *v1alpha2.Kontinuum) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
 	err := h.Client.Get(ctx, client.ObjectKeyFromObject(server), server)
 	if apierrors.IsNotFound(err) {
 		if h.shuttingDown.Load() {
@@ -311,9 +332,10 @@ func (h *Heartbeat) ensureSecret(
 // or UID left over from the one that was deleted — and recreates it with
 // this instance's own Spec, then immediately gives it a fresh heartbeat.
 // Reconcile (triggered by the delete event) and beat (self-healing on its
-// own next tick) can both reach here for the same deletion; if Create loses
-// that race with AlreadyExists, that's not a failure — it just fetches
-// whatever the other path already recreated instead.
+// own next tick) both call this only while holding h.mu, so they can't
+// interleave with each other; Create's own AlreadyExists handling is kept
+// as defense-in-depth regardless (e.g. a stale watch-cache replay), in
+// which case it just fetches whatever already exists instead of failing.
 func (h *Heartbeat) reregister(ctx context.Context, server *v1alpha2.Kontinuum) {
 	*server = v1alpha2.Kontinuum{
 		ObjectMeta: metav1.ObjectMeta{Name: h.Name, Namespace: v1alpha2.KontinuumSystemNamespace},

@@ -69,6 +69,12 @@ const (
 	testDownstreamNamespace    = "kontinuum-system"
 	testDownstreamResourceName = "kontinuum"
 	testDownstreamEnvName      = "kontinuum-env"
+
+	// testCertificateReadyReason is the cert-manager Reason this file's
+	// fixtures use to flip a downstream Certificate's own Ready condition
+	// true — shared so repeating the literal across call sites doesn't trip
+	// goconst.
+	testCertificateReadyReason = "Ready"
 )
 
 // testZoneKey() is testZoneName's own ObjectKey — every zone-add fixture in
@@ -853,7 +859,7 @@ func TestReconcileFlipsInstalledOnceCertificateReady(t *testing.T) {
 		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &cert))
 
 	cert.Status.Conditions = []certmanagerv1.CertificateCondition{
-		{Type: certmanagerv1.CertificateConditionReady, Status: cmmeta.ConditionTrue, Reason: "Ready"},
+		{Type: certmanagerv1.CertificateConditionReady, Status: cmmeta.ConditionTrue, Reason: testCertificateReadyReason},
 	}
 	require.NoError(t, downstream.Status().Update(t.Context(), &cert))
 
@@ -904,7 +910,7 @@ func TestReconcileFlipsReadyOnceKontinuumJoinsRegistry(t *testing.T) {
 		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &cert))
 
 	cert.Status.Conditions = []certmanagerv1.CertificateCondition{
-		{Type: certmanagerv1.CertificateConditionReady, Status: cmmeta.ConditionTrue, Reason: "Ready"},
+		{Type: certmanagerv1.CertificateConditionReady, Status: cmmeta.ConditionTrue, Reason: testCertificateReadyReason},
 	}
 	require.NoError(t, downstream.Status().Update(t.Context(), &cert))
 
@@ -934,6 +940,74 @@ func TestReconcileFlipsReadyOnceKontinuumJoinsRegistry(t *testing.T) {
 	assert.Equal(t, "RegistryJoined", registryCond.Reason)
 
 	assertReadyMirrors(t, got, metav1.ConditionTrue, "RegistryJoined")
+}
+
+// TestReconcileFlipsRegistryJoinedFalseOnceKontinuumGoesStale is the
+// regression test for the bug mapKontinuumToZone's watch closes: before it
+// existed, nothing ever re-triggered Reconcile once RegistryJoined (and the
+// aggregate Ready) flipped true — persistStatus stops requeuing on
+// ConditionTrue, and SetupWithManager watched only Zone and TalosCluster,
+// never Kontinuum — so a zone's own kontinuum-server later going stale (its
+// Kontinuum deleted by TTLReconciler after StaleThreshold, a crash that
+// never re-registers, manual deregistration) would leave the condition
+// stuck reporting "registered and heartbeating" forever. This continues
+// past TestReconcileFlipsReadyOnceKontinuumJoinsRegistry — once joined,
+// delete the joined Kontinuum out from under it — and asserts that a
+// Reconcile call (standing in for the one mapKontinuumToZone's watch would
+// now enqueue) correctly flips RegistryJoined back to false, proving
+// Reconcile's own re-derivation was always correct and only ever needed a
+// trigger.
+func TestReconcileFlipsRegistryJoinedFalseOnceKontinuumGoesStale(t *testing.T) {
+	t.Parallel()
+
+	kontinuum, kontinuumSecret := registeredKontinuum("hub")
+	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
+		kontinuum, kontinuumSecret)
+	downstream := newDownstreamFakeClient(t)
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: downstream})
+
+	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	var cert certmanagerv1.Certificate
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &cert))
+
+	cert.Status.Conditions = []certmanagerv1.CertificateCondition{
+		{Type: certmanagerv1.CertificateConditionReady, Status: cmmeta.ConditionTrue, Reason: testCertificateReadyReason},
+	}
+	require.NoError(t, downstream.Status().Update(t.Context(), &cert))
+
+	_, err = reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	worker, workerSecret := joinedKontinuum("zzz-worker")
+	require.NoError(t, hubClient.Create(t.Context(), worker))
+	require.NoError(t, hubClient.Create(t.Context(), workerSecret))
+
+	_, err = reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	var joined v1alpha2.Zone
+	require.NoError(t, hubClient.Get(t.Context(), testZoneKey(), &joined))
+	require.Equal(t, metav1.ConditionTrue,
+		meta.FindStatusCondition(joined.Status.Conditions, zone.RegistryJoinedConditionType).Status,
+		"test setup must reach RegistryJoined=true before the regression itself can be exercised")
+
+	require.NoError(t, hubClient.Delete(t.Context(), worker))
+
+	_, err = reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	var got v1alpha2.Zone
+	require.NoError(t, hubClient.Get(t.Context(), testZoneKey(), &got))
+
+	registryCond := meta.FindStatusCondition(got.Status.Conditions, zone.RegistryJoinedConditionType)
+	require.NotNil(t, registryCond)
+	assert.Equal(t, metav1.ConditionFalse, registryCond.Status)
+	assert.Equal(t, "WaitingForRegistry", registryCond.Reason)
+
+	assertReadyMirrors(t, got, metav1.ConditionFalse, "WaitingForRegistry")
 }
 
 func TestReconcileIgnoresMissingZone(t *testing.T) {

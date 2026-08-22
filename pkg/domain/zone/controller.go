@@ -194,6 +194,7 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 	err := ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha2.Zone{}).
 		Watches(&v1alpha2.TalosCluster{}, handler.EnqueueRequestsFromMapFunc(mapTalosClusterToZone)).
+		Watches(&v1alpha2.Kontinuum{}, handler.EnqueueRequestsFromMapFunc(mapKontinuumToZone)).
 		Complete(reconciler)
 	if err != nil {
 		return fmt.Errorf("failed to register zone controller: %w", err)
@@ -211,6 +212,36 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 func mapTalosClusterToZone(_ context.Context, obj client.Object) []ctrl.Request {
 	return []ctrl.Request{{
 		NamespacedName: types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()},
+	}}
+}
+
+// mapKontinuumToZone maps a Kontinuum change to the one Zone whose
+// region/zone it identifies, via the same <region>-<zone> naming convention
+// mapTalosClusterToZone relies on (see BuildAddObjects) — a Kontinuum's own
+// object name is registry.InstanceName(os.Hostname()), unrelated to which
+// zone it belongs to, so its Spec.Region/Spec.Zone are what this maps by
+// instead. Without this watch, RegistryJoined never gets re-checked once
+// true: persistStatus stops requeuing once a condition is True, so a zone's
+// kontinuum-server later going stale — TTLReconciler deleting its Kontinuum
+// after StaleThreshold, a crash that never re-registers, manual
+// deregistration — would otherwise leave the condition stuck reporting
+// "registered and heartbeating" forever, with nothing left to notice it
+// isn't anymore. Returns no request for a Kontinuum with no region/zone set
+// (the hub's own self-registration) — zonelease.Key returns "" for that
+// case too, and there's no Zone named "" to enqueue.
+func mapKontinuumToZone(_ context.Context, obj client.Object) []ctrl.Request {
+	kontinuum, ok := obj.(*v1alpha2.Kontinuum)
+	if !ok {
+		return nil
+	}
+
+	name := zonelease.Key(kontinuum.Spec.Region, kontinuum.Spec.Zone)
+	if name == "" {
+		return nil
+	}
+
+	return []ctrl.Request{{
+		NamespacedName: types.NamespacedName{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace},
 	}}
 }
 
