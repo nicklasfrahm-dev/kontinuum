@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"net/url"
+	"sort"
 	"time"
 	"unicode"
 )
@@ -55,6 +56,28 @@ func formatAge(t time.Time) string {
 	default:
 		return fmt.Sprintf("%dd", int(elapsed.Hours()/hoursPerDay))
 	}
+}
+
+// labelChip is one metadata.labels entry, shown as a key:value chip on a
+// detail page's Overview section — see issue #76's label visibility scope.
+type labelChip struct {
+	Key   string
+	Value string
+}
+
+// sortedLabels converts labels into a deterministically ordered slice of
+// chips for rendering — map iteration order is otherwise random, which
+// would make a detail page's own auto-refresh (every 15s, see e.g.
+// machine_detail_content.html) visibly reshuffle the chips on every poll.
+func sortedLabels(labels map[string]string) []labelChip {
+	chips := make([]labelChip, 0, len(labels))
+	for key, value := range labels {
+		chips = append(chips, labelChip{Key: key, Value: value})
+	}
+
+	sort.Slice(chips, func(i, j int) bool { return chips[i].Key < chips[j].Key })
+
+	return chips
 }
 
 // capitalizeFirst upper-cases s' first rune, leaving the rest untouched —

@@ -24,6 +24,9 @@ spec:
     - jsonPath: .status.conditions[?(@.type=="Discovered")].reason
       name: Reason
       type: string
+    - jsonPath: .status.conditions[?(@.type=="Live")].status
+      name: Live
+      type: string
     - jsonPath: .status.conditions[?(@.type=="Configured")].status
       name: Configured
       type: string
@@ -107,7 +110,11 @@ spec:
                 description: |-
                   Conditions reports this Instance's state. Discovered is set true once
                   one of spec.interfaces has been successfully probed — see
-                  pkg/domain/instance's Reconciler. Once claimed by an InstancePool and
+                  pkg/domain/instance's Reconciler. Live tracks the same liveness
+                  signal for this Instance's entire lifecycle, unclaimed candidate
+                  through full cluster member — see pkg/domain/instance's
+                  DiscoveredConditionType and pkg/domain/taloscluster's own
+                  MemberLiveConditionType docs. Once claimed by an InstancePool and
                   picked up by a TalosCluster's member reconciler, three more get set
                   there, tracking bootstrap progress: Configured (machine config
                   applied), Joined (node rejoined with its real post-config identity),
@@ -173,6 +180,86 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              cpus:
+                description: |-
+                  CPUs lists the processor sockets discovered on this Instance — see
+                  InstanceCPUStatus. Populated the same way, and at the same time, as
+                  Interfaces.
+                items:
+                  description: |-
+                    InstanceCPUStatus is one processor socket discovered on this Instance, via
+                    Talos's COSI hardware.Processor resource — see InstanceDiskStatus's own
+                    doc for the one-shot-snapshot caveat, which applies here too.
+                  properties:
+                    coreCount:
+                      description: CoreCount is the processor's physical core count.
+                      format: int32
+                      type: integer
+                    manufacturer:
+                      description: Manufacturer is the processor's reported manufacturer,
+                        when available.
+                      type: string
+                    maxSpeedMhz:
+                      description: MaxSpeedMHz is the processor's maximum clock speed,
+                        in megahertz.
+                      format: int32
+                      type: integer
+                    productName:
+                      description: ProductName is the processor's reported model name,
+                        when available.
+                      type: string
+                    threadCount:
+                      description: ThreadCount is the processor's logical (hyperthreaded)
+                        core count.
+                      format: int32
+                      type: integer
+                  type: object
+                type: array
+              disks:
+                description: |-
+                  Disks lists the disks discovered on this Instance — see
+                  InstanceDiskStatus. Populated the same way, and at the same time, as
+                  Interfaces.
+                items:
+                  description: |-
+                    InstanceDiskStatus is one disk discovered on this Instance, via Talos's
+                    COSI block.Disk resource while probing spec.interfaces in maintenance
+                    mode — see issue #76. A one-shot snapshot from initial discovery, not
+                    re-probed afterward (a disk swap after discovery isn't detected).
+                  properties:
+                    devPath:
+                      description: DevPath is the disk's kernel device path (e.g.
+                        /dev/sda).
+                      type: string
+                    model:
+                      description: Model is the disk's reported model name, when available.
+                      type: string
+                    prettySize:
+                      description: |-
+                        PrettySize is Size in human-readable form (e.g. "512 GB"), as Talos
+                        itself formats it.
+                      type: string
+                    rotational:
+                      description: Rotational is true for spinning disks, false for
+                        solid-state ones.
+                      type: boolean
+                    serial:
+                      description: Serial is the disk's reported serial number, when
+                        available.
+                      type: string
+                    size:
+                      description: Size is the disk's size in bytes.
+                      format: int64
+                      type: integer
+                    transport:
+                      description: |-
+                        Transport is the disk's bus/transport type (e.g. nvme, sata), when
+                        available.
+                      type: string
+                  required:
+                  - devPath
+                  type: object
+                type: array
               interfaces:
                 description: |-
                   Interfaces lists the network interfaces discovered on this Instance —
@@ -200,6 +287,47 @@ spec:
                       type: string
                   required:
                   - name
+                  type: object
+                type: array
+              lastProbeTime:
+                description: |-
+                  LastProbeTime is when this Instance's liveness (see the Live
+                  condition below) was last actively checked — distinct from a
+                  condition's own LastTransitionTime, which only updates on a status
+                  flip. Mirrors corev1.PodCondition.LastProbeTime and
+                  KontinuumStatus.LastHeartbeatTime's own precedent.
+                format: date-time
+                type: string
+              memory:
+                description: |-
+                  Memory lists the memory modules discovered on this Instance — see
+                  InstanceMemoryStatus. Populated the same way, and at the same time,
+                  as Interfaces.
+                items:
+                  description: |-
+                    InstanceMemoryStatus is one memory module (DIMM) discovered on this
+                    Instance, via Talos's COSI hardware.MemoryModule resource — see
+                    InstanceDiskStatus's own doc for the one-shot-snapshot caveat, which
+                    applies here too.
+                  properties:
+                    manufacturer:
+                      description: Manufacturer is the module's reported manufacturer,
+                        when available.
+                      type: string
+                    serial:
+                      description: Serial is the module's reported serial number,
+                        when available.
+                      type: string
+                    sizeMib:
+                      description: SizeMiB is the module's capacity, in mebibytes.
+                      format: int32
+                      type: integer
+                    speed:
+                      description: |-
+                        Speed is the module's reported speed in megatransfers per second
+                        (MT/s), when available.
+                      format: int32
+                      type: integer
                   type: object
                 type: array
               talos:
