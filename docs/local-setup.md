@@ -9,6 +9,7 @@
   ```
 - [Docker](https://docs.docker.com/get-docker/) (for the hot-reload dev environment)
 - [kubectl](https://kubernetes.io/docs/tasks/tools/)
+- `/dev/kvm` (hardware virtualization) on the Docker host — needed by the `talos` service's QEMU-based node, see below
 
 ## Build & run
 
@@ -46,7 +47,7 @@ For local development, copy `.env.example` to `.env` and adjust as needed — `m
 
 ## Trying the full zone flow locally
 
-`make dev`'s `talos` service is a real single-node Talos "cluster" — actual Talos OS running in container mode (not a VM), the same shape [`pkg/domain/taloscluster`'s own e2e tests](https://github.com/nicklasfrahm-dev/kontinuum/blob/main/pkg/domain/taloscluster/e2e_test.go) boot — so you can exercise [Add zone](workflows/zone-add.md)'s entire flow end to end without any real hardware.
+`make dev`'s `talos` service is a real single-node Talos "cluster" — actual Talos OS running as a QEMU/KVM VM (see [`hack/talos-qemu`](https://github.com/nicklasfrahm-dev/kontinuum/blob/main/hack/talos-qemu)), not Talos's own Docker container-mode image — so you can exercise [Add zone](workflows/zone-add.md)'s entire flow end to end, including [Remove zone](workflows/zone-remove.md)'s reset step, without any real hardware. Container-mode Talos can't do that last part: its `runtime.ModeContainer` Reset sequence never actually wipes disks or reboots, no matter how it's called — a structural limitation of that image, not a kontinuum bug. A QEMU-booted node reports `runtime.ModeMetal` instead, so Reset behaves exactly like it would on real hardware.
 
 Once it's up, add the zone the same way you would against real hardware — just point `--talos-address` at the `talos` service's own Compose DNS name instead of a real machine's IP:
 

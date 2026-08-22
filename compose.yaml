@@ -59,36 +59,27 @@ services:
       postgres:
         condition: service_healthy
 
-  # A single-node Talos "cluster" — real Talos OS running in container
-  # mode (not a VM), the same shape the taloscluster/instance packages'
-  # own e2e tests boot — for exercising kontinuum's full zone-bootstrap
+  # A single-node Talos "cluster" — real Talos OS running as a QEMU/KVM VM
+  # (see hack/talos-qemu) — for exercising kontinuum's full zone-bootstrap
   # flow locally end to end: `kontinuum zone add --talos-address talos
   # ...` (see docs/local-setup.md — "talos", the Compose service name, is
   # resolved to this container's own IP by zone.Add itself before it's
-  # ever stored; see instancedomain.ResolveAddress). Its own docker run shape
-  # (privileged, host cgroup namespace, tmpfs for /run|/system|/tmp,
-  # anonymous volumes for the directories Talos's container-mode init
-  # expects writable) mirrors
-  # pkg/domain/taloscluster/e2e_test.go's startTalosContainer.
+  # ever stored; see instancedomain.ResolveAddress). Deliberately not the
+  # Docker container-mode image pkg/domain/taloscluster's own e2e tests
+  # use: Talos's runtime.ModeContainer Reset sequence never wipes disks or
+  # reboots, no matter how it's called — a structural limitation of that
+  # image, not a kontinuum bug (see hack/talos-qemu/entrypoint.sh's own
+  # doc) — so a container-mode node can never actually be reset back to
+  # maintenance mode locally the way `zone remove` expects. Requires
+  # /dev/kvm (hardware virtualization) on the Docker host.
   talos:
     profiles: ["dev"]
-    image: ghcr.io/siderolabs/talos:v1.13.0
+    build:
+      context: hack/talos-qemu
+      dockerfile: Containerfile
     privileged: true
-    cgroup: host
-    security_opt:
-      - seccomp=unconfined
-      - apparmor=unconfined
-    tmpfs:
-      - /run
-      - /system
-      - /tmp
     volumes:
-      - talos_state:/system/state
-      - talos_var:/var
-      - talos_etc_cni:/etc/cni
-      - talos_etc_kubernetes:/etc/kubernetes
-      - talos_libexec_kubernetes:/usr/libexec/kubernetes
-      - talos_opt:/opt
+      - talos_disk:/data
 
   # Self-signed TLS termination in front of kontinuum-dev. kubectl (via
   # client-go) refuses to send the bearer token that the oidc-login exec
@@ -113,12 +104,7 @@ volumes:
   go_mod_cache:
   go_build_cache:
   caddy_data:
-  talos_state:
-  talos_var:
-  talos_etc_cni:
-  talos_etc_kubernetes:
-  talos_libexec_kubernetes:
-  talos_opt:
+  talos_disk:
 
 configs:
   caddyfile:
