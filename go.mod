@@ -1,6 +1,6 @@
 module github.com/nicklasfrahm/kontinuum
 
-go 1.26.5
+go 1.26.7
 
 tool (
 	github.com/golangci/golangci-lint/v2/cmd/golangci-lint
@@ -26,7 +26,7 @@ require (
 	github.com/google/cel-go v0.27.0
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
-	github.com/kommodity-io/kommodity v0.163.0
+	github.com/kommodity-io/kommodity v0.164.2-0.20260822101714-049f9b252a88
 	github.com/lmittmann/tint v1.2.0
 	github.com/moby/moby/api v1.55.0
 	github.com/siderolabs/kms-client v0.2.0

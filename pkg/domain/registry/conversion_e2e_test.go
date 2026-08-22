@@ -198,11 +198,13 @@ func startTestServer(ctx context.Context, t *testing.T, withController bool) (ct
 	require.NoError(t, v1alpha2.AddToScheme(scheme))
 	require.NoError(t, corev1.AddToScheme(scheme))
 
-	caBundle, err := registry.EnsureConversionWebhookCert()
-	require.NoError(t, err)
+	// Declared before libkapi.New returns it below so ensureCRD's own
+	// closure can read server.WebhookCABundle() once it actually runs —
+	// see pkg/cli/serve.go's buildServer's identical pattern.
+	var server *libkapi.Server
 
 	ensureCRD := func(ctx context.Context, loopbackConfig *restclient.Config) error {
-		return registry.EnsureCRD(ctx, loopbackConfig, caBundle, logger)
+		return registry.EnsureCRD(ctx, loopbackConfig, server.WebhookCABundle(), logger)
 	}
 
 	addr := freeAddr(ctx, t)
@@ -228,7 +230,9 @@ func startTestServer(ctx context.Context, t *testing.T, withController bool) (ct
 		)
 	}
 
-	server, err := libkapi.New(ctx, opts...)
+	var err error
+
+	server, err = libkapi.New(ctx, opts...)
 	require.NoError(t, err)
 
 	go func() { _ = server.ListenAndServe(ctx) }()

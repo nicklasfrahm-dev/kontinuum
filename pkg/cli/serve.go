@@ -373,6 +373,23 @@ func buildServer(
 		return nil, nil, nil, err
 	}
 
+	// server is declared here, before libkapi.New returns it below, purely
+	// so ensureCRD's own closure can read server.WebhookCABundle() once it
+	// actually runs — a WithPostStartHook closure doesn't receive the
+	// *libkapi.Server that's running it, so capturing this variable by
+	// reference (assigned with "=", not ":=", at the New call below) is
+	// libkapi's own documented way to reach it from inside one. Safe to
+	// read there specifically because libkapi's own webhook-cert sync
+	// step runs strictly before any WithPostStartHook fires — see
+	// Server.WebhookCABundle's own doc.
+	var server *libkapi.Server
+
+	registryLogger := logger.With("component", "registry")
+
+	ensureCRD := func(ctx context.Context, loopbackConfig *rest.Config) error {
+		return registry.EnsureCRD(ctx, loopbackConfig, server.WebhookCABundle(), registryLogger)
+	}
+
 	storage, relayCleanup, err := resolveStorageDSN(cfg.Server.Storage, cfg.Server.GRPC.InsecureTLSSkipVerify)
 	if err != nil {
 		return nil, nil, nil, err
@@ -402,14 +419,26 @@ func buildServer(
 		libkapi.WithLogger(logger),
 		libkapi.WithServerFactory(customHandlers(uiRouter, oidcHandler, scheme)),
 		libkapi.WithGarbageCollector(libkapi.GarbageCollectorConfig{}),
+		// WithSystemNamespace is where libkapi persists/syncs its own
+		// system-managed state across every replica sharing this same
+		// central storage — today, the conversion webhook's serving
+		// certificate (see registryOptions' own WithWebhookServer and
+		// ensureCRD above); kontinuum reuses its own existing
+		// kontinuum-system namespace rather than libkapi's "libkapi"
+		// default, since that namespace is already where every other
+		// system-managed object in this codebase lives (see
+		// v1alpha2.KontinuumSystemNamespace's own doc).
+		libkapi.WithSystemNamespace(v1alpha2.KontinuumSystemNamespace),
+		libkapi.WithPostStartHook(ensureCRD),
 	}, authOpts, registryOpts, instanceOptions(logger, zoneLease), instancePoolOptions(logger, zoneLease),
 		talosClusterOptions(logger, zoneLease), addonOptions(logger, zoneLease), zoneOptions(cfg, logger, zoneLease),
 		adminRBACOptions(cfg, logger, zoneLease))
 
 	// Storage is resolved against a background context so the backend
 	// is only torn down by Server.Shutdown, not by the signal context
-	// that drives ListenAndServe.
-	server, err := libkapi.New(context.Background(), opts...)
+	// that drives ListenAndServe. "=" not ":=" — server is already declared
+	// above, and ensureCRD's own closure captures it by reference.
+	server, err = libkapi.New(context.Background(), opts...)
 	if err != nil {
 		relayCleanup()
 
@@ -490,32 +519,25 @@ func resolveStorageDSN(configured, insecureSkipVerify string) (string, func(), e
 // registryOptions builds the libkapi options that wire kontinuum's server
 // registry (see pkg/domain/registry) onto the Server: WithScheme registers
 // Kontinuum's GVK so the registry controller's watches (and EnsureCRD's own
-// client) resolve; WithPostStartHook ensures the kontinuums.kontinuum.sh CRD
-// exists as soon as the listener is up, before the controller manager
-// starts — see registry.EnsureCRD's doc for why that timing matters;
-// WithWebhookServer provisions the TLS-serving webhook the CRD's
-// v1alpha1<->v1alpha2 conversion (registered by Controller.SetupWithManager)
-// answers on; and WithController hands the TTL reconciler and heartbeat
-// runnable off to libkapi's own Manager lifecycle, started once the server
-// is serving, stopped before the HTTP listener closes on Shutdown. The
-// returned *registry.Controller is buildServer's own return value, passed
-// through unchanged — see its doc.
+// client) resolve; WithWebhookServer provisions the TLS-serving webhook the
+// CRD's v1alpha1<->v1alpha2 conversion (registered by
+// Controller.SetupWithManager) answers on — its certificate is synced
+// across every replica sharing this same central storage and hot-rotated by
+// libkapi itself (see WithSystemNamespace, wired in by buildServer); and
+// WithController hands the TTL reconciler and heartbeat runnable off to
+// libkapi's own Manager lifecycle, started once the server is serving,
+// stopped before the HTTP listener closes on Shutdown. The
+// WithPostStartHook that actually applies the CRD (registry.EnsureCRD) is
+// registered by buildServer itself, not here — it needs the *libkapi.Server
+// value this function's own caller doesn't have yet (see buildServer's own
+// doc for why). The returned *registry.Controller is buildServer's own
+// return value, passed through unchanged — see its doc.
 func registryOptions(
 	cfg *config.Config, logger *slog.Logger, scheme *runtime.Scheme, zoneLease zonelease.Identity,
 ) ([]libkapi.Option, *registry.Controller, error) {
 	role, err := registry.Role(cfg.Server.Region, cfg.Server.Zone)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to determine server registry role: %w", err)
-	}
-
-	// Provisioned here, before ListenAndServe, rather than left to
-	// libkapi's own (later, internal) webhook cert generation — see
-	// registry.EnsureConversionWebhookCert's doc for why the ordering
-	// matters: the CRD's conversion webhook clientConfig needs this cert's
-	// bytes on its very first apply.
-	caBundle, err := registry.EnsureConversionWebhookCert()
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to provision conversion webhook certificate: %w", err)
 	}
 
 	registryLogger := logger.With("component", "registry")
@@ -531,13 +553,8 @@ func registryOptions(
 		ZoneLease:     zoneLease,
 	})
 
-	ensureCRD := func(ctx context.Context, loopbackConfig *rest.Config) error {
-		return registry.EnsureCRD(ctx, loopbackConfig, caBundle, registryLogger)
-	}
-
 	return []libkapi.Option{
 		libkapi.WithScheme(scheme),
-		libkapi.WithPostStartHook(ensureCRD),
 		libkapi.WithController(controller),
 		libkapi.WithWebhookServer(libkapi.WebhookConfig{Port: registry.ConversionWebhookPort}),
 	}, controller, nil
