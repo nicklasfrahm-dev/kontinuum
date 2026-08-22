@@ -15,6 +15,9 @@ pkg/ui/assets/vendor/
 *.db-shm
 *.db-wal
 
+# Log files
+*.log
+
 # air hot-reload temp
 /tmp/
 
