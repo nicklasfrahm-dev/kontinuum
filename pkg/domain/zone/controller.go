@@ -419,7 +419,7 @@ func (r *Reconciler) reconcileInstall(
 	if err != nil {
 		r.Logger.Warn("downstream kubeconfig not yet available", "zone", zoneObj.Name, "error", err)
 
-		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonDownstreamNotReady, err.Error())
+		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonDownstreamNotReady, err.Error(), false)
 	}
 
 	downstream, err := r.DownstreamClientBuilder.Build(kubeconfig)
@@ -431,14 +431,14 @@ func (r *Reconciler) reconcileInstall(
 	if err != nil {
 		r.Logger.Warn("no storage credentials to propagate yet", "zone", zoneObj.Name, "error", err)
 
-		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonNoStorageSecret, err.Error())
+		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonNoStorageSecret, err.Error(), false)
 	}
 
 	image, err := r.resolveImage(ctx)
 	if err != nil {
 		r.Logger.Warn("no kontinuum version to deploy yet", "zone", zoneObj.Name, "error", err)
 
-		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonNoVersionFound, err.Error())
+		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonNoVersionFound, err.Error(), false)
 	}
 
 	// hostname stays empty when spec.domain is unset — installNetwork (and
@@ -459,7 +459,7 @@ func (r *Reconciler) reconcileInstall(
 
 	err = r.installWorkload(ctx, downstream, zoneObj, storage, image, hostname)
 	if err != nil {
-		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonInstallFailed, err.Error())
+		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonInstallFailed, err.Error(), false)
 	}
 
 	// No restart to force here: the zone's own kontinuum-server watches its
@@ -502,31 +502,31 @@ func (r *Reconciler) finishInstallWithDomain(
 	if err != nil {
 		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonWaitingForDNSConfiguration,
 			"waiting for a dns provider and credential to be configured on the hub before exposing "+hostname+
-				"; see docs/workflows/zone-add.md")
+				"; see docs/workflows/zone-add.md", false)
 	}
 
 	err = r.reconcileExternalDNSAddon(ctx, cluster, downstream, provider, credential)
 	if err != nil {
-		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonInstallFailed, err.Error())
+		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonInstallFailed, err.Error(), false)
 	}
 
 	certReady, err := r.installNetwork(ctx, downstream, hostname)
 	if err != nil {
-		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonInstallFailed, err.Error())
+		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonInstallFailed, err.Error(), false)
 	}
 
-	err = r.reconcileDNS(ctx, zoneObj, downstream, hostname)
+	dnsChanged, err := r.reconcileDNS(ctx, zoneObj, downstream, hostname)
 	if err != nil {
-		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonInstallFailed, err.Error())
+		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonInstallFailed, err.Error(), false)
 	}
 
 	if !certReady {
 		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonWaitingForCertificate,
-			"waiting for cert-manager to issue "+hostname+"'s certificate")
+			"waiting for cert-manager to issue "+hostname+"'s certificate", dnsChanged)
 	}
 
 	result, err := r.setInstalledCondition(ctx, zoneObj, metav1.ConditionTrue, reasonInstalled,
-		"kontinuum-server installed and serving at "+hostname)
+		"kontinuum-server installed and serving at "+hostname, dnsChanged)
 	if err != nil {
 		return result, err
 	}
@@ -541,7 +541,7 @@ func (r *Reconciler) finishInstallWithDomain(
 // never runs at all.
 func (r *Reconciler) finishInstallWithoutDomain(ctx context.Context, zoneObj *v1alpha2.Zone) (ctrl.Result, error) {
 	result, err := r.setInstalledCondition(ctx, zoneObj, metav1.ConditionTrue, reasonInstalled,
-		"kontinuum-server installed (no spec.domain configured — network exposure skipped)")
+		"kontinuum-server installed (no spec.domain configured — network exposure skipped)", false)
 	if err != nil {
 		return result, err
 	}
@@ -662,12 +662,25 @@ func (r *Reconciler) setClusterReadyCondition(
 // status. Only the blocking (False) case propagates to Ready here — mirrors
 // setClusterReadyCondition's own doc for why a True status doesn't: it just
 // means reconcileRegistryJoin is about to run, not that the Zone is ready.
+//
+// otherChanged folds in a change already made to some other condition on
+// zoneObj before this call (see reconcileDNS's own doc for why
+// DNSRecordConditionType is written here rather than with its own separate
+// persistStatus call) — without it, a reconcileDNS-only change (e.g.
+// DNSRecord flipping WaitingForGatewayAddress -> DNSRecordCreated) would
+// never reach persistStatus's own changed check if Installed's own
+// Status/Reason/Message happen to be unchanged from the previous pass, and
+// the whole in-memory update would be silently dropped instead of
+// persisted. Every caller that isn't following a reconcileDNS call passes
+// false.
 func (r *Reconciler) setInstalledCondition(
 	ctx context.Context, zoneObj *v1alpha2.Zone, status metav1.ConditionStatus, reason, message string,
+	otherChanged bool,
 ) (ctrl.Result, error) {
 	changed := meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
 		Type: InstalledConditionType, Status: status, Reason: reason, Message: message,
 	})
+	changed = changed || otherChanged
 
 	if status == metav1.ConditionFalse {
 		readyChanged := meta.SetStatusCondition(&zoneObj.Status.Conditions, metav1.Condition{
