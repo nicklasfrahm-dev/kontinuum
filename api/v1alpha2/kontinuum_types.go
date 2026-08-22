@@ -118,9 +118,12 @@ type KontinuumServerConfigStatus struct {
 	// Storage is the storage connection string with any embedded
 	// credentials stripped (see pkg/config.RedactStorage). The
 	// credential-bearing original lives in the Secret
-	// KontinuumStatus.SecretRef points to.
+	// KontinuumStatus.SecretRef points to. Tagged `secret:"true"` — not a
+	// kubebuilder marker, just consulted by pkg/config.Config.EnvVars —
+	// so pkg/domain/zone routes a joined zone's own copy of this env var
+	// into its Secret rather than its broadly-readable ConfigMap.
 	// +optional
-	Storage string `default:"sqlite://kontinuum.db" json:"storage"`
+	Storage string `default:"sqlite://kontinuum.db" json:"storage" secret:"true"`
 	// Region duplicates spec.region — see this type's own doc.
 	// +optional
 	Region string `default:"" json:"region"`

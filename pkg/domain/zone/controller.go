@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
+	"github.com/nicklasfrahm/kontinuum/pkg/config"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/taloscluster"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/zonelease"
 )
@@ -113,15 +114,19 @@ type Config struct {
 	// NewDownstreamClientBuilder() when nil — the seam tests inject a fake
 	// through, the same role addon.Installer plays for Helm installs.
 	DownstreamClientBuilder DownstreamClientBuilder
-	// ACMEEmail and ACMEServer configure the cert-manager ClusterIssuer this
-	// package creates on every joined zone's downstream cluster — see
-	// pkg/config's KONTINUUM_ACME_EMAIL/KONTINUUM_ACME_SERVER.
-	ACMEEmail  string
-	ACMEServer string
-	// Auth mirrors the hub's own authentication choice onto every joined
-	// zone's own kontinuum-server — see AuthConfig's own doc for why this
-	// is required, not optional.
-	Auth AuthConfig
+	// HubConfig is this hub's own loaded configuration — ensureEnv (see
+	// workload.go) copies every env var it produces (see
+	// config.Config.EnvVars) onto every joined zone's own kontinuum-env
+	// Secret/ConfigMap, overridden only where a straight copy would be
+	// wrong for that zone specifically (see zoneEnvOverrides): its own
+	// identity (region/zone), its own storage DSN, and — when it has a
+	// domain configured — its own OIDC redirect URL. Without this, the
+	// deployed process also fails its own startup check
+	// (pkg/config.Config.ValidateAuthentication, which refuses to start
+	// unless exactly one of OIDCIssuerURL or InsecureAllowAnonymous is
+	// set) and exits immediately, before it ever gets a chance to
+	// heartbeat and join the hub's registry.
+	HubConfig *config.Config
 	// ImageRepo is the kontinuum container image repository this package
 	// deploys onto every joined zone's downstream cluster (e.g.
 	// "ghcr.io/nicklasfrahm-dev/kontinuum") — see pkg/cli/serve.go's
@@ -129,19 +134,6 @@ type Config struct {
 	// time, from whatever version an already-registered Kontinuum reports —
 	// see resolveImage's own doc.
 	ImageRepo string
-	// GRPCEndpoint is this hub's own publicly reachable "host:port" for
-	// its etcd gRPC proxy (see pkg/domain/etcdproxy and
-	// v1alpha2.KontinuumGRPCConfigStatus's own doc) — read from the hub's
-	// own KONTINUUM_SERVER_GRPC_ENDPOINT, and used by zoneStorageDSN to
-	// build every newly joined zone's own KONTINUUM_SERVER_STORAGE.
-	GRPCEndpoint string
-	// GRPCInsecureSkipVerify mirrors the hub's own
-	// KONTINUUM_SERVER_GRPC_INSECURE_TLS_SKIP_VERIFY (see
-	// v1alpha2.KontinuumGRPCConfigStatus's own doc) onto every newly joined
-	// zone's own ConfigMap — see ensureConfigMap's own doc for why this,
-	// not GRPCEndpoint above, is what a joined zone's own deployed process
-	// actually needs to dial GRPCEndpoint successfully.
-	GRPCInsecureSkipVerify string
 	// RetryInterval is how long Reconcile waits before retrying a step that
 	// hasn't converged yet. Defaults to fifteen seconds when zero.
 	RetryInterval time.Duration
@@ -156,34 +148,6 @@ type Config struct {
 	// the same central storage never reconcile the same Zone at once, and a
 	// zone's own process never reconciles its own Zone at all.
 	ZoneLease zonelease.Identity
-}
-
-// AuthConfig mirrors the hub's own authentication choice onto every joined
-// zone's own kontinuum-server ConfigMap (see ensureConfigMap) — without it,
-// the deployed process fails its own startup check
-// (pkg/config.Config.ValidateAuthentication, which refuses to start unless
-// exactly one of OIDCIssuerURL or InsecureAllowAnonymous is set) and exits
-// immediately, before it ever gets a chance to heartbeat and join the hub's
-// registry. Exactly one of InsecureAllowAnonymous ("true") or OIDCIssuerURL
-// is expected to be set here, mirroring the hub's own already-validated
-// choice — this package trusts that invariant rather than re-checking it,
-// since runServe already calls ValidateAuthentication on the hub's own cfg
-// before the zone controller is ever wired up (see pkg/cli/serve.go).
-type AuthConfig struct {
-	// InsecureAllowAnonymous is the hub's own KONTINUUM_INSECURE_ALLOW_ANONYMOUS
-	// value, forwarded verbatim.
-	InsecureAllowAnonymous string
-	// OIDCIssuerURL, OIDCClientID, and OIDCAdminGroups are the hub's own
-	// KONTINUUM_OIDC_ISSUER_URL/_CLIENT_ID/_ADMIN_GROUPS values, forwarded
-	// verbatim. Empty when the hub itself has no OIDC configured. Unlike
-	// those three, KONTINUUM_OIDC_REDIRECT_URL is never forwarded from the
-	// hub's own value — ensureConfigMap computes a zone-specific one from
-	// its own <zone>.<region>.<domain> hostname instead, since a redirect
-	// URL registered with the issuer for the hub's own host would never
-	// match a browser completing a login against this zone's own /app UI.
-	OIDCIssuerURL   string
-	OIDCClientID    string
-	OIDCAdminGroups string
 }
 
 // Controller wires the Zone downstream-install reconciler onto a
@@ -218,12 +182,8 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 	reconciler := &Reconciler{
 		Client:                  mgr.GetClient(),
 		DownstreamClientBuilder: c.Config.DownstreamClientBuilder,
-		ACMEEmail:               c.Config.ACMEEmail,
-		ACMEServer:              c.Config.ACMEServer,
-		Auth:                    c.Config.Auth,
+		HubConfig:               c.Config.HubConfig,
 		ImageRepo:               c.Config.ImageRepo,
-		GRPCEndpoint:            c.Config.GRPCEndpoint,
-		GRPCInsecureSkipVerify:  c.Config.GRPCInsecureSkipVerify,
 		RetryInterval:           c.Config.RetryInterval,
 		TeardownTimeout:         c.Config.TeardownTimeout,
 		Locker: zonelease.NewLocker(
@@ -259,12 +219,8 @@ func mapTalosClusterToZone(_ context.Context, obj client.Object) []ctrl.Request 
 type Reconciler struct {
 	Client                  client.Client
 	DownstreamClientBuilder DownstreamClientBuilder
-	ACMEEmail               string
-	ACMEServer              string
-	Auth                    AuthConfig
+	HubConfig               *config.Config
 	ImageRepo               string
-	GRPCEndpoint            string
-	GRPCInsecureSkipVerify  string
 	RetryInterval           time.Duration
 	TeardownTimeout         time.Duration
 	// Locker gates every write below against zonelease — see
@@ -566,8 +522,8 @@ func (r *Reconciler) resolveImage(ctx context.Context) (string, error) {
 
 // installWorkload ensures the namespace, kontinuum-env Secret/ConfigMap,
 // Deployment, and Service — see workload.go. hostname is the zone's own
-// <zone>.<region>.<domain> — only used to compute r.Auth's own
-// zone-specific OIDC redirect URL (see AuthConfig's own doc), not part of
+// <zone>.<region>.<domain>, only used to compute a zone-specific OIDC
+// redirect URL (see zoneEnvOverrides) when non-empty — not part of
 // storage/region/zone.
 func (r *Reconciler) installWorkload(
 	ctx context.Context, downstream client.Client, zoneObj *v1alpha2.Zone, storage, image, hostname string,
@@ -577,14 +533,9 @@ func (r *Reconciler) installWorkload(
 		return err
 	}
 
-	err = ensureSecret(ctx, downstream, downstreamNamespace, storage)
-	if err != nil {
-		return err
-	}
+	overrides := zoneEnvOverrides(zoneObj.Spec.Region, zoneObj.Spec.Zone, storage, hostname)
 
-	err = ensureConfigMap(ctx, downstream, downstreamNamespace,
-		zoneObj.Spec.Region, zoneObj.Spec.Zone, hostname, r.ACMEEmail, r.ACMEServer,
-		r.GRPCEndpoint, r.GRPCInsecureSkipVerify, r.Auth)
+	err = ensureEnv(ctx, downstream, downstreamNamespace, r.HubConfig, overrides)
 	if err != nil {
 		return err
 	}

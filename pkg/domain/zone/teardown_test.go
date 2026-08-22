@@ -90,10 +90,8 @@ func TestReconcileTeardownDeletesDownstreamAndTalosCluster(t *testing.T) {
 	reconciler := &zone.Reconciler{
 		Client:                  hubClient,
 		DownstreamClientBuilder: fakeDownstreamClientBuilder{client: downstream},
-		ACMEEmail:               "ops@example.com",
-		ACMEServer:              "https://acme-v02.api.letsencrypt.org/directory",
+		HubConfig:               testHubConfig(),
 		ImageRepo:               testImageRepo,
-		GRPCEndpoint:            testGRPCEndpoint,
 		RetryInterval:           testRetryInterval,
 		TeardownTimeout:         testTeardownTimeout,
 		Locker:                  zonelease.NewLocker(hubClient, "test-hub", "", 0),

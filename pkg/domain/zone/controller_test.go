@@ -25,6 +25,7 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
+	"github.com/nicklasfrahm/kontinuum/pkg/config"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/etcdproxy"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/taloscluster"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/zone"
@@ -46,9 +47,18 @@ const (
 	// testImage is what resolveImage resolves to across most of this file's
 	// tests — see registeredKontinuum/testKontinuumVersion.
 	testImage = testImageRepo + ":" + testKontinuumVersion
-	// testGRPCEndpoint is newReconciler's own Reconciler.GRPCEndpoint —
-	// zoneStorageDSN's own KONTINUUM_SERVER_GRPC_ENDPOINT stand-in.
+	// testGRPCEndpoint is newReconciler's own
+	// Reconciler.HubConfig.Server.GRPC.Endpoint — zoneStorageDSN's own
+	// KONTINUUM_SERVER_GRPC_ENDPOINT stand-in.
 	testGRPCEndpoint = "hub.example.com:8080"
+	// testHubOIDCRedirectURL is the hub's own configured
+	// KONTINUUM_OIDC_REDIRECT_URL in the handful of tests that turn OIDC on
+	// (testHubConfig's own default leaves OIDC unconfigured) — a redirect
+	// URL registered with a real issuer for the hub's own host, standing in
+	// for what a joined zone with no domain of its own must fall back to.
+	//
+	//nolint:gosec // false positive: a URL, not a credential
+	testHubOIDCRedirectURL = "https://hub.example.com/app"
 
 	// testDownstreamNamespace/testDownstreamResourceName mirror
 	// pkg/domain/zone's own unexported downstreamNamespace/deploymentName
@@ -276,16 +286,55 @@ func joinedKontinuum(name string) (*v1alpha2.Kontinuum, *corev1.Secret) {
 	return kontinuum, secret
 }
 
+// testHubConfig is newReconciler's own Reconciler.HubConfig — a hub
+// configured with anonymous access (not OIDC) and a real ACME/GRPC
+// setup, mirroring what a real hub's KONTINUUM_-prefixed env vars would
+// produce (see pkg/config.Load).
+func testHubConfig() *config.Config {
+	return &config.Config{
+		InsecureAllowAnonymous: "true",
+		// Non-default values with no zoneEnvOverrides entry of their own —
+		// assertDownstreamFootprintInstalled checks these land on a joined
+		// zone's own ConfigMap unchanged, proving ensureEnv's straight-copy
+		// path actually works, not just the explicitly-overridden fields.
+		Log: v1alpha2.KontinuumLogConfigStatus{
+			Level:  "debug",
+			Format: "console",
+		},
+		ACME: v1alpha2.KontinuumACMEConfigStatus{
+			Email:  "ops@example.com",
+			Server: "https://acme-v02.api.letsencrypt.org/directory",
+		},
+		Server: v1alpha2.KontinuumServerConfigStatus{
+			GRPC: v1alpha2.KontinuumGRPCConfigStatus{
+				Endpoint:              testGRPCEndpoint,
+				InsecureTLSSkipVerify: "true",
+			},
+		},
+	}
+}
+
+// enableOIDCForTest turns hubConfig's authentication choice from
+// testHubConfig's own anonymous default to a real OIDC setup — shared by
+// the two tests exercising KONTINUUM_OIDC_REDIRECT_URL's own zone-specific
+// override (see zoneEnvOverrides), so neither hand-rolls the same
+// four-field struct literal.
+func enableOIDCForTest(hubConfig *config.Config) {
+	hubConfig.InsecureAllowAnonymous = "false"
+	hubConfig.OIDC = v1alpha2.KontinuumOIDCConfigStatus{
+		IssuerURL:   "https://auth.example.com",
+		ClientID:    "kontinuum",
+		RedirectURL: testHubOIDCRedirectURL,
+		AdminGroups: "example:platform",
+	}
+}
+
 func newReconciler(hubClient client.Client, downstreamBuilder zone.DownstreamClientBuilder) *zone.Reconciler {
 	return &zone.Reconciler{
 		Client:                  hubClient,
 		DownstreamClientBuilder: downstreamBuilder,
-		ACMEEmail:               "ops@example.com",
-		ACMEServer:              "https://acme-v02.api.letsencrypt.org/directory",
-		Auth:                    zone.AuthConfig{InsecureAllowAnonymous: "true"},
+		HubConfig:               testHubConfig(),
 		ImageRepo:               testImageRepo,
-		GRPCEndpoint:            testGRPCEndpoint,
-		GRPCInsecureSkipVerify:  "true",
 		RetryInterval:           testRetryInterval,
 		Locker:                  zonelease.NewLocker(hubClient, "test-hub", "", 0),
 		Logger:                  slog.Default(),
@@ -391,7 +440,7 @@ func TestReconcileReportsNoStorageSecretFound(t *testing.T) {
 
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret())
 	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: newDownstreamFakeClient(t)})
-	reconciler.GRPCEndpoint = ""
+	reconciler.HubConfig.Server.GRPC.Endpoint = ""
 
 	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
@@ -512,6 +561,13 @@ func TestReconcileRotatesEtcdIdentityAndBumpsRestartAnnotation(t *testing.T) {
 // flip True as soon as the workload itself installs, and none of
 // ClusterIssuer/Gateway/HTTPRoute/Certificate — meaningless without a real
 // hostname — get created at all.
+//
+// It also covers the same gap for KONTINUUM_OIDC_REDIRECT_URL: with no
+// hostname to compute a zone-specific one from, zoneEnvOverrides used to
+// still unconditionally set "https://" + "" + "/app" — a malformed URL, on
+// every zone with no domain configured, not just this one's own local-dev
+// case. It must instead fall back to the hub's own configured redirect
+// URL, exactly like every other field ensureEnv doesn't override.
 func TestReconcileSkipsNetworkInstallWhenDomainUnset(t *testing.T) {
 	t.Parallel()
 
@@ -523,6 +579,7 @@ func TestReconcileSkipsNetworkInstallWhenDomainUnset(t *testing.T) {
 	hubClient := newHubFakeClient(t, zoneObj, readyTalosCluster(), kubeconfigSecret(), kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)
 	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: downstream})
+	enableOIDCForTest(reconciler.HubConfig)
 
 	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
@@ -540,6 +597,13 @@ func TestReconcileSkipsNetworkInstallWhenDomainUnset(t *testing.T) {
 	require.NoError(t, downstream.Get(t.Context(),
 		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &deployment),
 		"the workload itself must still install with no domain configured")
+
+	var configMap corev1.ConfigMap
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: testDownstreamEnvName, Namespace: testDownstreamNamespace}, &configMap))
+	assert.Equal(t, testHubOIDCRedirectURL, configMap.Data["KONTINUUM_OIDC_REDIRECT_URL"],
+		"no hostname to compute a zone-specific redirect URL from — must fall back to the hub's own "+
+			`value, not a malformed "https:///app"`)
 
 	var issuer certmanagerv1.ClusterIssuer
 
@@ -563,6 +627,36 @@ func TestReconcileSkipsNetworkInstallWhenDomainUnset(t *testing.T) {
 	err = downstream.Get(t.Context(),
 		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &cert)
 	assert.True(t, apierrors.IsNotFound(err), "no certificate without a domain to issue one for")
+}
+
+// TestReconcileComputesZoneSpecificOIDCRedirectURL covers the opposite
+// case from TestReconcileSkipsNetworkInstallWhenDomainUnset: a zone with a
+// real hostname (testZoneObject's own spec.domain) must get its own
+// "https://<zone>.<region>.<domain>/app" redirect URL, not a straight copy
+// of the hub's own value — a redirect URL registered with the issuer for
+// the hub's own host would never match a browser completing a login
+// against this zone's own domain.
+func TestReconcileComputesZoneSpecificOIDCRedirectURL(t *testing.T) {
+	t.Parallel()
+
+	kontinuum, kontinuumSecret := registeredKontinuum("hub")
+	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
+		kontinuum, kontinuumSecret)
+	downstream := newDownstreamFakeClient(t)
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: downstream})
+	enableOIDCForTest(reconciler.HubConfig)
+
+	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	var configMap corev1.ConfigMap
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: testDownstreamEnvName, Namespace: testDownstreamNamespace}, &configMap))
+	assert.Equal(t, "https://"+testZone+"."+testRegion+"."+testDomain+"/app",
+		configMap.Data["KONTINUUM_OIDC_REDIRECT_URL"])
+	// Everything else OIDC still copies straight from the hub.
+	assert.Equal(t, "https://auth.example.com", configMap.Data["KONTINUUM_OIDC_ISSUER_URL"])
+	assert.Equal(t, "example:platform", configMap.Data["KONTINUUM_OIDC_ADMIN_GROUPS"])
 }
 
 // TestReconcileInheritsDevVersionFromRegisteredKontinuum covers resolveImage
@@ -626,6 +720,44 @@ func TestReconcileReportsNoVersionFoundWhenRegisteredKontinuumHasNoVersion(t *te
 	assert.Equal(t, "NoVersionFound", cond.Reason)
 }
 
+// assertDownstreamEnvConfigMap asserts the kontinuum-env ConfigMap
+// assertDownstreamFootprintInstalled fetches carries both the fields
+// zoneEnvOverrides computes fresh for this zone and, unchanged, the
+// fields ensureEnv copies straight off the hub's own HubConfig.EnvVars —
+// split out of that larger helper only to keep it under funlen's limit.
+func assertDownstreamEnvConfigMap(t *testing.T, configMap corev1.ConfigMap) {
+	t.Helper()
+
+	assert.Equal(t, testRegion, configMap.Data["KONTINUUM_SERVER_REGION"])
+	assert.Equal(t, testZone, configMap.Data["KONTINUUM_SERVER_ZONE"])
+	// Without this, the deployed process refuses to even start (see
+	// pkg/config.Config.ValidateAuthentication) and so never gets as far as
+	// heartbeating — the root cause tracked by issue #95.
+	assert.Equal(t, "true", configMap.Data["KONTINUUM_INSECURE_ALLOW_ANONYMOUS"])
+	// Without this, the deployed process's own relay back through the
+	// hub's own KONTINUUM_SERVER_STORAGE endpoint fails real TLS
+	// certificate verification against a self-signed dev proxy and
+	// crash-loops — this process's own env is what actually needs it, not
+	// the hub's (see ensureConfigMap's own doc).
+	assert.Equal(t, "true", configMap.Data["KONTINUUM_SERVER_GRPC_INSECURE_TLS_SKIP_VERIFY"])
+	// Without this, this deployed process's own Zone controller (it runs
+	// the full kontinuum server too — see ensureConfigMap's own doc) logs
+	// "this hub has no KONTINUUM_SERVER_GRPC_ENDPOINT configured" on every
+	// reconcile of any Zone visible in its shared storage, and can't build
+	// a working KONTINUUM_SERVER_STORAGE for any further zone it joins.
+	assert.Equal(t, testGRPCEndpoint, configMap.Data["KONTINUUM_SERVER_GRPC_ENDPOINT"])
+	// Log.Level/Format (see testHubConfig) have no zoneEnvOverrides entry
+	// — they're copied straight off HubConfig.EnvVars() like any other
+	// field with no reason to differ per zone, confirming that path
+	// actually works, not just the explicitly-overridden fields above.
+	assert.Equal(t, "debug", configMap.Data["KONTINUUM_LOG_LEVEL"])
+	assert.Equal(t, "console", configMap.Data["KONTINUUM_LOG_FORMAT"])
+	// Storage is tagged `secret:"true"` (see api/v1alpha2.KontinuumServerConfigStatus)
+	// — ensureEnv must route it into the Secret only, never duplicate it
+	// into the broadly-readable ConfigMap.
+	assert.NotContains(t, configMap.Data, "KONTINUUM_SERVER_STORAGE")
+}
+
 // assertDownstreamFootprintInstalled asserts every object a single
 // Reconcile pass installs onto the zone's own downstream cluster exists
 // with the expected content — namespace, env Secret/ConfigMap, Deployment/
@@ -660,24 +792,7 @@ func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) 
 	var configMap corev1.ConfigMap
 	require.NoError(t, downstream.Get(t.Context(),
 		client.ObjectKey{Name: testDownstreamEnvName, Namespace: testDownstreamNamespace}, &configMap))
-	assert.Equal(t, testRegion, configMap.Data["KONTINUUM_SERVER_REGION"])
-	assert.Equal(t, testZone, configMap.Data["KONTINUUM_SERVER_ZONE"])
-	// Without this, the deployed process refuses to even start (see
-	// pkg/config.Config.ValidateAuthentication) and so never gets as far as
-	// heartbeating — the root cause tracked by issue #95.
-	assert.Equal(t, "true", configMap.Data["KONTINUUM_INSECURE_ALLOW_ANONYMOUS"])
-	// Without this, the deployed process's own relay back through the
-	// hub's own KONTINUUM_SERVER_STORAGE endpoint fails real TLS
-	// certificate verification against a self-signed dev proxy and
-	// crash-loops — this process's own env is what actually needs it, not
-	// the hub's (see ensureConfigMap's own doc).
-	assert.Equal(t, "true", configMap.Data["KONTINUUM_SERVER_GRPC_INSECURE_TLS_SKIP_VERIFY"])
-	// Without this, this deployed process's own Zone controller (it runs
-	// the full kontinuum server too — see ensureConfigMap's own doc) logs
-	// "this hub has no KONTINUUM_SERVER_GRPC_ENDPOINT configured" on every
-	// reconcile of any Zone visible in its shared storage, and can't build
-	// a working KONTINUUM_SERVER_STORAGE for any further zone it joins.
-	assert.Equal(t, testGRPCEndpoint, configMap.Data["KONTINUUM_SERVER_GRPC_ENDPOINT"])
+	assertDownstreamEnvConfigMap(t, configMap)
 
 	var deployment appsv1.Deployment
 	require.NoError(t, downstream.Get(t.Context(),

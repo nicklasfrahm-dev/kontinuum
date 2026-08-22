@@ -640,19 +640,10 @@ const zoneImageRepo = "ghcr.io/nicklasfrahm-dev/kontinuum"
 // ensured by instanceOptions' own ensureCRDs call.
 func zoneOptions(cfg *config.Config, logger *slog.Logger, zoneLease zonelease.Identity) []libkapi.Option {
 	controller := zone.NewController(zone.Config{
-		Logger:     logger.With("component", "zone"),
-		ACMEEmail:  cfg.ACME.Email,
-		ACMEServer: cfg.ACME.Server,
-		Auth: zone.AuthConfig{
-			InsecureAllowAnonymous: cfg.InsecureAllowAnonymous,
-			OIDCIssuerURL:          cfg.OIDC.IssuerURL,
-			OIDCClientID:           cfg.OIDC.ClientID,
-			OIDCAdminGroups:        cfg.OIDC.AdminGroups,
-		},
-		ImageRepo:              zoneImageRepo,
-		GRPCEndpoint:           cfg.Server.GRPC.Endpoint,
-		GRPCInsecureSkipVerify: cfg.Server.GRPC.InsecureTLSSkipVerify,
-		ZoneLease:              zoneLease,
+		Logger:    logger.With("component", "zone"),
+		HubConfig: cfg,
+		ImageRepo: zoneImageRepo,
+		ZoneLease: zoneLease,
 	})
 
 	return []libkapi.Option{libkapi.WithController(controller)}
