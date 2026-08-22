@@ -151,7 +151,7 @@ func TestRelayForwardsAuthenticatedCallsToHub(t *testing.T) {
 		SocketPath:  socketPath,
 		HubEndpoint: hubAddr,
 		Zone:        "eu-eu-1a",
-		PrivateKey:  currentKey,
+		Keys:        etcdproxy.StaticKey(currentKey),
 		Insecure:    true,
 	})
 	require.NoError(t, err)
@@ -175,7 +175,8 @@ func TestRelayForwardsAuthenticatedCallsToHub(t *testing.T) {
 
 // TestRelayAcceptsPreviousIdentityDuringOverlap covers Relay presenting
 // the zone's *previous* identity (the shape it would still hold, briefly,
-// mid-rolling-restart right after a hub-side rotation — see
+// right after a hub-side rotation but before its own watch on the
+// downstream identity Secret observes the new one — see
 // pkg/domain/zone's ensureEtcdIdentity) — the hub must still accept it.
 func TestRelayAcceptsPreviousIdentityDuringOverlap(t *testing.T) {
 	t.Parallel()
@@ -201,7 +202,7 @@ func TestRelayAcceptsPreviousIdentityDuringOverlap(t *testing.T) {
 		SocketPath:  socketPath,
 		HubEndpoint: hubAddr,
 		Zone:        "eu-eu-1a",
-		PrivateKey:  previousKey,
+		Keys:        etcdproxy.StaticKey(previousKey),
 		Insecure:    true,
 	})
 	require.NoError(t, err)

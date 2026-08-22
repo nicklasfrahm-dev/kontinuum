@@ -390,7 +390,7 @@ func buildServer(
 		return registry.EnsureCRD(ctx, loopbackConfig, server.WebhookCABundle(), registryLogger)
 	}
 
-	storage, relayCleanup, err := resolveStorageDSN(cfg.Server.Storage, cfg.Server.GRPC.InsecureTLSSkipVerify)
+	storage, relayCleanup, err := resolveZoneStorage(cfg, logger)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -459,6 +459,13 @@ func buildServer(
 // libkapi's own Kine endpoint uses a temp-dir socket too.
 const storageRelaySocketPath = "/tmp/kontinuum-storage-relay.sock"
 
+// resolveZoneStorage calls resolveStorageDSN against a background context,
+// not the one driving ListenAndServe — see buildServer's own doc, right
+// where its result is used, for why that matters.
+func resolveZoneStorage(cfg *config.Config, logger *slog.Logger) (string, func(), error) {
+	return resolveStorageDSN(context.Background(), logger, cfg.Server.Storage, cfg.Server.GRPC.InsecureTLSSkipVerify)
+}
+
 // resolveStorageDSN returns the KONTINUUM_SERVER_STORAGE value to actually
 // hand to libkapi.WithStorage. For every scheme but etcdproxy.RelayScheme,
 // that's configured unchanged — postgres://, sqlite://, mysql://, nats://,
@@ -467,18 +474,25 @@ const storageRelaySocketPath = "/tmp/kontinuum-storage-relay.sock"
 // real storage backend at all, but a zone's own name and its hub's etcd
 // gRPC proxy address (see pkg/domain/etcdproxy's own doc for why a zone is
 // given this instead of a database connection string it likely can't use
-// directly) — resolveStorageDSN loads this zone's own ed25519 private key
-// off its mounted identity Secret (see etcdproxy.IdentityMountPath) and
-// starts the local etcdproxy.Relay that signs with it, returning a plain
+// directly) — resolveStorageDSN builds a client against this zone's own
+// downstream cluster (see etcdproxy.NewInClusterIdentityWatcher) and starts
+// watching this zone's own identity Secret through it (see
+// etcdproxy.WatchIdentity), then starts the local etcdproxy.Relay that
+// signs with whatever key that watch currently reports, returning a plain
 // "unix://" DSN pointed at it instead, which libkapi's own storage
-// resolution already knows how to handle unchanged. The returned cleanup
-// func is always safe to call — a no-op unless a Relay was actually
-// started — so callers never need to nil-check it first. insecureSkipVerify
-// is cfg.Server.GRPC.InsecureTLSSkipVerify's raw string value — see
+// resolution already knows how to handle unchanged — a later rotation of
+// that Secret (see pkg/domain/zone's own ensureEtcdIdentity) takes effect
+// immediately, with no restart of this process needed. The returned
+// cleanup func is always safe to call — a no-op unless a Relay was
+// actually started — so callers never need to nil-check it first; it also
+// stops the identity watch goroutine. insecureSkipVerify is
+// cfg.Server.GRPC.InsecureTLSSkipVerify's raw string value — see
 // etcdproxy.RelayConfig.InsecureSkipVerify's own doc for what it does;
 // parsed here rather than in Config itself since it's meaningless outside
 // this one call.
-func resolveStorageDSN(configured, insecureSkipVerify string) (string, func(), error) {
+func resolveStorageDSN(
+	ctx context.Context, logger *slog.Logger, configured, insecureSkipVerify string,
+) (string, func(), error) {
 	noopCleanup := func() {}
 
 	zoneName, hubEndpoint, ok := etcdproxy.ParseRelayDSN(configured)
@@ -492,28 +506,45 @@ func resolveStorageDSN(configured, insecureSkipVerify string) (string, func(), e
 			fmt.Errorf("failed to parse KONTINUUM_SERVER_GRPC_INSECURE_TLS_SKIP_VERIFY: %w", err)
 	}
 
-	keyPEM, err := os.ReadFile(filepath.Join(etcdproxy.IdentityMountPath, corev1.TLSPrivateKeyKey))
+	watchClient, err := etcdproxy.NewInClusterIdentityWatcher()
 	if err != nil {
-		return "", noopCleanup, fmt.Errorf("failed to read etcd proxy identity key: %w", err)
+		return "", noopCleanup, fmt.Errorf("failed to build etcd proxy identity watcher: %w", err)
 	}
 
-	privateKey, err := etcdproxy.LoadPrivateKey(keyPEM)
+	// watchCtx, not ctx directly: cancelWatch (folded into the returned
+	// cleanup below) is this function's own way to stop WatchIdentity's
+	// background goroutine once the Relay it feeds is torn down — ctx
+	// itself outlives any single Relay (see buildServer's own doc for why
+	// storage is resolved against a background context).
+	watchCtx, cancelWatch := context.WithCancel(ctx)
+
+	keys, err := etcdproxy.WatchIdentity(watchCtx, watchClient, v1alpha2.KontinuumSystemNamespace, logger)
 	if err != nil {
-		return "", noopCleanup, fmt.Errorf("failed to parse etcd proxy identity key: %w", err)
+		cancelWatch()
+
+		return "", noopCleanup, fmt.Errorf("failed to load etcd proxy identity: %w", err)
 	}
 
+	//nolint:contextcheck // StartRelay deliberately takes no ctx of its own — see its own doc
 	relay, err := etcdproxy.StartRelay(etcdproxy.RelayConfig{
 		SocketPath:         storageRelaySocketPath,
 		HubEndpoint:        hubEndpoint,
 		Zone:               zoneName,
-		PrivateKey:         privateKey,
+		Keys:               keys,
 		InsecureSkipVerify: skipVerify,
 	})
 	if err != nil {
+		cancelWatch()
+
 		return "", noopCleanup, fmt.Errorf("failed to start storage relay: %w", err)
 	}
 
-	return "unix://" + storageRelaySocketPath, relay.Close, nil
+	cleanup := func() {
+		cancelWatch()
+		relay.Close()
+	}
+
+	return "unix://" + storageRelaySocketPath, cleanup, nil
 }
 
 // registryOptions builds the libkapi options that wire kontinuum's server

@@ -8,6 +8,7 @@ import (
 	certmanagerv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/clientcmd"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -92,17 +93,21 @@ func (b restDownstreamClientBuilder) Build(kubeconfig []byte) (client.Client, er
 
 // downstreamScheme registers every Kind Zone creates on a downstream
 // cluster: core/v1 (Namespace/Secret/ConfigMap/Service), apps/v1
-// (Deployment), gateway.networking.k8s.io/v1 (Gateway/HTTPRoute), and
-// cert-manager.io/v1 (Certificate/ClusterIssuer). This is deliberately
-// separate from the hub's own scheme (see pkg/cli/serve.go's buildServer):
-// the hub apiserver never serves any of these types itself — only a
-// zone's own downstream cluster does, once its own addons install their
-// CRDs (see pkg/domain/addon/values/cert-manager.yaml and
-// gateway-api-crds.yaml).
+// (Deployment), rbac.authorization.k8s.io/v1 (the ServiceAccount's own
+// Role/RoleBinding — see workload.go's ensureIdentityRBAC),
+// gateway.networking.k8s.io/v1 (Gateway/HTTPRoute), and cert-manager.io/v1
+// (Certificate/ClusterIssuer). This is deliberately separate from the
+// hub's own scheme (see pkg/cli/serve.go's buildServer): the hub apiserver
+// never serves any of these types itself — only a zone's own downstream
+// cluster does, once its own addons install their CRDs (see
+// pkg/domain/addon/values/cert-manager.yaml and gateway-api-crds.yaml) —
+// rbac.authorization.k8s.io/v1 and core/v1 are the two exceptions, already
+// built into every real Kubernetes cluster.
 func downstreamScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
 	_ = appsv1.AddToScheme(scheme)
+	_ = rbacv1.AddToScheme(scheme)
 	_ = gatewayv1.Install(scheme)
 	_ = certmanagerv1.AddToScheme(scheme)
 

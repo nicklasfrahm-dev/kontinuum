@@ -443,15 +443,11 @@ func (r *Reconciler) reconcileInstall(
 		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonInstallFailed, err.Error())
 	}
 
-	// Must come after installWorkload: ensureDeployment's own update path
-	// replaces the pod template wholesale (see workload.go's own doc on
-	// etcdIdentityRestartAnnotation), which would otherwise discard this
-	// annotation if it were set any earlier in this same pass.
+	// No restart to force here: the zone's own kontinuum-server watches its
+	// identity Secret directly (see etcdproxy.WatchIdentity) and picks up a
+	// rotated key on its own — this is purely an observability log line.
 	if rotatedIdentity {
-		err = bumpEtcdIdentityRestartAnnotation(ctx, downstream, time.Now())
-		if err != nil {
-			return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonInstallFailed, err.Error())
-		}
+		r.Logger.Info("rotated zone's etcd proxy identity", "zone", zoneObj.Name)
 	}
 
 	if !hasDomain {
@@ -552,7 +548,8 @@ func (r *Reconciler) resolveImage(ctx context.Context) (string, error) {
 }
 
 // installWorkload ensures the namespace, kontinuum-env Secret/ConfigMap,
-// Deployment, and Service — see workload.go. hostname is the zone's own
+// identity-watching ServiceAccount/Role/RoleBinding, Deployment, and
+// Service — see workload.go. hostname is the zone's own
 // <zone>.<region>.<domain>, only used to compute a zone-specific OIDC
 // redirect URL (see zoneEnvOverrides) when non-empty — not part of
 // storage/region/zone.
@@ -567,6 +564,14 @@ func (r *Reconciler) installWorkload(
 	overrides := zoneEnvOverrides(zoneObj.Spec.Region, zoneObj.Spec.Zone, storage, hostname)
 
 	err = ensureEnv(ctx, downstream, downstreamNamespace, r.HubConfig, overrides)
+	if err != nil {
+		return err
+	}
+
+	// Must run before ensureDeployment — see ensureIdentityRBAC's own doc
+	// for why a Pod referencing a not-yet-existing ServiceAccount fails
+	// admission.
+	err = ensureIdentityRBAC(ctx, downstream, downstreamNamespace)
 	if err != nil {
 		return err
 	}

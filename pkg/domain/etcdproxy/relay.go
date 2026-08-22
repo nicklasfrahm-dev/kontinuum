@@ -2,7 +2,6 @@ package etcdproxy
 
 import (
 	"context"
-	"crypto/ed25519"
 	"crypto/tls"
 	"fmt"
 	"net"
@@ -17,15 +16,18 @@ import (
 // RPC over the connection it's installed on, minting a fresh, short-lived
 // JWT (see SignToken) on every single call — grpc-go's PerRPCCredentials
 // hook is already invoked per-RPC, and ed25519 signing is cheap enough
-// that there's no need to cache and refresh a token instead.
+// that there's no need to cache and refresh a token instead. keys.Current
+// is called fresh on every call too, rather than once at dial time — see
+// KeySource's own doc for why that's what actually lets a rotated identity
+// take effect without restarting the process holding this connection.
 type jwtCredentials struct {
 	zone                     string
-	key                      ed25519.PrivateKey
+	keys                     KeySource
 	requireTransportSecurity bool
 }
 
 func (c jwtCredentials) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
-	token, err := SignToken(c.zone, c.key)
+	token, err := SignToken(c.zone, c.keys.Current())
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign etcd proxy token: %w", err)
 	}
@@ -65,12 +67,14 @@ type RelayConfig struct {
 	// see ParseRelayDSN for how a zone's own KONTINUUM_SERVER_STORAGE
 	// value carries this.
 	HubEndpoint string
-	// Zone and PrivateKey identify this zone to the hub (see SignToken) —
-	// PrivateKey is this zone's own ed25519 identity key (see
-	// GenerateIdentity and pkg/domain/zone's ensureEtcdIdentity), loaded
-	// from its own mounted kubernetes.io/tls identity Secret.
-	Zone       string
-	PrivateKey ed25519.PrivateKey
+	// Zone and Keys identify this zone to the hub (see SignToken) — Keys
+	// supplies this zone's own ed25519 identity key (see GenerateIdentity
+	// and pkg/domain/zone's ensureEtcdIdentity) on every signed RPC,
+	// typically an *IdentityKeySource kept live by WatchIdentity so a
+	// rotated key takes effect immediately, with no restart of the process
+	// running this Relay.
+	Zone string
+	Keys KeySource
 	// Insecure skips TLS entirely on the connection to HubEndpoint — for
 	// local development only; a real deployment's HubEndpoint is expected
 	// to terminate TLS, the same as every other kind of traffic the hub
@@ -120,7 +124,7 @@ func StartRelay(cfg RelayConfig) (*Relay, error) {
 		grpc.WithTransportCredentials(transportCreds),
 		grpc.WithPerRPCCredentials(jwtCredentials{
 			zone:                     cfg.Zone,
-			key:                      cfg.PrivateKey,
+			keys:                     cfg.Keys,
 			requireTransportSecurity: !cfg.Insecure,
 		}),
 	)
