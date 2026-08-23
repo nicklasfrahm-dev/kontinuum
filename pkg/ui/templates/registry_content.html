@@ -503,25 +503,23 @@
     // Clicking either code chip (the teardown paragraph's name, or the
     // "type X to confirm" name) copies the zone name — both always show
     // zoneLeaveModalExpectedName, so one handler covers both regardless of
-    // which one was clicked. Each chip is itself a flex container (see
-    // zone_leave_modal.html) holding a [data-name-text] span and a
-    // pre-rendered, initially-hidden checkmark+"Copied" span; toggling which
-    // one is visible briefly replaces the chip's own displayed content
-    // rather than appending anything beside it.
+    // which one was clicked. Each chip's own pre-rendered, initially-hidden
+    // checkmark+"Copied" span is a "position: absolute" overlay (see
+    // copy_chip.html's own doc), not a sibling swapped in for
+    // [data-name-text] — that span itself is never hidden, since it's the
+    // chip's only in-flow content and hiding it would collapse the chip's
+    // own size right when the overlay needs it held steady.
     document.querySelectorAll('#zone-leave-modal-name, #zone-leave-modal-confirm-name').forEach(function (code) {
-        var nameText = code.querySelector('[data-name-text]');
         var copiedFeedback = code.querySelector('[data-copied-feedback]');
 
         code.addEventListener('click', function () {
             navigator.clipboard.writeText(zoneLeaveModalExpectedName).then(function () {
-                nameText.classList.add('hidden');
                 copiedFeedback.classList.remove('hidden');
-                copiedFeedback.classList.add('inline-flex');
+                copiedFeedback.classList.add('flex');
 
                 setTimeout(function () {
-                    nameText.classList.remove('hidden');
                     copiedFeedback.classList.add('hidden');
-                    copiedFeedback.classList.remove('inline-flex');
+                    copiedFeedback.classList.remove('flex');
                 }, 1500);
             });
         });

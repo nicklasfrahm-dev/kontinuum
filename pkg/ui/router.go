@@ -203,6 +203,10 @@ func mustParsePage(content ...string) *template.Template {
 		// showToast) — every page needs it, not just the pages that also
 		// happen to use it for their own copy-confirmation/checkmark UI.
 		"templates/components/icon_check.html",
+		// copy_chip.html is used by layout.html's own toast (see
+		// buildCopyChip) — every page needs it, same reasoning as
+		// icon_check.html above.
+		"templates/components/copy_chip.html",
 	}
 
 	files := make([]string, 0, len(shared)+len(content))
