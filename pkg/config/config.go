@@ -110,6 +110,7 @@ func (c *Config) EnvVars() []EnvVar {
 func (c *Config) Redact() Config {
 	redacted := *c
 	redacted.Server.Storage = RedactStorage(c.Server.Storage)
+	redacted.Server.DNS.Credential = ""
 
 	return redacted
 }

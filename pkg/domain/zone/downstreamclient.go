@@ -95,14 +95,15 @@ func (b restDownstreamClientBuilder) Build(kubeconfig []byte) (client.Client, er
 // cluster: core/v1 (Namespace/Secret/ConfigMap/Service), apps/v1
 // (Deployment), rbac.authorization.k8s.io/v1 (the ServiceAccount's own
 // Role/RoleBinding — see workload.go's ensureIdentityRBAC),
-// gateway.networking.k8s.io/v1 (Gateway/HTTPRoute), and cert-manager.io/v1
-// (Certificate/ClusterIssuer). This is deliberately separate from the
-// hub's own scheme (see pkg/cli/serve.go's buildServer): the hub apiserver
-// never serves any of these types itself — only a zone's own downstream
-// cluster does, once its own addons install their CRDs (see
-// pkg/domain/addon/values/cert-manager.yaml and gateway-api-crds.yaml) —
-// rbac.authorization.k8s.io/v1 and core/v1 are the two exceptions, already
-// built into every real Kubernetes cluster.
+// gateway.networking.k8s.io/v1 (Gateway/HTTPRoute), cert-manager.io/v1
+// (Certificate/ClusterIssuer), and externaldns.k8s.io/v1alpha1
+// (DNSEndpoint — see dnsendpoint_types.go). This is deliberately separate
+// from the hub's own scheme (see pkg/cli/serve.go's buildServer): the hub
+// apiserver never serves any of these types itself — only a zone's own
+// downstream cluster does, once its own addons install their CRDs (see
+// pkg/domain/addon/values/cert-manager.yaml, gateway-api-crds.yaml, and
+// external-dns.yaml) — rbac.authorization.k8s.io/v1 and core/v1 are the
+// two exceptions, already built into every real Kubernetes cluster.
 func downstreamScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
@@ -110,6 +111,7 @@ func downstreamScheme() *runtime.Scheme {
 	_ = rbacv1.AddToScheme(scheme)
 	_ = gatewayv1.Install(scheme)
 	_ = certmanagerv1.AddToScheme(scheme)
+	AddExternalDNSToScheme(scheme)
 
 	return scheme
 }

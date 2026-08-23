@@ -1,0 +1,36 @@
+# Default external-dns install — chart identity/version, namespace, and Helm
+# values all live together here — see cilium.yaml's own doc for why. Unlike
+# cilium/cert-manager/gateway-api-crds, this addon is NOT auto-seeded onto
+# every joined zone's cluster (see builtinAddonNames, which deliberately
+# excludes it) — with no DNS provider credentials it would just crashloop.
+# An operator opts in by creating their own Addon named "external-dns" for a
+# zone's own TalosCluster, exactly the "any other chart... works today via
+# AddonSpec's own ReleaseName/Chart fields" self-service path issue #51's own
+# architecture describes; this file only supplies the crd-source scaffolding
+# every provider needs in common. spec.provider (and its own credential,
+# however that provider expects to receive it — env var, mounted config
+# file, workload identity, ...) is deliberately left for that operator-owned
+# Addon's own spec.values to supply: which KONTINUUM_SERVER_DNS_PROVIDER
+# values map to which of external-dns' own provider flag/config shapes is an
+# open question issue #51 itself defers to implementation-time review, not
+# something kontinuum encodes here. What kontinuum's own Zone controller
+# does with KONTINUUM_SERVER_DNS_PROVIDER/_CREDENTIAL is create/update a
+# DNSEndpoint per zone (see pkg/domain/zone/network.go's ensureDNSEndpoint)
+# — a plain, provider-agnostic record request that whatever external-dns
+# instance is running (however it got configured) picks up via its own crd
+# source, same as any other source.
+chart:
+  repo: https://kubernetes-sigs.github.io/external-dns/
+  name: external-dns
+  version: 1.21.1
+namespace:
+  name: kontinuum-system
+lifecycle:
+  priority: 100
+values:
+  # crd, not the chart's own default (service/ingress): the only source
+  # kontinuum's own Zone controller ever populates is a DNSEndpoint object
+  # (see ensureDNSEndpoint) — not a Service/Ingress annotation.
+  sources:
+    - crd
+  registry: txt
