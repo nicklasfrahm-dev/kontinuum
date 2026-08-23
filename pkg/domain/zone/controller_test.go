@@ -760,10 +760,12 @@ func assertDownstreamEnvConfigMap(t *testing.T, configMap corev1.ConfigMap) {
 const etcdIdentityServiceAccountName = "kontinuum-etcd-identity-watcher"
 
 // assertIdentityRBACInstalled checks the ServiceAccount, Role, and
-// RoleBinding ensureIdentityRBAC installs, scoping a joined zone's own pod
-// to read/watch exactly its own identity Secret and nothing else in
-// namespace — see workload.go's own doc for why this replaced the former
-// mounted-Secret-volume approach.
+// RoleBinding ensureIdentityRBAC installs. get is scoped by ResourceNames
+// to exactly the zone's own identity Secret; list/watch can't be scoped
+// that way at all — Kubernetes RBAC only supports ResourceNames for verbs
+// targeting one already-identified object, so a Role combining
+// ResourceNames with list/watch is rejected outright by the apiserver
+// regardless of the name given — see workload.go's ensureIdentityRole doc.
 func assertIdentityRBACInstalled(t *testing.T, downstream client.Client) {
 	t.Helper()
 
@@ -774,11 +776,17 @@ func assertIdentityRBACInstalled(t *testing.T, downstream client.Client) {
 	var role rbacv1.Role
 	require.NoError(t, downstream.Get(t.Context(),
 		client.ObjectKey{Name: etcdIdentityServiceAccountName, Namespace: testDownstreamNamespace}, &role))
-	require.Len(t, role.Rules, 1)
+	require.Len(t, role.Rules, 2)
+
 	assert.Equal(t, []string{"secrets"}, role.Rules[0].Resources)
 	assert.Equal(t, []string{etcdproxy.IdentitySecretName}, role.Rules[0].ResourceNames,
-		"must be scoped to exactly this one Secret, not every Secret in the namespace")
-	assert.ElementsMatch(t, []string{"get", "list", "watch"}, role.Rules[0].Verbs)
+		"get must be scoped to exactly this one Secret, not every Secret in the namespace")
+	assert.Equal(t, []string{"get"}, role.Rules[0].Verbs)
+
+	assert.Equal(t, []string{"secrets"}, role.Rules[1].Resources)
+	assert.Empty(t, role.Rules[1].ResourceNames,
+		"list/watch cannot be scoped by ResourceNames — Kubernetes RBAC rejects that combination outright")
+	assert.ElementsMatch(t, []string{"list", "watch"}, role.Rules[1].Verbs)
 
 	var binding rbacv1.RoleBinding
 	require.NoError(t, downstream.Get(t.Context(),
