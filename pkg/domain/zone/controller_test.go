@@ -1088,6 +1088,13 @@ func TestReconcileKeepsRequeuingReadyZoneOnFloatingImageTag(t *testing.T) {
 	require.NoError(t, err)
 
 	worker, workerSecret := joinedKontinuum()
+	// findKontinuumVersion now picks the highest reported version across the
+	// whole fleet (see that function's own doc), not just an arbitrary
+	// registered Kontinuum — so the joined worker must report the same
+	// floating tag as the hub fixture above, or its own real-semver default
+	// (registeredKontinuum's testKontinuumVersion) would outrank "dev" and
+	// this test would stop exercising the floating-tag path it's named for.
+	worker.Status.Version = testDevVersion
 	require.NoError(t, hubClient.Create(t.Context(), worker))
 	require.NoError(t, hubClient.Create(t.Context(), workerSecret))
 
@@ -1242,13 +1249,14 @@ func TestReconcileIgnoresMissingZone(t *testing.T) {
 	assert.Equal(t, ctrl.Result{}, result)
 }
 
-// TestReconcileUsesAnyRegisteredKontinuumForVersion covers
-// anyRegisteredKontinuum's own name-sorted-first determinism (see its own
-// doc) as it applies to resolveImage's own version lookup — the same
-// mechanism findKontinuumStorage used to lean on for storage inference,
-// before a zone's own storage started pointing through the hub's etcd
-// gRPC proxy instead (see zoneStorageDSN).
-func TestReconcileUsesAnyRegisteredKontinuumForVersion(t *testing.T) {
+// TestReconcileUsesHighestReportedKontinuumVersion covers
+// findKontinuumVersion's own "highest reported version wins, not whichever
+// Kontinuum a name sort lands on first" behavior — the regression case for
+// a zone reconcile landing on (or the zonelease being held by) a hub
+// replica that hasn't itself finished rolling forward yet: aaa-worker
+// sorts before zzz-hub by name, but zzz-hub reports the newer version, and
+// that's the one that must win regardless of name order.
+func TestReconcileUsesHighestReportedKontinuumVersion(t *testing.T) {
 	t.Parallel()
 
 	aaa, aaaSecret := registeredKontinuum("aaa-worker")
@@ -1268,5 +1276,5 @@ func TestReconcileUsesAnyRegisteredKontinuumForVersion(t *testing.T) {
 	var deployment appsv1.Deployment
 	require.NoError(t, downstream.Get(t.Context(),
 		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &deployment))
-	assert.Equal(t, testImageRepo+":v0.0.1-aaa", deployment.Spec.Template.Spec.Containers[0].Image)
+	assert.Equal(t, testImageRepo+":v0.0.2-zzz", deployment.Spec.Template.Spec.Containers[0].Image)
 }

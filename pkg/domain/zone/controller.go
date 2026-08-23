@@ -630,14 +630,15 @@ func (r *Reconciler) reconcileRegistryJoin(ctx context.Context, zoneObj *v1alpha
 
 // resolveImage returns the full container image (r.ImageRepo:tag) to
 // deploy onto a newly joined zone's downstream cluster — always read live
-// off any already-registered Kontinuum's own status.version (see
-// findKontinuumVersion), mirroring findKontinuumStorage/findKontinuumDomain's
-// identical "a property of the deployment, not of whichever specific
-// process happens to run this reconcile" reasoning: the fleet's actually
-// running version self-heals across a rolling upgrade this way, where
-// trusting this reconciling process's own build version could deploy a
-// stale or ahead-of-the-fleet tag depending on which hub replica's
-// reconcile happened to win.
+// off the highest status.version any registered Kontinuum reports (see
+// findKontinuumVersion), not this reconciling process's own build version:
+// the fleet's actually running version self-heals across a rolling upgrade
+// this way. This matters specifically because zonelease can hand a Zone's
+// reconcile to whichever hub replica currently holds the lease — including
+// one that hasn't itself been upgraded yet — so trusting either that
+// replica's own build version, or an arbitrary registered Kontinuum's
+// status.version, could deploy a stale tag even once the rest of the fleet
+// has already moved on to a newer one.
 //
 // This includes a hub that's itself a local, unreleased build (reporting
 // "dev" as its own status.version, from pkg/cli/version.go's default) —
