@@ -127,6 +127,15 @@ func StartRelay(cfg RelayConfig) (*Relay, error) {
 			keys:                     cfg.Keys,
 			requireTransportSecurity: !cfg.Insecure,
 		}),
+		// Static flow-control windows disable grpc-go's automatic BDP ping
+		// estimator on this connection, same as DialPool's own identical
+		// options and for the same reason (see poolStreamWindowSize's own
+		// doc) — this is the one leg of the package that crosses the real
+		// network to reach HubEndpoint rather than staying on localhost, so
+		// it's the one most exposed to a receiving proxy's own ping-rate
+		// enforcement.
+		grpc.WithInitialWindowSize(poolStreamWindowSize),
+		grpc.WithInitialConnWindowSize(poolConnWindowSize),
 	)
 	if err != nil {
 		_ = listener.Close()
