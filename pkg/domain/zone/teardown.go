@@ -138,7 +138,7 @@ func (r *Reconciler) teardownDownstream(
 		return fmt.Errorf("failed to build downstream client for %q: %w", zoneObj.Name, err)
 	}
 
-	err = uninstallNetwork(ctx, downstream)
+	err = uninstallNetwork(ctx, downstream, cluster.Name)
 	if err != nil {
 		return err
 	}
@@ -147,18 +147,18 @@ func (r *Reconciler) teardownDownstream(
 }
 
 // uninstallNetwork deletes the DNSEndpoint (if reconcileDNS ever created
-// one), the Cloudflare credential Secret (if reconcileExternalDNSAddon ever
-// created one — see deleteExternalDNSCredentialSecret's own doc for why
-// this is unconditional), ClusterIssuer, Gateway, Certificate, and
+// one), the external-dns credential Secret (if reconcileExternalDNSAddon
+// ever created one — see deleteExternalDNSCredentialSecret's own doc for
+// why this is unconditional), ClusterIssuer, Gateway, Certificate, and
 // HTTPRoute installNetwork/reconcileDNS install — see teardownDownstream's
 // own doc for ordering.
-func uninstallNetwork(ctx context.Context, downstream client.Client) error {
+func uninstallNetwork(ctx context.Context, downstream client.Client, clusterName string) error {
 	err := deleteDNSEndpoint(ctx, downstream, downstreamNamespace, dnsEndpointName)
 	if err != nil {
 		return err
 	}
 
-	err = deleteExternalDNSCredentialSecret(ctx, downstream, downstreamNamespace)
+	err = deleteExternalDNSCredentialSecret(ctx, downstream, downstreamNamespace, clusterName)
 	if err != nil {
 		return err
 	}

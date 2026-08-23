@@ -295,10 +295,17 @@ func joinedKontinuum(name string) (*v1alpha2.Kontinuum, *corev1.Secret) {
 	return kontinuum, secret
 }
 
-// testDNSCredential is a fake DNS provider credential, not a real one.
+// testDNSCredentialValue is a fake Cloudflare API token, not a real one.
 //
 //nolint:gosec // false positive: fixture data, not a real credential
-const testDNSCredential = "AKIAEXAMPLE:secret"
+const testDNSCredentialValue = "AKIAEXAMPLE-secret-value"
+
+// testDNSCredential is the flat YAML KONTINUUM_SERVER_DNS_CREDENTIAL is
+// always expected to hold (see parseDNSCredentialKeys) — one key,
+// CF_API_TOKEN, matching Cloudflare's own expected env var name. Every DNS
+// test in this file that isn't specifically about addon-wiring only cares
+// that this parses successfully, not its specific key/value.
+const testDNSCredential = "CF_API_TOKEN: " + testDNSCredentialValue + "\n"
 
 // registeredKontinuumWithDNS extends registeredKontinuum with a DNS
 // provider name (non-confidential, published directly on status — see
@@ -339,6 +346,13 @@ func testHubConfig() *config.Config {
 			GRPC: v1alpha2.KontinuumGRPCConfigStatus{
 				Endpoint:              testGRPCEndpoint,
 				InsecureTLSSkipVerify: "true",
+			},
+			// DNS.Credential (like Storage) is tagged `secret:"true"` — see
+			// assertDownstreamFootprintInstalled/assertDownstreamEnvConfigMap,
+			// which confirm ensureEnv actually routes it into the Secret,
+			// never the broadly-readable ConfigMap.
+			DNS: v1alpha2.KontinuumDNSConfigStatus{
+				Credential: testDNSCredential,
 			},
 		},
 	}
@@ -770,6 +784,10 @@ func assertDownstreamEnvConfigMap(t *testing.T, configMap corev1.ConfigMap) {
 	// — ensureEnv must route it into the Secret only, never duplicate it
 	// into the broadly-readable ConfigMap.
 	assert.NotContains(t, configMap.Data, "KONTINUUM_SERVER_STORAGE")
+	// DNS.Credential is tagged `secret:"true"` too (see
+	// api/v1alpha2.KontinuumDNSConfigStatus) — same rationale as Storage
+	// above.
+	assert.NotContains(t, configMap.Data, "KONTINUUM_SERVER_DNS_CREDENTIAL")
 }
 
 // assertDownstreamFootprintInstalled asserts every object a single
@@ -837,6 +855,11 @@ func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) 
 	require.True(t, ok, "KONTINUUM_SERVER_STORAGE must be a valid etcdproxy relay DSN")
 	assert.Equal(t, testZoneName, zoneName)
 	assert.Equal(t, testGRPCEndpoint, hubEndpoint)
+	// DNS.Credential (like Storage) is tagged `secret:"true"` (see
+	// api/v1alpha2.KontinuumDNSConfigStatus) — ensureEnv must route it into
+	// the Secret only, never the broadly-readable ConfigMap (see
+	// assertDownstreamEnvConfigMap's own matching assertion).
+	assert.Equal(t, testDNSCredential, string(secret.Data["KONTINUUM_SERVER_DNS_CREDENTIAL"]))
 
 	var identitySecret corev1.Secret
 	require.NoError(t, downstream.Get(t.Context(),

@@ -166,9 +166,13 @@ type KontinuumDNSConfigStatus struct {
 	// unlike Domain/Provider, this is never populated here — Config.Redact
 	// always strips it before a value reaches status.config, and the raw
 	// original instead lives in the Secret KontinuumStatus.SecretRef points
-	// to, extending storageSecretKey's own convention.
+	// to, extending storageSecretKey's own convention. Tagged
+	// `secret:"true"` for the same reason as Storage's own identical tag
+	// (see that field's own doc) — without it, pkg/domain/zone's ensureEnv
+	// would copy this into a joined zone's broadly-readable ConfigMap
+	// instead of its Secret.
 	// +optional
-	Credential string `default:"" json:"credential"`
+	Credential string `default:"" json:"credential" secret:"true"`
 }
 
 // KontinuumGRPCConfigStatus groups this process's own etcd gRPC proxy
