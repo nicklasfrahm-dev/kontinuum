@@ -105,6 +105,11 @@
 
     function reveal(button) {
         if (cache !== null) {
+            // cache may have been populated by copy() rather than a prior
+            // reveal() — copy() never touches #{{.ID}}-code, so populate it
+            // here too. Re-running this on an already-populated code element
+            // (Reveal -> Hide -> Reveal) is harmless, just redundant.
+            populateCode(cache);
             animate(masked, content, true);
 
             return;
