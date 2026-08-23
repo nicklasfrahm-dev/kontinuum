@@ -2,6 +2,7 @@ package zone_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"testing"
@@ -46,8 +47,20 @@ const (
 	// deploys (see that function's own doc).
 	testKontinuumVersion = "v1.2.3"
 	// testImage is what resolveImage resolves to across most of this file's
-	// tests — see registeredKontinuum/testKontinuumVersion.
+	// tests — see registeredKontinuum/testKontinuumVersion. Never digest-
+	// pinned: testKontinuumVersion is valid semver, so resolveImage skips
+	// the digest lookup entirely for it (see that function's own doc).
 	testImage = testImageRepo + ":" + testKontinuumVersion
+	// testDigest is newReconciler's own fakeDigestResolver's canned
+	// response — what resolveImage pins a non-semver ("dev"/"latest") tag
+	// to, see TestReconcileInheritsDevVersionFromRegisteredKontinuum.
+	testDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	// testDevVersion is the non-semver, floating status.version every
+	// resolveImage/reconcileImageRefreshSchedule test fixture uses — a
+	// literal constant (rather than each test's own "dev" string) purely
+	// to satisfy golangci-lint's goconst now that three separate tests
+	// need one.
+	testDevVersion = "dev"
 	// testGRPCEndpoint is newReconciler's own
 	// Reconciler.HubConfig.Server.GRPC.Endpoint — zoneStorageDSN's own
 	// KONTINUUM_SERVER_GRPC_ENDPOINT stand-in.
@@ -90,6 +103,10 @@ func testZoneKey() client.ObjectKey {
 //nolint:gosec // false positive: fixture data, not a real credential
 const testStorage = "postgres://user:pass@host/db"
 
+// errTestDigestResolution is fakeDigestResolver's own canned failure, for
+// TestReconcileFallsBackToBareTagWhenDigestResolutionFails.
+var errTestDigestResolution = errors.New("digest resolution failed")
+
 // fakeDownstreamClientBuilder is zone.DownstreamClientBuilder's test
 // double — it never dials a real kubeconfig, always returning the same
 // pre-built fake client so a test can inspect what got created on it.
@@ -104,6 +121,23 @@ func (f fakeDownstreamClientBuilder) Build(_ []byte) (client.Client, error) {
 	}
 
 	return f.client, nil
+}
+
+// fakeDigestResolver is zone.DigestResolver's test double — it never hits
+// a real registry, always returning the same canned digest (or error) so
+// a test can control resolveImage's digest-pinning path without a network
+// dependency, mirroring fakeDownstreamClientBuilder above.
+type fakeDigestResolver struct {
+	digest string
+	err    error
+}
+
+func (f fakeDigestResolver) ResolveDigest(_ string) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+
+	return f.digest, nil
 }
 
 // secretAdmissionClient wraps a client.Client, converting a corev1.Secret's
@@ -276,18 +310,25 @@ func registeredKontinuum(name string) (*v1alpha2.Kontinuum, *corev1.Secret) {
 	return kontinuum, secret
 }
 
+// testJoinedKontinuumName is joinedKontinuum's own fixture name — every
+// call site needs the exact same one (see that function's own doc for
+// why), so it's a constant rather than a parameter every caller passed
+// the same literal for anyway.
+const testJoinedKontinuumName = "zzz-worker"
+
 // joinedKontinuum returns a Kontinuum (plus its backing storage-credential
 // Secret, mirroring registeredKontinuum) registered for
 // testRegion/testZone with a fresh heartbeat — the shape
 // zone.FindJoinedKontinuum looks for once this zone's own kontinuum-server
 // has actually joined the hub's registry (see
-// TestReconcileFlipsReadyOnceKontinuumJoinsRegistry). name is expected to
-// sort after "hub" (the other fixture Kontinuum most of this file's tests
-// register) so anyRegisteredKontinuum's own name-sorted pick — irrelevant
-// to what this helper is testing — keeps landing on a Kontinuum whose
-// Secret actually holds a storage connection string.
-func joinedKontinuum(name string) (*v1alpha2.Kontinuum, *corev1.Secret) {
-	kontinuum, secret := registeredKontinuum(name)
+// TestReconcileFlipsReadyOnceKontinuumJoinsRegistry).
+// testJoinedKontinuumName is expected to sort after "hub" (the other
+// fixture Kontinuum most of this file's tests register) so
+// anyRegisteredKontinuum's own name-sorted pick — irrelevant to what this
+// helper is testing — keeps landing on a Kontinuum whose Secret actually
+// holds a storage connection string.
+func joinedKontinuum() (*v1alpha2.Kontinuum, *corev1.Secret) {
+	kontinuum, secret := registeredKontinuum(testJoinedKontinuumName)
 	kontinuum.Spec = v1alpha2.KontinuumSpec{Region: testRegion, Zone: testZone}
 	kontinuum.Status.LastHeartbeatTime = metav1.Now()
 
@@ -341,6 +382,7 @@ func newReconciler(hubClient client.Client, downstreamBuilder zone.DownstreamCli
 	return &zone.Reconciler{
 		Client:                  hubClient,
 		DownstreamClientBuilder: downstreamBuilder,
+		Digests:                 fakeDigestResolver{digest: testDigest},
 		HubConfig:               testHubConfig(),
 		ImageRepo:               testImageRepo,
 		RetryInterval:           testRetryInterval,
@@ -660,12 +702,17 @@ func TestReconcileComputesZoneSpecificOIDCRedirectURL(t *testing.T) {
 // registered, the same as any other tag, trusting it to be real and
 // pullable — CI keeps ImageRepo:dev in sync with main on every push, and
 // `make image-push` (see the Makefile) publishes the working tree's own
-// build under it for exactly this local zone-join scenario.
+// build under it for exactly this local zone-join scenario. Pinned to
+// newReconciler's own fakeDigestResolver's canned testDigest, not deployed
+// as a bare tag — see DigestResolver's own doc for why a non-semver tag
+// gets pinned at all, and
+// TestReconcileFallsBackToBareTagWhenDigestResolutionFails for the case
+// that doesn't.
 func TestReconcileInheritsDevVersionFromRegisteredKontinuum(t *testing.T) {
 	t.Parallel()
 
 	kontinuum, kontinuumSecret := registeredKontinuum("hub")
-	kontinuum.Status.Version = "dev"
+	kontinuum.Status.Version = testDevVersion
 
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
 		kontinuum, kontinuumSecret)
@@ -679,7 +726,38 @@ func TestReconcileInheritsDevVersionFromRegisteredKontinuum(t *testing.T) {
 	var deployment appsv1.Deployment
 	require.NoError(t, downstream.Get(t.Context(),
 		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &deployment))
+	assert.Equal(t, testImageRepo+":dev@"+testDigest, deployment.Spec.Template.Spec.Containers[0].Image)
+}
+
+// TestReconcileFallsBackToBareTagWhenDigestResolutionFails covers
+// resolveImage's other branch for a non-semver tag: when r.Digests errors
+// (registry unreachable, rate limited, ...), Reconcile still deploys the
+// bare "ImageRepo:dev" tag rather than failing — a digest lookup failure
+// is not treated as a reason to block a Zone's install, since deploying a
+// possibly-stale floating tag un-pinned is the same behavior this
+// function had before DigestResolver existed, not a regression (see
+// resolveImage's own doc).
+func TestReconcileFallsBackToBareTagWhenDigestResolutionFails(t *testing.T) {
+	t.Parallel()
+
+	kontinuum, kontinuumSecret := registeredKontinuum("hub")
+	kontinuum.Status.Version = testDevVersion
+
+	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
+		kontinuum, kontinuumSecret)
+	downstream := newDownstreamFakeClient(t)
+
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: downstream})
+	reconciler.Digests = fakeDigestResolver{err: errTestDigestResolution}
+
+	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	var deployment appsv1.Deployment
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &deployment))
 	assert.Equal(t, testImageRepo+":dev", deployment.Spec.Template.Spec.Containers[0].Image)
+	assert.Equal(t, corev1.PullAlways, deployment.Spec.Template.Spec.Containers[0].ImagePullPolicy)
 }
 
 // TestReconcileReportsNoVersionFoundWhenRegisteredKontinuumHasNoVersion
@@ -949,7 +1027,7 @@ func TestReconcileFlipsReadyOnceKontinuumJoinsRegistry(t *testing.T) {
 	_, err = reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
 
-	worker, workerSecret := joinedKontinuum("zzz-worker")
+	worker, workerSecret := joinedKontinuum()
 	require.NoError(t, hubClient.Create(t.Context(), worker))
 	require.NoError(t, hubClient.Create(t.Context(), workerSecret))
 
@@ -972,6 +1050,117 @@ func TestReconcileFlipsReadyOnceKontinuumJoinsRegistry(t *testing.T) {
 	assert.Equal(t, "RegistryJoined", registryCond.Reason)
 
 	assertReadyMirrors(t, got, metav1.ConditionTrue, "RegistryJoined")
+}
+
+// TestReconcileKeepsRequeuingReadyZoneOnFloatingImageTag covers
+// reconcileImageRefreshSchedule: unlike
+// TestReconcileFlipsReadyOnceKontinuumJoinsRegistry's own semver fixture
+// (whose RequeueAfter, once fully Ready, comes entirely from
+// reconcileIdentityRotationSchedule), a Zone tracking a floating "dev" tag
+// must keep getting a bounded, non-zero requeue too — see that function's
+// own doc for why kontinuumVersionChangedPredicate's watch can never bring
+// it back on its own once the tag's underlying digest moves without its
+// status.version string ever changing.
+func TestReconcileKeepsRequeuingReadyZoneOnFloatingImageTag(t *testing.T) {
+	t.Parallel()
+
+	kontinuum, kontinuumSecret := registeredKontinuum("hub")
+	kontinuum.Status.Version = testDevVersion
+
+	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
+		kontinuum, kontinuumSecret)
+	downstream := newDownstreamFakeClient(t)
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: downstream})
+
+	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	var cert certmanagerv1.Certificate
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &cert))
+
+	cert.Status.Conditions = []certmanagerv1.CertificateCondition{
+		{Type: certmanagerv1.CertificateConditionReady, Status: cmmeta.ConditionTrue, Reason: testCertificateReadyReason},
+	}
+	require.NoError(t, downstream.Status().Update(t.Context(), &cert))
+
+	_, err = reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	worker, workerSecret := joinedKontinuum()
+	require.NoError(t, hubClient.Create(t.Context(), worker))
+	require.NoError(t, hubClient.Create(t.Context(), workerSecret))
+
+	// This call is the one that actually flips RegistryJoinedConditionType
+	// true — reconcileImageRefreshSchedule reads zoneObj's condition as
+	// fetched at the top of this same call, before that write happens, so
+	// it still sees the pre-call False value here. One more call is needed
+	// to observe it, mirroring the near-immediate watch-triggered
+	// Reconcile a real Status().Update produces (see persistStatus's own
+	// doc on the Zone watch) rather than a real lag in production.
+	_, err = reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+	// 5*time.Minute mirrors the zone package's own unexported
+	// imageRefreshInterval.
+	assert.LessOrEqual(t, result.RequeueAfter, 5*time.Minute)
+	assert.Positive(t, result.RequeueAfter)
+}
+
+// TestReconcileToleratesNoRegisteredKontinuumOnceReady covers
+// reconcileImageRefreshSchedule's other early-return: unlike
+// TestReconcileFlipsRegistryJoinedFalseOnceKontinuumGoesStale (which only
+// deletes the joined worker, leaving the hub's own Kontinuum registered),
+// this deletes every registered Kontinuum — hub included — once the Zone
+// is already RegistryJoined, so findKontinuumVersion returns
+// errNoRegisteredKontinuum. Reconcile must still succeed: that error is
+// treated as "nothing to schedule around yet," the same benign way
+// resolveImage's own caller already treats it, not surfaced as a
+// Reconcile failure.
+func TestReconcileToleratesNoRegisteredKontinuumOnceReady(t *testing.T) {
+	t.Parallel()
+
+	kontinuum, kontinuumSecret := registeredKontinuum("hub")
+	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
+		kontinuum, kontinuumSecret)
+	downstream := newDownstreamFakeClient(t)
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: downstream})
+
+	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	var cert certmanagerv1.Certificate
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &cert))
+
+	cert.Status.Conditions = []certmanagerv1.CertificateCondition{
+		{Type: certmanagerv1.CertificateConditionReady, Status: cmmeta.ConditionTrue, Reason: testCertificateReadyReason},
+	}
+	require.NoError(t, downstream.Status().Update(t.Context(), &cert))
+
+	_, err = reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	worker, workerSecret := joinedKontinuum()
+	require.NoError(t, hubClient.Create(t.Context(), worker))
+	require.NoError(t, hubClient.Create(t.Context(), workerSecret))
+
+	_, err = reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	var joined v1alpha2.Zone
+	require.NoError(t, hubClient.Get(t.Context(), testZoneKey(), &joined))
+	require.Equal(t, metav1.ConditionTrue,
+		meta.FindStatusCondition(joined.Status.Conditions, zone.RegistryJoinedConditionType).Status,
+		"test setup must reach RegistryJoined=true before the regression itself can be exercised")
+
+	require.NoError(t, hubClient.Delete(t.Context(), worker))
+	require.NoError(t, hubClient.Delete(t.Context(), kontinuum))
+
+	_, err = reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
 }
 
 // TestReconcileFlipsRegistryJoinedFalseOnceKontinuumGoesStale is the
@@ -1013,7 +1202,7 @@ func TestReconcileFlipsRegistryJoinedFalseOnceKontinuumGoesStale(t *testing.T) {
 	_, err = reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
 
-	worker, workerSecret := joinedKontinuum("zzz-worker")
+	worker, workerSecret := joinedKontinuum()
 	require.NoError(t, hubClient.Create(t.Context(), worker))
 	require.NoError(t, hubClient.Create(t.Context(), workerSecret))
 

@@ -1,0 +1,55 @@
+{{/*
+    copy-chip renders one click-to-copy inline <code> chip — the
+    "Decommission zone" dialog's own zone-name chips
+    (zone_leave_modal.html) and the toast's own copyable command
+    (layout.html's buildCopyChip, which clones this exact markup via a
+    hidden <template> rather than re-declaring the class list in JS) both
+    render through this single definition now, so their styling can never
+    drift the way it did before this existed. Font size is deliberately
+    left to inherit from wherever the chip is embedded (text-sm body
+    copy, text-xs uppercase label, ...) rather than pinned here, so it
+    reads as part of that surrounding text rather than a fixed-size
+    control dropped into it. leading-none is pinned regardless of that
+    inherited size, though — an inherited line-height (often ~1.5x the
+    font size) dominates the box's actual rendered height far more than
+    the small py-px padding does, so collapsing it to 1 is what actually
+    keeps the chip visually tight against single-line text around it.
+
+    Expects a dict (see templateDict) with:
+      ID    - optional element id (buildCopyChip's own clones never need
+              one, so a bare (dict) with no ID is a valid call).
+      Class - optional extra classes, e.g. "normal-case" to cancel an
+              ancestor's own uppercase (see zone_leave_modal.html's own
+              "Type ... to confirm" usage).
+      Text  - optional initial data-name-text content, for a chip whose
+              value is already known at render time (e.g.
+              instance_detail_content.html's own Name field) —
+              wireCopyChip (see layout.html) still needs calling
+              separately to make it clickable, this alone only renders
+              the text. Left empty for a chip a shared, per-row-
+              retargeted dialog populates dynamically instead (see
+              instances_content.html's own openDeleteInstanceModal).
+
+    data-name-text is otherwise populated by whichever caller uses it
+    (openZoneLeaveModal directly, buildCopyChip via its own clone) —
+    align-baseline (the browser default for an
+    inline element, made explicit here since inline-flex doesn't inherit
+    it automatically the way a plain <code> would).
+
+    data-copied-feedback is a "position: absolute; inset: 0" overlay
+    (with its own matching background, so it fully covers data-name-text
+    rather than double-exposing both), not a sibling flex item swapped
+    in by hiding data-name-text the way an earlier version of this
+    template did — that made data-name-text (plain text) or
+    data-copied-feedback (an icon next to text) take turns being the
+    single flex item the outer <code>'s own baseline was computed from,
+    and an inline SVG icon's own default baseline (its bottom edge, not
+    a text baseline) differs from plain text's enough that the whole
+    chip visibly jumped position depending on which one happened to be
+    showing. Taking data-copied-feedback out of flow entirely removes it
+    from that computation altogether: data-name-text is now the only
+    element that ever determines this chip's size or position, so
+    toggling the overlay above it can't move anything, regardless of
+    what that overlay contains.
+*/}}
+{{define "copy-chip"}}<code {{if .ID}}id="{{.ID}}" {{end}}class="{{if .Class}}{{.Class}} {{end}}relative inline-flex items-center align-baseline leading-none font-mono text-white bg-neutral-700 border border-neutral-600 rounded px-1 py-px cursor-pointer hover:bg-neutral-600 transition-colors" title="Click to copy"><span data-name-text>{{.Text}}</span><span data-copied-feedback class="hidden absolute inset-0 items-center justify-center gap-1 rounded bg-neutral-700 text-emerald-400"><span class="[&>svg]:h-3 [&>svg]:w-3">{{template "icon-check"}}</span>Copied</span></code>{{end}}

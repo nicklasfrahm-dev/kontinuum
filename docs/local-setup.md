@@ -73,5 +73,7 @@ VERSION=dev make image-push
 
 This builds and pushes the working tree under `ghcr.io/nicklasfrahm-dev/kontinuum:dev` (see the Makefile's own doc) — the same tag CI keeps in sync with `main` on every push, so without running this, a freshly joined zone deploys whatever `main` last published, not your local changes. (`kubectl logs -n kontinuum-system deploy/kontinuum` on the downstream cluster's own kubeconfig, fetched from `kubectl get secret -n kontinuum-system taloscluster-local-a -o jsonpath='{.data.kubeconfig}' | base64 -d`, shows which image actually landed.)
 
+A zone that already joined before you ran this picks up the new push on its own — `resolveImage` pins `:dev` to the digest it currently resolves to, so pushing a new build under the same tag changes that pinned reference and triggers a normal Deployment rollout, typically within the reconciler's own retry interval. No manual `kubectl rollout restart` needed.
+
 !!! tip
     Ready to contribute a change back? See [Contribution guidelines](contributing.md) for repo conventions and how to validate a change before opening a PR.

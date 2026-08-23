@@ -397,17 +397,22 @@ func containerSecurityContext() *corev1.SecurityContext {
 	}
 }
 
-// imagePullPolicy returns corev1.PullAlways for image when its tag isn't
-// valid semver — "dev" or "latest", the two mutable, floating tags CI and
-// `make image-push` (see the Makefile) both keep overwriting in place —
-// and corev1.PullIfNotPresent otherwise, since a real semver-tagged
-// release is immutable once published and safe to cache. Kubernetes'
-// own default pull policy only special-cases the literal tag "latest"
-// this way; that's no longer enough now that resolveImage deploys
-// ImageRepo:dev just as often as a real version (see that function's own
-// doc) — without this, a node that already cached an older :dev layer
-// would never re-pull a newer one pushed under the same tag.
+// imagePullPolicy returns corev1.PullIfNotPresent for image when it's
+// pinned to a digest ("repo:tag@sha256:..." — see resolveImage's own doc
+// for when/why it appends one) or its tag is valid semver, since both are
+// immutable and safe to cache, and corev1.PullAlways otherwise — a bare
+// floating tag ("dev" or "latest") that resolveImage fell back to
+// deploying un-pinned, e.g. because a digest lookup failed. Kubernetes'
+// own default pull policy only special-cases the literal tag "latest" this
+// way; that's not enough on its own now that resolveImage deploys
+// ImageRepo:dev just as often as a real version — without PullAlways in
+// that fallback case, a node that already cached an older :dev layer would
+// never re-pull a newer one pushed under the same bare tag.
 func imagePullPolicy(image string) corev1.PullPolicy {
+	if strings.Contains(image, "@sha256:") {
+		return corev1.PullIfNotPresent
+	}
+
 	tag := image[strings.LastIndex(image, ":")+1:]
 
 	if semver.IsValid(tag) {

@@ -2702,10 +2702,13 @@ func TestInstancesPageEmbedsAddInstanceButtonAndEmptyModal(t *testing.T) {
 	// the new row invisible until the next 15s poll — this is the trigger
 	// that wires the two together.
 	assert.Contains(t, string(body), `hx-trigger="every 15s, instance-added from:body"`)
-	// The submit button's own loading state (see instances_content.html's
-	// htmx:beforeRequest/afterRequest listeners) toggles these two elements.
-	assert.Contains(t, string(body), `data-spinner`)
-	assert.Contains(t, string(body), `data-label`)
+	// The submit button's own loading state is declarative (see AGENTS.md's
+	// UI policy) rather than a hand-rolled htmx:beforeRequest/afterRequest
+	// listener: hx-disabled-elt disables it for the request's own round
+	// trip, and the spinner span is keyed off the "htmx-request" class htmx
+	// adds to the button itself while in flight.
+	assert.Contains(t, string(body), `hx-disabled-elt="this"`)
+	assert.Contains(t, string(body), `[.htmx-request_&]:inline-flex`)
 }
 
 // TestHandleInstanceAddCreatesInstanceAndReturnsSuccessFragment also covers

@@ -2,10 +2,12 @@ package zone
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
+	"golang.org/x/mod/semver"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -117,6 +119,14 @@ type Config struct {
 	// NewDownstreamClientBuilder() when nil — the seam tests inject a fake
 	// through, the same role addon.Installer plays for Helm installs.
 	DownstreamClientBuilder DownstreamClientBuilder
+	// Digests resolves resolveImage's floating tags ("dev"/"latest") to the
+	// digest they currently point at, so a moved tag produces a real
+	// Deployment spec diff instead of silently drifting under an
+	// already-running pod — see DigestResolver's own doc. Defaults to
+	// NewHelmDigestResolver() when nil; the seam tests inject a fake
+	// through to avoid a real network call, the same role
+	// DownstreamClientBuilder plays above.
+	Digests DigestResolver
 	// HubConfig is this hub's own loaded configuration — ensureEnv (see
 	// workload.go) copies every env var it produces (see
 	// config.Config.EnvVars) onto every joined zone's own kontinuum-env
@@ -160,10 +170,14 @@ type Controller struct {
 }
 
 // NewController builds a Controller from cfg, defaulting
-// DownstreamClientBuilder and RetryInterval when left zero.
+// DownstreamClientBuilder, Digests, and RetryInterval when left zero.
 func NewController(cfg Config) *Controller {
 	if cfg.DownstreamClientBuilder == nil {
 		cfg.DownstreamClientBuilder = NewDownstreamClientBuilder()
+	}
+
+	if cfg.Digests == nil {
+		cfg.Digests = NewHelmDigestResolver()
 	}
 
 	if cfg.RetryInterval == 0 {
@@ -185,6 +199,7 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 	reconciler := &Reconciler{
 		Client:                  mgr.GetClient(),
 		DownstreamClientBuilder: c.Config.DownstreamClientBuilder,
+		Digests:                 c.Config.Digests,
 		HubConfig:               c.Config.HubConfig,
 		ImageRepo:               c.Config.ImageRepo,
 		RetryInterval:           c.Config.RetryInterval,
@@ -290,6 +305,7 @@ var kontinuumVersionChangedPredicate = predicate.Funcs{
 type Reconciler struct {
 	Client                  client.Client
 	DownstreamClientBuilder DownstreamClientBuilder
+	Digests                 DigestResolver
 	HubConfig               *config.Config
 	ImageRepo               string
 	RetryInterval           time.Duration
@@ -344,9 +360,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, fmt.Errorf("failed to check identity rotation schedule for zone %q: %w", zoneObj.Name, err)
 	}
 
+	// Checked regardless of install progress, same reasoning as
+	// identityRequeue above — see reconcileImageRefreshSchedule's own doc
+	// for why a Zone deploying a floating image tag needs this even once
+	// fully Ready, when nothing else would otherwise requeue it again.
+	imageRefreshRequeue, err := r.reconcileImageRefreshSchedule(ctx, &zoneObj)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	result, err := r.reconcileClusterAndInstall(ctx, &zoneObj)
 
-	return earliestRequeue(result, identityRequeue), err
+	return earliestRequeue(earliestRequeue(result, identityRequeue), imageRefreshRequeue), err
 }
 
 // mapKontinuumVersionChangeToAllZones enqueues every Zone whenever a
@@ -420,18 +445,21 @@ func (r *Reconciler) reconcileClusterAndInstall(ctx context.Context, zoneObj *v1
 	return r.reconcileInstall(ctx, zoneObj, &cluster)
 }
 
-// earliestRequeue folds identityRequeue (see
-// reconcileIdentityRotationSchedule) into result, keeping whichever of the
-// two would fire sooner. A zero identityRequeue means "no preference" (no
-// identity issued yet, or reconcileIdentityRotationSchedule hit an error
-// already surfaced by its own caller) and leaves result untouched.
-func earliestRequeue(result ctrl.Result, identityRequeue time.Duration) ctrl.Result {
-	if identityRequeue <= 0 {
+// earliestRequeue folds candidate — a standalone requeue deadline from one
+// of Reconcile's own "check regardless of install progress" calls
+// (reconcileIdentityRotationSchedule, reconcileImageRefreshSchedule) —
+// into result, keeping whichever of the two would fire sooner. Reconcile
+// chains multiple calls to fold in more than one candidate. A zero
+// candidate means "no preference" (e.g. no identity issued yet, or the
+// fleet's target image tag is real semver rather than floating) and
+// leaves result untouched.
+func earliestRequeue(result ctrl.Result, candidate time.Duration) ctrl.Result {
+	if candidate <= 0 {
 		return result
 	}
 
-	if result.RequeueAfter == 0 || identityRequeue < result.RequeueAfter {
-		result.RequeueAfter = identityRequeue
+	if result.RequeueAfter == 0 || candidate < result.RequeueAfter {
+		result.RequeueAfter = candidate
 	}
 
 	return result
@@ -618,13 +646,96 @@ func (r *Reconciler) reconcileRegistryJoin(ctx context.Context, zoneObj *v1alpha
 // main on every push, and `make image-push` publishes the working tree's
 // own build under it for local zone-join testing (see the Makefile's own
 // doc and docs/local-setup.md).
+//
+// A non-semver tag ("dev" or "latest") gets pinned to the digest it
+// currently resolves to — "ImageRepo:tag@sha256:..." rather than a bare
+// "ImageRepo:tag" — via r.Digests (see DigestResolver's own doc for why:
+// in short, without this, a tag CI or `make image-push` moves later is
+// invisible to a zone whose Deployment already pulled the old content
+// under that same tag string). Real semver release tags skip this
+// entirely, both because they're already immutable by convention and to
+// avoid a registry round trip on every reconcile of every zone running a
+// released version. A digest lookup failure (registry unreachable, rate
+// limited, ...) falls back to the bare tag rather than failing the
+// reconcile — deploying a possibly-stale floating tag is the same
+// behavior this function had before DigestResolver existed, not a
+// regression, and freshness here is an optimization, not a correctness
+// requirement Reconcile should block Zone installs on.
 func (r *Reconciler) resolveImage(ctx context.Context) (string, error) {
 	tag, err := findKontinuumVersion(ctx, r.Client)
 	if err != nil {
 		return "", err
 	}
 
-	return r.ImageRepo + ":" + tag, nil
+	image := r.ImageRepo + ":" + tag
+	if semver.IsValid(tag) {
+		return image, nil
+	}
+
+	digest, err := r.Digests.ResolveDigest(image)
+	if err != nil {
+		r.Logger.Warn("failed to resolve digest for floating image tag, deploying tag as-is", "image", image, "error", err)
+
+		return image, nil
+	}
+
+	return image + "@" + digest, nil
+}
+
+// imageRefreshInterval bounds how long a Zone deploying a floating image
+// tag ("dev"/"latest") ever goes without re-running resolveImage to check
+// whether its pinned digest has moved on — see
+// reconcileImageRefreshSchedule's own doc for why this exists at all.
+const imageRefreshInterval = 5 * time.Minute
+
+// reconcileImageRefreshSchedule reports how long until a Zone that has
+// already joined the registry (see RegistryJoinedConditionType) should
+// next re-run resolveImage, purely to notice a floating tag's digest
+// moving underneath it.
+//
+// kontinuumVersionChangedPredicate's own watch (see
+// mapKontinuumVersionChangeToAllZones) only fires on a literal
+// status.version *string* change — exactly the case a real semver upgrade
+// produces, but never the case a floating "dev"/"latest" tag does: that
+// string stays the same forever even as CI or `make image-push` (see the
+// Makefile's own doc) keep moving what it actually points to. Once a Zone
+// reaches RegistryJoined (persistStatus stops requeuing it on its own from
+// there — see that function's own doc), nothing else would ever bring it
+// back to notice. This closes that gap the same way
+// reconcileIdentityRotationSchedule closes an analogous one for etcd
+// identity rotation — see that function's own doc for the identical
+// "cheap, hub-only, safe to call unconditionally, folded into the overall
+// result via earliestRequeue" reasoning, which applies here unchanged.
+//
+// Returns 0 ("no preference," see earliestRequeue's own doc) once the Zone
+// hasn't joined the registry yet — its own RetryInterval-driven requeue
+// already re-runs resolveImage on every attempt until then — or once the
+// fleet's target tag is real semver (immutable, nothing to re-check). A
+// findKontinuumVersion error is treated the same benign way resolveImage's
+// own caller already treats it (nothing to schedule around yet), not
+// surfaced as a Reconcile-failing error; only a genuine List failure
+// underneath it does.
+func (r *Reconciler) reconcileImageRefreshSchedule(ctx context.Context, zoneObj *v1alpha2.Zone) (time.Duration, error) {
+	if !meta.IsStatusConditionTrue(zoneObj.Status.Conditions, RegistryJoinedConditionType) {
+		return 0, nil
+	}
+
+	tag, err := findKontinuumVersion(ctx, r.Client)
+
+	switch {
+	case err == nil:
+		// Handled below, outside the switch.
+	case errors.Is(err, errNoRegisteredKontinuum), errors.Is(err, errNoKontinuumVersion):
+		return 0, nil
+	default:
+		return 0, fmt.Errorf("failed to check image refresh schedule for zone %q: %w", zoneObj.Name, err)
+	}
+
+	if semver.IsValid(tag) {
+		return 0, nil
+	}
+
+	return zonelease.Jitter(imageRefreshInterval), nil
 }
 
 // installWorkload ensures the namespace, kontinuum-env Secret/ConfigMap,
