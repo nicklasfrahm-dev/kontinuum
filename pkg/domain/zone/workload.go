@@ -258,19 +258,38 @@ func ensureIdentityServiceAccount(ctx context.Context, downstream client.Client,
 
 // ensureIdentityRole upserts the Role granting
 // etcdIdentityServiceAccountName's own ServiceAccount read/watch access to
-// exactly one Secret — etcdproxy.IdentitySecretName, named explicitly via
-// ResourceNames rather than granted over every Secret in namespace, since
-// that's also where ensureSecret's own kontinuum-env Secret (carrying this
-// zone's full configuration, including its storage credential) lives.
+// etcdproxy.IdentitySecretName. get is scoped to exactly that Secret via
+// ResourceNames — since that's also where ensureSecret's own kontinuum-env
+// Secret (carrying this zone's full configuration, including its storage
+// credential) lives, and get does support per-object ResourceNames scoping.
+// list/watch can't be scoped the same way: Kubernetes RBAC only supports
+// ResourceNames for verbs that target one already-identified object (get,
+// update, delete, patch) — list and watch return/stream a collection and
+// are authorized before any specific object is known, so the apiserver
+// rejects them outright the moment ResourceNames is set, regardless of its
+// value. etcdproxy.startIdentityWatch already accounts for this on the
+// client side (its own doc explains why it watches every Secret in
+// namespace and filters client-side to the one that matters, rather than
+// relying on a server-side name restriction) — this Role granting broader
+// list/watch is what actually makes that watch possible at all, not a
+// widening of what the code reads, just of what RBAC is capable of
+// expressing for those two verbs.
 func ensureIdentityRole(ctx context.Context, downstream client.Client, namespace string) error {
 	role := &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{Name: etcdIdentityServiceAccountName, Namespace: namespace},
-		Rules: []rbacv1.PolicyRule{{
-			APIGroups:     []string{""},
-			Resources:     []string{"secrets"},
-			ResourceNames: []string{etcdproxy.IdentitySecretName},
-			Verbs:         []string{"get", "list", "watch"},
-		}},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups:     []string{""},
+				Resources:     []string{"secrets"},
+				ResourceNames: []string{etcdproxy.IdentitySecretName},
+				Verbs:         []string{"get"},
+			},
+			{
+				APIGroups: []string{""},
+				Resources: []string{"secrets"},
+				Verbs:     []string{"list", "watch"},
+			},
+		},
 	}
 
 	err := downstream.Create(ctx, role)
