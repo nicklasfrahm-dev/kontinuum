@@ -38,6 +38,22 @@ linters:
         - runtime\.Object
         - client\.Client
         - authorizer\.Authorizer
+    tagliatelle:
+      case:
+        # AGENTS.md's own Kubernetes-convention rule ("abbreviations
+        # capitalized, e.g. ClusterIP") already requires "IP" to stay
+        # capitalized in a JSON tag (e.g. FabricZoneStatus.GatewayIP's own
+        # "gatewayIP") — tagliatelle's default camelCase checker recognizes
+        # "ID"/"URL" as initialisms already (see api/v1alpha2/kontinuum_types.go's
+        # issuerURL/clientID, both unflagged), but not "IP" specifically, so
+        # this adds it to keep that same, already-established convention
+        # lint-clean instead of forcing a "gatewayIp" that AGENTS.md's own
+        # rule would then flag as wrong the other way.
+        extended-rules:
+          json:
+            case: camel
+            initialism-overrides:
+              IP: true
     wrapcheck:
       # grpc-go's own status.Error/Errorf already produce a self-describing
       # error (code + message) that is the correct thing to return directly

@@ -22,7 +22,7 @@ func GroupVersion() schema.GroupVersion {
 }
 
 // AddToScheme registers Kontinuum, Zone, Instance, InstancePool,
-// TalosCluster, Addon, and their List types with scheme.
+// TalosCluster, Addon, Fabric, and their List types with scheme.
 func AddToScheme(scheme *runtime.Scheme) error {
 	groupVersion := GroupVersion()
 
@@ -33,6 +33,7 @@ func AddToScheme(scheme *runtime.Scheme) error {
 		&InstancePool{}, &InstancePoolList{},
 		&TalosCluster{}, &TalosClusterList{},
 		&Addon{}, &AddonList{},
+		&Fabric{}, &FabricList{},
 	)
 	metav1.AddToGroupVersion(scheme, groupVersion)
 

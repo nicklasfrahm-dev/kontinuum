@@ -4,13 +4,13 @@
 
 Kontinuum embeds [kommodity](https://github.com/kommodity-io/kommodity)'s `libkapi` package, which provides a generic Kubernetes-style apiserver, an apiextensions (CRD) server, and an aggregation layer, backed by pluggable storage (SQLite, PostgreSQL, etcd, ...). `pkg/cli/serve.go` assembles this into a single process:
 
-- `api/v1alpha1` and `api/v1alpha2` register kontinuum's own custom resource types (`Kontinuum`, `Zone`, `Instance`, `InstancePool`, `TalosCluster`, `Addon`) against `libkapi`'s scheme.
+- `api/v1alpha1` and `api/v1alpha2` register kontinuum's own custom resource types (`Kontinuum`, `Zone`, `Fabric`, `Instance`, `InstancePool`, `TalosCluster`, `Addon`) against `libkapi`'s scheme.
 - A `libkapi.ServerFactory` mounts the `/app` web UI (`pkg/ui`) and, when OIDC is configured, the login/logout routes (`pkg/auth`) alongside the generated Kubernetes API — any request that doesn't match a UI route falls through to the API server's own handler.
 - Each domain package below is wired in as a `libkapi.Controller`, running on the same controller-runtime manager the apiserver starts.
 
 ## CLI
 
-`pkg/cli` holds the cobra command tree: `kontinuum serve` (start the server), `kontinuum version`, `kontinuum config` (import/inspect configuration), and `kontinuum zone add` (fan out a new zone's `Zone`/`Instance`/`InstancePool`/`TalosCluster` objects — see [Add zone](workflows/zone-add.md)). `pkg/config` loads configuration from `KONTINUUM_`-prefixed environment variables, with CLI flags overriding it when explicitly set.
+`pkg/cli` holds the cobra command tree: `kontinuum serve` (start the server), `kontinuum version`, `kontinuum config` (import/inspect configuration), `kontinuum zone add` (fan out a new zone's `Zone`/`Instance`/`InstancePool`/`TalosCluster` objects — see [Add zone](workflows/zone-add.md)), and `kontinuum nat-gateway run` (the `fabric` controller's own NAT gateway workload — see below). `pkg/config` loads configuration from `KONTINUUM_`-prefixed environment variables, with CLI flags overriding it when explicitly set.
 
 ## Domain controllers (`pkg/domain/`)
 
@@ -24,6 +24,7 @@ Each controller lives in its own package and owns one CRD's reconcile loop, per 
 | `taloscluster` | Bootstraps a Talos Kubernetes cluster from a control-plane `InstancePool` (and optional worker pools), then installs Cilium and cert-manager as addons. State machine driven by `status.conditions`. |
 | `addon` | Backs `taloscluster`'s Helm-based addon install and pod-health probing. |
 | `zone` | Once a zone's `TalosCluster` reports Ready, installs kontinuum's own downstream footprint into it: `kontinuum-system` namespace, `kontinuum-env` Secret/ConfigMap, `kontinuum` Deployment/Service, and a cert-manager-backed `ClusterIssuer`/`Gateway`/`Certificate`/`HTTPRoute` exposing that zone's own kontinuum-server. Also exports the shared `Zone`/`Instance`/`InstancePool`/`TalosCluster` fan-out logic both `kontinuum zone add` and the registry page's "Add zone" modal call into. |
+| `fabric` | Carves a fixed-size subnet and gateway IP per zone out of a `Fabric`'s region-wide `spec.cidr` (deterministic, sticky IPAM — see `Allocate`), elects a per-zone NAT gateway node via `spec.gatewaySelector`, pushes that node's static route via Talos, and installs a small privileged `kontinuum nat-gateway run` workload (nftables masquerade, over netlink — no `nft(8)` binary needed) onto it. Each zone's own network is independent: one zone's missing gateway candidate only blocks that zone's own readiness, never the whole `Fabric`'s. |
 | `kms` | A dummy in-memory KMS server implementing Talos's disk-encryption KMS gRPC service, for local dev and integration tests — not for production use. |
 
 See [Add zone](workflows/zone-add.md) for the full instance → pool → cluster → addon bootstrap flow (including a flow chart) and how a zone's own kontinuum-server gets installed and registers back into the hub, and [Remove zone](workflows/zone-remove.md) for tearing that back down.

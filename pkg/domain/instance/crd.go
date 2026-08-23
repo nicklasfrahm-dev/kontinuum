@@ -1,11 +1,11 @@
 // Package instance is the zone-join build-out's first domain package (see
-// issue #24's architecture, phase 1 in issue #27): it ensures the five new
-// CRDs (Zone, Instance, InstancePool, TalosCluster, Addon) exist on the hub
-// apiserver, and reconciles Instance's maintenance-mode discovery. None of
-// the other four kinds have their own controller here — later phases split
-// their own CRD-ensure and reconciler out of here once they get one, the
-// same way pkg/domain/registry owns Kontinuum's and pkg/domain/taloscluster/
-// pkg/domain/addon own theirs.
+// issue #24's architecture, phase 1 in issue #27): it ensures the six new
+// CRDs (Zone, Fabric, Instance, InstancePool, TalosCluster, Addon) exist on
+// the hub apiserver, and reconciles Instance's maintenance-mode discovery.
+// None of the other five kinds have their own controller here — later
+// phases split their own CRD-ensure and reconciler out of here once they
+// get one, the same way pkg/domain/registry owns Kontinuum's and
+// pkg/domain/taloscluster/pkg/domain/addon/pkg/domain/fabric own theirs.
 package instance
 
 import (
@@ -23,13 +23,22 @@ import (
 
 // definitions lists every CRD this package ensures. None carry a
 // crd.ConversionWebhook — unlike Kontinuum (see pkg/domain/registry), these
-// four kinds have no prior released version to convert from.
+// six kinds have no prior released version to convert from.
 func definitions() []crd.Definition {
 	return []crd.Definition{
 		{
 			Name:         "zones.kontinuum.sh",
 			ManifestFile: "kontinuum.sh_zones.yaml",
 			GVKs:         []schema.GroupVersionKind{v1alpha2.GroupVersion().WithKind("Zone")},
+		},
+		{
+			// Listed right after Zone: Fabric's own controller watches Zone
+			// (see pkg/domain/fabric.Controller.SetupWithManager), so
+			// zones.kontinuum.sh must already exist by the time this CRD's
+			// own informer starts.
+			Name:         "fabrics.kontinuum.sh",
+			ManifestFile: "kontinuum.sh_fabrics.yaml",
+			GVKs:         []schema.GroupVersionKind{v1alpha2.GroupVersion().WithKind("Fabric")},
 		},
 		{
 			Name:         "instances.kontinuum.sh",
@@ -57,12 +66,12 @@ func definitions() []crd.Definition {
 // EnsureCRDs is a libkapi.PostStartHookFunc — see its registration in
 // pkg/cli/serve.go, and registry.EnsureCRD's doc for the timing this relies
 // on (loopbackConfig is only reachable once libkapi's post-start hooks run,
-// before the controller manager starts). It applies all five CRDs and
+// before the controller manager starts). It applies all six CRDs and
 // waits for each to become Established and discoverable, in the order
-// listed by definitions — Zone before the kinds that will eventually
-// reference it, TalosCluster before Addon (which references it via
-// talosClusterRef), so a partial failure fails on the first, most
-// foundational kind rather than a downstream one.
+// listed by definitions — Zone before Fabric (which watches it) and before
+// the other kinds that will eventually reference it, TalosCluster before
+// Addon (which references it via talosClusterRef), so a partial failure
+// fails on the first, most foundational kind rather than a downstream one.
 func EnsureCRDs(ctx context.Context, loopbackConfig *restclient.Config, logger *slog.Logger) error {
 	for _, def := range definitions() {
 		// A no-op once every kind here is already Namespaced (the steady
