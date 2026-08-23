@@ -17,6 +17,7 @@ import (
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/zone"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/zonelease"
 )
 
 // testHostname is the hostname every test in this file expects
@@ -206,12 +207,11 @@ func TestReconcileTeardownDeletesDNSEndpoint(t *testing.T) {
 	reconciler := &zone.Reconciler{
 		Client:                  hubClient,
 		DownstreamClientBuilder: fakeDownstreamClientBuilder{client: downstream},
-		ACMEEmail:               testACMEEmail,
-		ACMEServer:              testACMEServer,
+		HubConfig:               testHubConfig(),
 		ImageRepo:               testImageRepo,
-		GRPCEndpoint:            testGRPCEndpoint,
 		RetryInterval:           testRetryInterval,
 		TeardownTimeout:         testTeardownTimeout,
+		Locker:                  zonelease.NewLocker(hubClient, "test-hub", "", 0),
 		Logger:                  slog.Default(),
 	}
 
@@ -347,12 +347,11 @@ func TestReconcileTeardownDeletesCloudflareCredentialSecret(t *testing.T) {
 	reconciler := &zone.Reconciler{
 		Client:                  hubClient,
 		DownstreamClientBuilder: fakeDownstreamClientBuilder{client: downstream},
-		ACMEEmail:               testACMEEmail,
-		ACMEServer:              testACMEServer,
+		HubConfig:               testHubConfig(),
 		ImageRepo:               testImageRepo,
-		GRPCEndpoint:            testGRPCEndpoint,
 		RetryInterval:           testRetryInterval,
 		TeardownTimeout:         testTeardownTimeout,
+		Locker:                  zonelease.NewLocker(hubClient, "test-hub", "", 0),
 		Logger:                  slog.Default(),
 	}
 
