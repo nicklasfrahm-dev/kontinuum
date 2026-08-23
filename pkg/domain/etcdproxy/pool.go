@@ -68,19 +68,29 @@ func NewPool(upstreams []*grpc.ClientConn, auth Authenticator) *Pool {
 // doc). grpc-go's own internal/transport/http2_client.go only builds a
 // bdpEst — and only that estimator ever calls for a BDP ping — when
 // dialOptions.StaticWindowSize is false; WithInitialWindowSize and
-// WithInitialConnWindowSize are the two DialOptions that set it true.
-// Static means the window never grows dynamically past this once set, so
-// both are sized generously for a busy Watch stream up front rather than
-// left to grow on demand: poolStreamWindowSize covers one stream's own
-// buffered events, poolConnWindowSize is larger because a single pooled
-// connection carries many concurrent streams at once (see zonePoolSize's
-// own doc on up to ~1000 zones sharing zonePoolSize connections) and needs
-// headroom across all of them, not just one. Starting points, not derived
-// from a hard formula — tune based on real Watch payload sizes and fan-in
-// once deployed.
+// WithInitialConnWindowSize are the two DialOptions that set it true, and
+// both do so once the configured value is >= grpc-go's own
+// defaultWindowSize (64 KiB) — nothing about disabling the estimator
+// requires these to be large.
+//
+// Kept modest, not generous: every DialPool caller dials its own pool
+// size worth of connections (zonePoolSize here, localPoolSize in
+// etcdproxy.LocalPool) in the same process, and both pools are dialed by
+// every kontinuum-server instance (see registerEtcdProxy's own doc — hub
+// or zone, every instance registers RegisterHub, and any instance backed
+// by a Kine DSN also starts a LocalPool), so the real per-process ceiling
+// is the sum of every pool's connections at once. A single kontinuum
+// instance runs in a 512Mi Cloud Run container; sizing these as if each
+// connection owned its own generous, independent budget (the previous
+// 16 MiB stream / 64 MiB conn) let that sum alone exceed the container's
+// entire memory limit before accounting for anything else the process
+// does, and was the direct cause of a startup OOM crash loop. These
+// values are still comfortably above the 64 KiB disable threshold and
+// above grpc-go's own un-pooled defaults, just not sized as if the
+// process would run only one of them.
 const (
-	poolStreamWindowSize = 16 << 20 // 16 MiB
-	poolConnWindowSize   = 64 << 20 // 64 MiB
+	poolStreamWindowSize = 256 << 10 // 256 KiB
+	poolConnWindowSize   = 1 << 20   // 1 MiB
 )
 
 // DialPool dials size independent connections to target, all using
