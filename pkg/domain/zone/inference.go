@@ -193,21 +193,20 @@ func findKontinuumVersion(ctx context.Context, hubClient client.Client) (string,
 		return "", errNoRegisteredKontinuum
 	}
 
-	sort.Slice(list.Items, func(i, j int) bool { return list.Items[i].Name < list.Items[j].Name })
+	// One sort, ordered by version descending, does the whole job: the
+	// highest version is always list.Items[0] afterward, so there's no
+	// separate scan-and-compare pass needed on top of it.
+	sort.Slice(list.Items, func(i, j int) bool {
+		left, right := list.Items[i], list.Items[j]
 
-	var highest string
-
-	for index := range list.Items {
-		version := list.Items[index].Status.Version
-		if version == "" {
-			continue
+		if cmp := semver.Compare(left.Status.Version, right.Status.Version); cmp != 0 {
+			return cmp > 0
 		}
 
-		if highest == "" || semver.Compare(version, highest) > 0 {
-			highest = version
-		}
-	}
+		return left.Name < right.Name
+	})
 
+	highest := list.Items[0].Status.Version
 	if highest == "" {
 		return "", fmt.Errorf("%w: none of the %d registered kontinuums reported one", errNoKontinuumVersion, len(list.Items))
 	}
