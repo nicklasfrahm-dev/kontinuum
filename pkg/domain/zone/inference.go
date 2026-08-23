@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 
+	"golang.org/x/mod/semver"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
@@ -155,21 +156,61 @@ func inferDomain(ctx context.Context, hubClient client.Client) (string, error) {
 // errNoKontinuumDNSDomain above.
 var errNoKontinuumVersion = errors.New("no registered kontinuum reports a version yet")
 
-// findKontinuumVersion returns the build version any registered Kontinuum
-// reports on its own status.version, written on every heartbeat (see
-// pkg/domain/registry/heartbeat.go's beat/reregister) — used by
+// findKontinuumVersion returns the highest build version any registered
+// Kontinuum reports on its own status.version, written on every heartbeat
+// (see pkg/domain/registry/heartbeat.go's beat/reregister) — used by
 // resolveImage to pick which tag of ImageRepo to deploy onto a newly
-// joined zone. Every registered Kontinuum is assumed to run the same
-// version, same rationale as anyRegisteredKontinuum's own doc.
+// joined zone.
+//
+// Unlike anyRegisteredKontinuum (fine for storage/domain, which really are
+// one shared deployment-wide value), a fleet's reported version is only
+// uniform outside of a rollout: mid hub-upgrade, some replicas — and the
+// worker Kontinuums that haven't yet been bumped — still report the old
+// version while others already report the new one. zonelease can hand this
+// Zone's reconcile to whichever hub replica currently holds the lease,
+// including a not-yet-upgraded one, so picking "any" registered Kontinuum
+// risks deploying a stale tag even after the fleet has mostly moved on.
+// Scanning every registered Kontinuum and taking the highest instead means
+// the outcome only ever depends on what the fleet has collectively
+// achieved, not on which replica's reconcile happened to run or which
+// Kontinuum a name sort happened to land on first.
+//
+// semver.Compare treats an invalid version (a floating "dev"/"latest" tag)
+// as less than any valid one, and all invalid versions as equal to each
+// other — so a real semver release always outranks a floating tag, and a
+// tie (every registered Kontinuum floating, or genuinely equal versions)
+// falls back to whichever sorts first by name, mirroring
+// anyRegisteredKontinuum's own tie-break.
 func findKontinuumVersion(ctx context.Context, hubClient client.Client) (string, error) {
-	kontinuum, err := anyRegisteredKontinuum(ctx, hubClient)
+	var list v1alpha2.KontinuumList
+
+	err := hubClient.List(ctx, &list)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to list kontinuums: %w", err)
 	}
 
-	if kontinuum.Status.Version == "" {
-		return "", fmt.Errorf("%w: %q has none reported", errNoKontinuumVersion, kontinuum.Name)
+	if len(list.Items) == 0 {
+		return "", errNoRegisteredKontinuum
 	}
 
-	return kontinuum.Status.Version, nil
+	sort.Slice(list.Items, func(i, j int) bool { return list.Items[i].Name < list.Items[j].Name })
+
+	var highest string
+
+	for index := range list.Items {
+		version := list.Items[index].Status.Version
+		if version == "" {
+			continue
+		}
+
+		if highest == "" || semver.Compare(version, highest) > 0 {
+			highest = version
+		}
+	}
+
+	if highest == "" {
+		return "", fmt.Errorf("%w: none of the %d registered kontinuums reported one", errNoKontinuumVersion, len(list.Items))
+	}
+
+	return highest, nil
 }
