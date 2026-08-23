@@ -556,6 +556,7 @@ func resolveStorageDSN(
 			Zone:               zoneName,
 			Keys:               keys,
 			InsecureSkipVerify: skipVerify,
+			Logger:             logger,
 		})
 		if err != nil {
 			cancelWatch()

@@ -4,12 +4,16 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
+	"sync"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 // jwtCredentials attaches "Authorization: Bearer <jwt>" to every outbound
@@ -88,6 +92,148 @@ type RelayConfig struct {
 	// proxy speaks), just not certificate validation against this
 	// process's own root CA set. Ignored when Insecure is true.
 	InsecureSkipVerify bool
+	// Logger receives authRecovery's own recovery-triggered messages —
+	// falls back to slog.Default() when nil, so existing callers (chiefly
+	// tests) that never hit that path need not supply one.
+	Logger *slog.Logger
+}
+
+// authFailureThreshold is how many consecutive Unauthenticated responses
+// from HubEndpoint a Relay connection tolerates before treating its own
+// cached identity key and hub connection as possibly stale and forcing
+// recovery — see authRecovery. One alone is expected background noise (a
+// rotation's own brief propagation delay, see IdentityOverlapWindow's own
+// doc); a run this long left alone would otherwise retry forever against
+// the same rejected credential, since a per-RPC signing failure never
+// surfaces to WatchIdentity's own watch-based refresh path on its own —
+// that path only ever reacts to the identity Secret itself changing, not to
+// what the hub does with whatever's currently signed with it.
+const authFailureThreshold = 5
+
+// authRecovery watches every RPC Relay's own connection to HubEndpoint
+// makes, tracking consecutive Unauthenticated responses. Reaching
+// authFailureThreshold triggers recovery exactly once, then resets the
+// counter to require another full run before triggering again: keys.Refresh
+// (if Keys implements Refresher) forces a synchronous re-fetch of the
+// zone's identity key, bypassing whatever state WatchIdentity's own
+// background watch is stuck in, and conn.ResetConnectBackoff forces the
+// underlying *grpc.ClientConn to retry its transport immediately rather
+// than waiting out whatever backoff it's currently in — covering the
+// separate, less likely case that the connection itself, not just the
+// credential, is what's actually stuck. Safe for concurrent use: every RPC
+// Relay forwards observes it, potentially from many goroutines at once.
+type authRecovery struct {
+	zone   string
+	keys   KeySource
+	logger *slog.Logger
+
+	mu       sync.Mutex
+	failures int
+	conn     *grpc.ClientConn // set once, right after grpc.NewClient returns — see StartRelay
+}
+
+// recordResult updates r from a single RPC's outcome — nil or any non-
+// Unauthenticated error resets the streak, an Unauthenticated error extends
+// it and, upon reaching authFailureThreshold, triggers recover(), which
+// deliberately uses its own context.Background() rather than any ctx
+// threaded through here — see recover's own doc for why.
+func (r *authRecovery) recordResult(err error) {
+	if status.Code(err) != codes.Unauthenticated {
+		r.mu.Lock()
+		r.failures = 0
+		r.mu.Unlock()
+
+		return
+	}
+
+	r.mu.Lock()
+	r.failures++
+
+	trigger := r.failures >= authFailureThreshold
+	if trigger {
+		r.failures = 0
+	}
+	r.mu.Unlock()
+
+	if trigger {
+		r.recover()
+	}
+}
+
+// recover runs authRecovery's two independent recovery actions — see
+// authRecovery's own doc. Uses context.Background(), not the ctx of
+// whichever RPC's own failure tripped the threshold — that ctx is on its
+// way out (its RPC has already returned to its caller by the time recover
+// runs) and may already be canceled before this refresh even starts.
+func (r *authRecovery) recover() {
+	r.logger.Warn("repeated invalid bearer token responses from hub, forcing recovery",
+		"zone", r.zone, "threshold", authFailureThreshold)
+
+	if refresher, ok := r.keys.(Refresher); ok {
+		refreshErr := refresher.Refresh(context.Background())
+		if refreshErr != nil {
+			r.logger.Error("failed to refresh etcd proxy identity after repeated auth failures",
+				"zone", r.zone, "error", refreshErr)
+		}
+	}
+
+	r.conn.ResetConnectBackoff()
+}
+
+// unaryInterceptor implements grpc.UnaryClientInterceptor, feeding every
+// unary call's outcome through recordResult.
+func (r *authRecovery) unaryInterceptor(
+	ctx context.Context, method string, req, reply any,
+	cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption,
+) error {
+	err := invoker(ctx, method, req, reply, cc, opts...)
+	r.recordResult(err) //nolint:contextcheck // recover() deliberately uses context.Background(), see its own doc
+
+	return err
+}
+
+// streamInterceptor implements grpc.StreamClientInterceptor. Opening the
+// stream itself rarely fails on auth — Proxy's own Watch/LeaseKeepAlive
+// handlers authenticate first thing, but that rejection only ever surfaces
+// as a stream-level error on the first Recv, not from streamer here — so a
+// successfully opened stream is wrapped in authRecoveryClientStream to keep
+// watching it.
+//
+//nolint:ireturn // grpc.StreamClientInterceptor is grpc-go's own seam, mirrors grpc.Streamer's own return
+func (r *authRecovery) streamInterceptor(
+	ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string,
+	streamer grpc.Streamer, opts ...grpc.CallOption,
+) (grpc.ClientStream, error) {
+	stream, err := streamer(ctx, desc, cc, method, opts...)
+	if err != nil {
+		r.recordResult(err) //nolint:contextcheck // recover() deliberately uses context.Background(), see its own doc
+
+		return nil, err
+	}
+
+	return authRecoveryClientStream{ClientStream: stream, recovery: r}, nil
+}
+
+// authRecoveryClientStream wraps a grpc.ClientStream, feeding every RecvMsg
+// outcome through authRecovery.recordResult — see streamInterceptor's own
+// doc for why that's where a streaming RPC's auth rejection actually shows
+// up.
+type authRecoveryClientStream struct {
+	grpc.ClientStream
+
+	recovery *authRecovery
+}
+
+// RecvMsg must return the upstream error unwrapped, not implement it — a
+// caller further up (e.g. pumpResponses) checks it with errors.Is(io.EOF)
+// and status.Code, both of which need the original error as-is.
+//
+//nolint:wrapcheck // see doc above
+func (s authRecoveryClientStream) RecvMsg(m any) error {
+	err := s.ClientStream.RecvMsg(m)
+	s.recovery.recordResult(err)
+
+	return err
 }
 
 // StartRelay starts a Relay per cfg, listening immediately — a returned
@@ -120,6 +266,13 @@ func StartRelay(cfg RelayConfig) (*Relay, error) {
 		transportCreds = insecure.NewCredentials()
 	}
 
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	recovery := &authRecovery{zone: cfg.Zone, keys: cfg.Keys, logger: logger}
+
 	upstream, err := grpc.NewClient(cfg.HubEndpoint,
 		grpc.WithTransportCredentials(transportCreds),
 		grpc.WithPerRPCCredentials(jwtCredentials{
@@ -136,12 +289,20 @@ func StartRelay(cfg RelayConfig) (*Relay, error) {
 		// enforcement.
 		grpc.WithInitialWindowSize(poolStreamWindowSize),
 		grpc.WithInitialConnWindowSize(poolConnWindowSize),
+		grpc.WithChainUnaryInterceptor(recovery.unaryInterceptor),
+		grpc.WithChainStreamInterceptor(recovery.streamInterceptor),
 	)
 	if err != nil {
 		_ = listener.Close()
 
 		return nil, fmt.Errorf("failed to dial hub etcd proxy %q: %w", cfg.HubEndpoint, err)
 	}
+
+	// Set once the connection recover() would reset actually exists — safe
+	// before Serve starts below, since nothing can reach this Relay's own
+	// listener (and so trigger an RPC through recovery's interceptors) until
+	// then.
+	recovery.conn = upstream
 
 	server := grpc.NewServer()
 	NewProxy(upstream, nil).Register(server)
