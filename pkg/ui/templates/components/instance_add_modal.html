@@ -55,7 +55,11 @@
                class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
         <span class="mt-1 block text-xs text-neutral-600">Maintenance-mode IP address or hostname of the candidate node. A hostname is resolved to its IP before the instance is registered, so it behaves identically to typing that IP directly. It will be discovered and registered, left unclaimed.</span>
     </label>
-    <div class="flex justify-end pt-2">
+    <div class="flex justify-end gap-2 pt-2">
+        <button type="button" onclick="this.closest('dialog').close()"
+                class="inline-flex items-center px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg border border-neutral-700 text-neutral-300 hover:bg-neutral-800 transition-colors">
+            Cancel
+        </button>
         <!--
             hx-disabled-elt (see AGENTS.md's UI policy) disables this button
             for the POST's own round trip, so submitting doesn't leave the

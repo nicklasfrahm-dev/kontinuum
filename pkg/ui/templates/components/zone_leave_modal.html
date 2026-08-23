@@ -37,7 +37,11 @@
                    oninput="updateZoneLeaveModalConfirm()"
                    class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 focus:outline-none focus:border-accent">
         </label>
-        <div class="flex justify-end pt-2">
+        <div class="flex justify-end gap-2 pt-2">
+            <button type="button" onclick="this.closest('dialog').close()"
+                    class="inline-flex items-center px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg border border-neutral-700 text-neutral-300 hover:bg-neutral-800 transition-colors">
+                Cancel
+            </button>
             <button type="button" id="zone-leave-modal-confirm" disabled
                     hx-target="#registry-content" hx-select="#registry-content" hx-swap="outerHTML"
                     hx-disabled-elt="this"

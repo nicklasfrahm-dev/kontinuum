@@ -151,7 +151,11 @@
             you plan to fully decommission the asset and plan to never use it again.
         </p>
     </div>
-    <div class="flex justify-end pt-2">
+    <div class="flex justify-end gap-2 pt-2">
+        <button type="button" onclick="this.closest('dialog').close()"
+                class="inline-flex items-center px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg border border-neutral-700 text-neutral-300 hover:bg-neutral-800 transition-colors">
+            Cancel
+        </button>
         <!--
             hx-disabled-elt (see AGENTS.md's UI policy) disables this button
             for the POST's own round trip — provisioning a zone kicks off a
