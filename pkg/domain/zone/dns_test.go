@@ -211,7 +211,7 @@ func TestReconcileTeardownDeletesDNSEndpoint(t *testing.T) {
 		ImageRepo:               testImageRepo,
 		RetryInterval:           testRetryInterval,
 		TeardownTimeout:         testTeardownTimeout,
-		Locker:                  zonelease.NewLocker(hubClient, "test-hub", "", 0),
+		Locker:                  zonelease.NewLocker(hubClient, hubClient, "test-hub", "", 0),
 		Logger:                  slog.Default(),
 	}
 
@@ -351,7 +351,7 @@ func TestReconcileTeardownDeletesCloudflareCredentialSecret(t *testing.T) {
 		ImageRepo:               testImageRepo,
 		RetryInterval:           testRetryInterval,
 		TeardownTimeout:         testTeardownTimeout,
-		Locker:                  zonelease.NewLocker(hubClient, "test-hub", "", 0),
+		Locker:                  zonelease.NewLocker(hubClient, hubClient, "test-hub", "", 0),
 		Logger:                  slog.Default(),
 	}
 
