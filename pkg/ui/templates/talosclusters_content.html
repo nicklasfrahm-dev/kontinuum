@@ -91,7 +91,7 @@
     </div>
     <div class="p-6 space-y-4">
         <p class="text-sm text-neutral-400">
-            This stops kontinuum from managing <code id="delete-cluster-modal-name" class="font-mono text-white bg-neutral-700 border border-neutral-600 rounded px-1.5 py-0.5"></code>. This cannot be undone.
+            This stops kontinuum from managing {{template "copy-chip" (dict "ID" "delete-cluster-modal-name")}}. This cannot be undone.
         </p>
         <div class="flex justify-end gap-2 pt-2">
             <button type="button" onclick="document.getElementById('delete-cluster-modal').close()"
@@ -111,8 +111,16 @@
     var deleteClusterModalName = document.getElementById('delete-cluster-modal-name');
     var deleteClusterModalConfirm = document.getElementById('delete-cluster-modal-confirm');
 
+    // Wired once here, at load — see instances_content.html's identical
+    // wireCopyChip usage for its own delete-instance-modal-name chip for
+    // why this reads [data-name-text] fresh on every click via a
+    // function rather than capturing name once up front.
+    wireCopyChip(deleteClusterModalName, function () {
+        return deleteClusterModalName.querySelector('[data-name-text]').textContent;
+    });
+
     function openDeleteClusterModal(name, namespace) {
-        deleteClusterModalName.textContent = name;
+        deleteClusterModalName.querySelector('[data-name-text]').textContent = name;
         deleteClusterModalConfirm.setAttribute('hx-delete',
             '/app/kontinuum.sh/namespaces/' + encodeURIComponent(namespace) + '/talosclusters/' + encodeURIComponent(name));
         // hx-delete is only bound to an element once, on htmx's initial scan

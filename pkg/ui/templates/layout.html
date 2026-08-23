@@ -160,29 +160,25 @@
          rather than re-declaring the same markup a second time. -->
     <template id="copy-chip-shell">{{template "copy-chip" (dict)}}</template>
     <script>
-        // buildCopyChip(value) clones copy-chip-shell above and wires up
-        // its click-to-copy/"Copied" feedback behavior for value — the
-        // same markup+classes as zone_leave_modal.html's own name chips
-        // (see registry_content.html's identical click listener for
-        // those), just populated and wired up in JS rather than
-        // server-rendered, since showToast's own message is assembled
-        // entirely client-side. Kept here (not page-specific) so any
-        // toast — not just the "Add zone" success one below — can embed
-        // a copyable command the same way.
-        function buildCopyChip(value) {
-            var chip = document.getElementById('copy-chip-shell').content.cloneNode(true).firstElementChild;
-            var nameText = chip.querySelector('[data-name-text]');
+        // wireCopyChip(chip, value) wires up chip's (any "copy-chip"
+        // instance — see that template's own doc) click-to-copy/"Copied"
+        // feedback behavior. value is copied as-is, or — for a chip a
+        // shared, per-row-retargeted dialog re-populates after this runs
+        // (see instances_content.html's own openDeleteInstanceModal,
+        // registry_content.html's own openZoneLeaveModal) — a function
+        // returning the current value, called fresh on every click
+        // rather than captured once up front. Global (not page-specific)
+        // so every page's own script block can wire up its own static
+        // copy-chip usages (see instance_detail_content.html) through
+        // this one definition instead of each hand-rolling the same
+        // listener.
+        function wireCopyChip(chip, value) {
             var copiedFeedback = chip.querySelector('[data-copied-feedback]');
 
-            nameText.textContent = value;
-
-            // nameText itself is never hidden (see copy_chip.html's own
-            // doc) — it's the chip's only in-flow content, so hiding it
-            // would collapse the chip's own size right when the overlay
-            // below needs it held steady. copiedFeedback's own opaque
-            // background covers it instead.
             chip.addEventListener('click', function () {
-                navigator.clipboard.writeText(value).then(function () {
+                var text = typeof value === 'function' ? value() : value;
+
+                navigator.clipboard.writeText(text).then(function () {
                     copiedFeedback.classList.remove('hidden');
                     copiedFeedback.classList.add('flex');
 
@@ -192,6 +188,18 @@
                     }, 1500);
                 });
             });
+        }
+
+        // buildCopyChip(value) clones copy-chip-shell above, populates
+        // it, and wires it up via wireCopyChip — used where a chip's own
+        // value isn't known until entirely client-side (showToast's own
+        // message), unlike every other copy-chip usage in the app, which
+        // renders server-side and only needs wireCopyChip directly.
+        function buildCopyChip(value) {
+            var chip = document.getElementById('copy-chip-shell').content.cloneNode(true).firstElementChild;
+
+            chip.querySelector('[data-name-text]').textContent = value;
+            wireCopyChip(chip, value);
 
             return chip;
         }
