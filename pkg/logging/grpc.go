@@ -29,11 +29,16 @@ type grpcLogger struct {
 	logger *slog.Logger
 }
 
-// NewGRPCLogger wraps logger as a grpclog.LoggerV2, tagged
+// NewGRPCLogger wraps logger for use as a grpclog.LoggerV2, tagged
 // component=grpc. Install the result with grpclog.SetLoggerV2 once, before
 // any gRPC client or server in the process is created — SetLoggerV2 sets a
 // package-level global inside grpc-go and isn't safe to change concurrently
-// with gRPC activity.
+// with gRPC activity. grpcLogger stays unexported: it exists only to
+// satisfy grpclog.LoggerV2, the type grpclog.SetLoggerV2 itself requires,
+// and exporting it would just obligate doc comments on a dozen methods
+// that exist purely to implement someone else's interface.
+//
+//nolint:ireturn // see comment above
 func NewGRPCLogger(logger *slog.Logger) grpclog.LoggerV2 {
 	return &grpcLogger{logger: logger.With("component", "grpc")}
 }
