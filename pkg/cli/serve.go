@@ -17,6 +17,7 @@ import (
 
 	"github.com/kommodity-io/kommodity/pkg/libkapi"
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc/grpclog"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -267,6 +268,11 @@ func loadServeConfig(cmd *cobra.Command, addr string, storage string) (*config.C
 	}
 
 	logger := logging.New(level, format, os.Stdout)
+
+	// SetLoggerV2 is a package-level global in grpc-go, so it must be set
+	// once, up front — before any gRPC client or server in the process
+	// dials or listens — rather than per-connection.
+	grpclog.SetLoggerV2(logging.NewGRPCLogger(logger))
 
 	anonymous, err := cfg.ValidateAuthentication()
 	if err != nil {
