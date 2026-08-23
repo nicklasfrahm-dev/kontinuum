@@ -65,7 +65,7 @@ func TestRelayRefreshesIdentityAfterRepeatedAuthFailures(t *testing.T) {
 	now := time.Now()
 	correct := generateTestIdentity(t)
 	wrong := generateTestIdentity(t)
-	secret := admittedPublicSecret(verifierTestZone, etcdproxy.IdentityPair{
+	secret := admittedPublicSecret(etcdproxy.IdentityPair{
 		Current:  etcdproxy.Identity{CertPEM: correct.certPEM, IssuedAt: now},
 		Previous: etcdproxy.Identity{CertPEM: correct.certPEM, IssuedAt: now},
 	})

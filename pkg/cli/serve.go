@@ -524,52 +524,7 @@ func resolveStorageDSN(
 
 	zoneName, hubEndpoint, ok := etcdproxy.ParseRelayDSN(configured)
 	if ok {
-		skipVerify, err := strconv.ParseBool(insecureSkipVerify)
-		if err != nil {
-			return "", noopCleanup,
-				fmt.Errorf("failed to parse KONTINUUM_SERVER_GRPC_INSECURE_TLS_SKIP_VERIFY: %w", err)
-		}
-
-		watchClient, err := etcdproxy.NewInClusterIdentityWatcher()
-		if err != nil {
-			return "", noopCleanup, fmt.Errorf("failed to build etcd proxy identity watcher: %w", err)
-		}
-
-		// watchCtx, not ctx directly: cancelWatch (folded into the returned
-		// cleanup below) is this function's own way to stop WatchIdentity's
-		// background goroutine once the Relay it feeds is torn down — ctx
-		// itself outlives any single Relay (see buildServer's own doc for why
-		// storage is resolved against a background context).
-		watchCtx, cancelWatch := context.WithCancel(ctx)
-
-		keys, err := etcdproxy.WatchIdentity(watchCtx, watchClient, v1alpha2.KontinuumSystemNamespace, logger)
-		if err != nil {
-			cancelWatch()
-
-			return "", noopCleanup, fmt.Errorf("failed to load etcd proxy identity: %w", err)
-		}
-
-		//nolint:contextcheck // StartRelay deliberately takes no ctx of its own — see its own doc
-		relay, err := etcdproxy.StartRelay(etcdproxy.RelayConfig{
-			SocketPath:         storageRelaySocketPath,
-			HubEndpoint:        hubEndpoint,
-			Zone:               zoneName,
-			Keys:               keys,
-			InsecureSkipVerify: skipVerify,
-			Logger:             logger,
-		})
-		if err != nil {
-			cancelWatch()
-
-			return "", noopCleanup, fmt.Errorf("failed to start storage relay: %w", err)
-		}
-
-		cleanup := func() {
-			cancelWatch()
-			relay.Close()
-		}
-
-		return "unix://" + storageRelaySocketPath, cleanup, nil
+		return resolveRelayDSN(ctx, logger, zoneName, hubEndpoint, insecureSkipVerify)
 	}
 
 	if !etcdproxy.IsPoolableBackend(configured) {
@@ -591,6 +546,64 @@ func resolveStorageDSN(
 	}
 
 	return "unix://" + storageLocalPoolSocketPath, pool.Close, nil
+}
+
+// resolveRelayDSN builds and starts the etcdproxy.Relay a RelayScheme DSN
+// (zoneName, hubEndpoint — see ParseRelayDSN) resolves to, returning the
+// plain "unix://" DSN pointed at it — split out of resolveStorageDSN purely
+// to keep that function's own length in check; see its own doc for the
+// fuller picture this is one branch of.
+func resolveRelayDSN(
+	ctx context.Context, logger *slog.Logger, zoneName, hubEndpoint, insecureSkipVerify string,
+) (string, func(), error) {
+	noopCleanup := func() {}
+
+	skipVerify, err := strconv.ParseBool(insecureSkipVerify)
+	if err != nil {
+		return "", noopCleanup,
+			fmt.Errorf("failed to parse KONTINUUM_SERVER_GRPC_INSECURE_TLS_SKIP_VERIFY: %w", err)
+	}
+
+	watchClient, err := etcdproxy.NewInClusterIdentityWatcher()
+	if err != nil {
+		return "", noopCleanup, fmt.Errorf("failed to build etcd proxy identity watcher: %w", err)
+	}
+
+	// watchCtx, not ctx directly: cancelWatch (folded into the returned
+	// cleanup below) is this function's own way to stop WatchIdentity's
+	// background goroutine once the Relay it feeds is torn down — ctx
+	// itself outlives any single Relay (see buildServer's own doc for why
+	// storage is resolved against a background context).
+	watchCtx, cancelWatch := context.WithCancel(ctx)
+
+	keys, err := etcdproxy.WatchIdentity(watchCtx, watchClient, v1alpha2.KontinuumSystemNamespace, logger)
+	if err != nil {
+		cancelWatch()
+
+		return "", noopCleanup, fmt.Errorf("failed to load etcd proxy identity: %w", err)
+	}
+
+	//nolint:contextcheck // StartRelay deliberately takes no ctx of its own — see its own doc
+	relay, err := etcdproxy.StartRelay(etcdproxy.RelayConfig{
+		SocketPath:         storageRelaySocketPath,
+		HubEndpoint:        hubEndpoint,
+		Zone:               zoneName,
+		Keys:               keys,
+		InsecureSkipVerify: skipVerify,
+		Logger:             logger,
+	})
+	if err != nil {
+		cancelWatch()
+
+		return "", noopCleanup, fmt.Errorf("failed to start storage relay: %w", err)
+	}
+
+	cleanup := func() {
+		cancelWatch()
+		relay.Close()
+	}
+
+	return "unix://" + storageRelaySocketPath, cleanup, nil
 }
 
 // registryOptions builds the libkapi options that wire kontinuum's server
