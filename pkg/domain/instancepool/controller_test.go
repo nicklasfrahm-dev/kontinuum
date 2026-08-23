@@ -97,7 +97,7 @@ func newReconciler(fakeClient client.Client) *instancepool.Reconciler {
 	return &instancepool.Reconciler{
 		Client:        fakeClient,
 		RetryInterval: testRetryInterval,
-		Locker:        zonelease.NewLocker(fakeClient, "test-hub", "", 0),
+		Locker:        zonelease.NewLocker(fakeClient, fakeClient, "test-hub", "", 0),
 		Logger:        slog.Default(),
 	}
 }

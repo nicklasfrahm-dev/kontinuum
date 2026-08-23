@@ -50,6 +50,21 @@ const deregisterTimeout = 5 * time.Second
 // are registered through).
 type Heartbeat struct {
 	Client client.Client
+	// Reader bypasses Client's watch-backed cache for every Get this file
+	// does right before a conditional write on the same object — always
+	// mgr.GetAPIReader() in production, the same fake client as Client in
+	// tests (client.Client already satisfies client.Reader). Get on Client
+	// is served from a local informer cache kept fresh by a background
+	// watch; if that watch stalls (e.g. a flaky connection to storage) the
+	// cache can keep returning a stale resourceVersion/UID indefinitely,
+	// which turns beat's own "always re-fetch first" self-healing promise
+	// (see beat's doc) into a permanent conflict loop instead — every write
+	// fails its optimistic-concurrency precondition against the same stale
+	// copy, forever, not just once. Reader has no such cache: it always
+	// round-trips to the API server, so a stuck watch can make a heartbeat
+	// fail (cleanly, and only until the next tick), never makes it fail the
+	// same way forever.
+	Reader client.Reader
 	Name   string
 	// Role is written to status.role on every heartbeat — see registry.Role,
 	// which derives it from Spec.Region and Spec.Zone.
@@ -103,7 +118,7 @@ func (h *Heartbeat) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resul
 
 	var server v1alpha2.Kontinuum
 
-	err := h.Client.Get(ctx, req.NamespacedName, &server)
+	err := h.Reader.Get(ctx, req.NamespacedName, &server)
 	if apierrors.IsNotFound(err) {
 		if h.shuttingDown.Load() {
 			return ctrl.Result{}, nil
@@ -201,16 +216,19 @@ func (h *Heartbeat) Deregister(ctx context.Context) error {
 // previous tick's write only partially landed — updating against a stale
 // local copy fails with a precondition/conflict error every single tick
 // thereafter, not just once. Refreshing first makes each tick self-healing
-// regardless of why the local copy drifted. If the object is genuinely
-// gone, the fetch itself comes back NotFound, and beat re-registers by
-// recreating it (see reregister) rather than leaving this instance
-// permanently deregistered until the process restarts. Any other failure
-// is logged, not fatal — the next tick tries again.
+// regardless of why the local copy drifted — which is also why this uses
+// h.Reader, not h.Client: Client's own Get is cache-backed, and a cache fed
+// by a stalled watch is exactly the "stale local copy" this fetch exists to
+// rule out (see Reader's own doc). If the object is genuinely gone, the
+// fetch itself comes back NotFound, and beat re-registers by recreating it
+// (see reregister) rather than leaving this instance permanently
+// deregistered until the process restarts. Any other failure is logged, not
+// fatal — the next tick tries again.
 func (h *Heartbeat) beat(ctx context.Context, server *v1alpha2.Kontinuum) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	err := h.Client.Get(ctx, client.ObjectKeyFromObject(server), server)
+	err := h.Reader.Get(ctx, client.ObjectKeyFromObject(server), server)
 	if apierrors.IsNotFound(err) {
 		if h.shuttingDown.Load() {
 			return
@@ -306,7 +324,7 @@ func (h *Heartbeat) ensureSecret(
 	if apierrors.IsAlreadyExists(err) {
 		var existing corev1.Secret
 
-		err = h.Client.Get(ctx, client.ObjectKeyFromObject(secret), &existing)
+		err = h.Reader.Get(ctx, client.ObjectKeyFromObject(secret), &existing)
 		if err != nil {
 			return ref, fmt.Errorf("failed to fetch existing %q secret: %w", ref.Name, err)
 		}
@@ -351,7 +369,7 @@ func (h *Heartbeat) reregister(ctx context.Context, server *v1alpha2.Kontinuum) 
 
 	err = h.Client.Create(ctx, server)
 	if err != nil && apierrors.IsAlreadyExists(err) {
-		err = h.Client.Get(ctx, client.ObjectKeyFromObject(server), server)
+		err = h.Reader.Get(ctx, client.ObjectKeyFromObject(server), server)
 	}
 
 	if err != nil {

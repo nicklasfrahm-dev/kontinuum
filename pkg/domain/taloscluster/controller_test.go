@@ -237,7 +237,7 @@ func newReconciler(fakeClient client.Client, bootstrapper *fakeBootstrapper) *ta
 		// own give-up test, which builds its own Reconciler with this set to
 		// zero instead.
 		TeardownTimeout: testHealthCheckInterval,
-		Locker:          zonelease.NewLocker(fakeClient, "test-hub", "", 0),
+		Locker:          zonelease.NewLocker(fakeClient, fakeClient, "test-hub", "", 0),
 		Logger:          slog.Default(),
 	}
 }

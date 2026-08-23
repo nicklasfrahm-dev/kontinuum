@@ -344,7 +344,7 @@ func newReconciler(hubClient client.Client, downstreamBuilder zone.DownstreamCli
 		HubConfig:               testHubConfig(),
 		ImageRepo:               testImageRepo,
 		RetryInterval:           testRetryInterval,
-		Locker:                  zonelease.NewLocker(hubClient, "test-hub", "", 0),
+		Locker:                  zonelease.NewLocker(hubClient, hubClient, "test-hub", "", 0),
 		Logger:                  slog.Default(),
 	}
 }

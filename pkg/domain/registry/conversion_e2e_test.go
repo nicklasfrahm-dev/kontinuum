@@ -124,6 +124,7 @@ func runHeartbeatAndAssertBridge(
 	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
 	heartbeat := &registry.Heartbeat{
 		Client:   kontinuums,
+		Reader:   kontinuums,
 		Name:     e2eLegacyInstanceName,
 		Role:     v1alpha2.RoleWorker,
 		Spec:     v1alpha2.KontinuumSpec{Region: e2eRegion, Zone: e2eZone},

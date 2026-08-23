@@ -244,7 +244,7 @@ func TestReconcileTeardownGivesUpAfterTeardownTimeout(t *testing.T) {
 		Bootstrapper:    bootstrapper,
 		RetryInterval:   testRetryInterval,
 		TeardownTimeout: 0, // effectively already elapsed the instant DeletionTimestamp is set
-		Locker:          zonelease.NewLocker(fakeClient, "test-hub", "", 0),
+		Locker:          zonelease.NewLocker(fakeClient, fakeClient, "test-hub", "", 0),
 		Logger:          slog.Default(),
 	}
 

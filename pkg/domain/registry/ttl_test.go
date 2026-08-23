@@ -92,7 +92,7 @@ func TestTTLReconcilerDeletesStaleServer(t *testing.T) {
 	reconciler := &registry.TTLReconciler{
 		Client:         fakeClient,
 		StaleThreshold: testStaleThreshold,
-		Locker:         zonelease.NewLocker(fakeClient, "test-hub", "", 0),
+		Locker:         zonelease.NewLocker(fakeClient, fakeClient, "test-hub", "", 0),
 		Logger:         slog.Default(),
 	}
 
@@ -122,7 +122,7 @@ func TestTTLReconcilerRequeuesFreshServer(t *testing.T) {
 	reconciler := &registry.TTLReconciler{
 		Client:         fakeClient,
 		StaleThreshold: testStaleThreshold,
-		Locker:         zonelease.NewLocker(fakeClient, "test-hub", "", 0),
+		Locker:         zonelease.NewLocker(fakeClient, fakeClient, "test-hub", "", 0),
 		Logger:         slog.Default(),
 	}
 
@@ -144,7 +144,7 @@ func TestTTLReconcilerIgnoresMissingServer(t *testing.T) {
 	reconciler := &registry.TTLReconciler{
 		Client:         fakeClient,
 		StaleThreshold: testStaleThreshold,
-		Locker:         zonelease.NewLocker(fakeClient, "test-hub", "", 0),
+		Locker:         zonelease.NewLocker(fakeClient, fakeClient, "test-hub", "", 0),
 		Logger:         slog.Default(),
 	}
 

@@ -73,6 +73,7 @@ func TestHeartbeatRegistersAndUpdatesStatus(t *testing.T) {
 
 	heartbeat := &registry.Heartbeat{
 		Client:     fakeClient,
+		Reader:     fakeClient,
 		Name:       testServerName,
 		Role:       v1alpha2.RoleWorker,
 		Spec:       v1alpha2.KontinuumSpec{Region: "eu", Zone: e2eZone},
@@ -162,6 +163,7 @@ func TestHeartbeatStartAdoptsPreexistingRegistration(t *testing.T) {
 
 	heartbeat := &registry.Heartbeat{
 		Client:   fakeClient,
+		Reader:   fakeClient,
 		Name:     testServerName,
 		Role:     v1alpha2.RoleWorker,
 		Spec:     v1alpha2.KontinuumSpec{Region: "eu", Zone: e2eZone},
@@ -202,6 +204,7 @@ func TestHeartbeatReregistersIfDeletedExternally(t *testing.T) {
 
 	heartbeat := &registry.Heartbeat{
 		Client:   fakeClient,
+		Reader:   fakeClient,
 		Name:     testServerName,
 		Role:     v1alpha2.RoleWorker,
 		Spec:     v1alpha2.KontinuumSpec{Region: "eu", Zone: e2eZone},
@@ -320,6 +323,7 @@ func TestHeartbeatConcurrentBeatAndReconcileStayConsistent(t *testing.T) {
 
 	heartbeat := &registry.Heartbeat{
 		Client:     fakeClient,
+		Reader:     fakeClient,
 		Name:       testServerName,
 		Role:       v1alpha2.RoleWorker,
 		Spec:       v1alpha2.KontinuumSpec{Region: "eu", Zone: e2eZone},
@@ -375,6 +379,7 @@ func TestHeartbeatReconcileReregistersOnDelete(t *testing.T) {
 
 	heartbeat := &registry.Heartbeat{
 		Client: fakeClient,
+		Reader: fakeClient,
 		Name:   testServerName,
 		Role:   v1alpha2.RoleControlPlane,
 		Logger: slog.Default(),
@@ -402,6 +407,7 @@ func TestHeartbeatReconcileNoOpsWhenServerExists(t *testing.T) {
 
 	heartbeat := &registry.Heartbeat{
 		Client: fakeClient,
+		Reader: fakeClient,
 		Name:   testServerName,
 		Logger: slog.Default(),
 	}
@@ -422,6 +428,7 @@ func TestHeartbeatDeregisterIsIdempotent(t *testing.T) {
 
 	heartbeat := &registry.Heartbeat{
 		Client: fakeClient,
+		Reader: fakeClient,
 		Name:   testServerName,
 		Logger: slog.Default(),
 	}
@@ -451,6 +458,7 @@ func TestHeartbeatDeregisterPreventsReconcileFromReregistering(t *testing.T) {
 
 	heartbeat := &registry.Heartbeat{
 		Client: fakeClient,
+		Reader: fakeClient,
 		Name:   testServerName,
 		Role:   v1alpha2.RoleWorker,
 		Logger: slog.Default(),
@@ -482,6 +490,7 @@ func TestHeartbeatDeregisterStopsBeatFromReregistering(t *testing.T) {
 
 	heartbeat := &registry.Heartbeat{
 		Client:   fakeClient,
+		Reader:   fakeClient,
 		Name:     testServerName,
 		Role:     v1alpha2.RoleWorker,
 		Interval: testHeartbeatInterval,

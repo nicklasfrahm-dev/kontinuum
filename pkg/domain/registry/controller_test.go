@@ -127,11 +127,12 @@ func TestCombinedReconcilerDeletesStaleOtherInstanceWithoutTouchingHeartbeat(t *
 		TTL: &registry.TTLReconciler{
 			Client:         fakeClient,
 			StaleThreshold: time.Minute,
-			Locker:         zonelease.NewLocker(fakeClient, "test-hub", "", 0),
+			Locker:         zonelease.NewLocker(fakeClient, fakeClient, "test-hub", "", 0),
 			Logger:         slog.Default(),
 		},
 		Heartbeat: &registry.Heartbeat{
 			Client: fakeClient,
+			Reader: fakeClient,
 			Name:   selfInstanceName,
 			Logger: slog.Default(),
 		},
@@ -160,11 +161,12 @@ func TestCombinedReconcilerReregistersOwnDeletedInstance(t *testing.T) {
 		TTL: &registry.TTLReconciler{
 			Client:         fakeClient,
 			StaleThreshold: time.Minute,
-			Locker:         zonelease.NewLocker(fakeClient, "test-hub", "", 0),
+			Locker:         zonelease.NewLocker(fakeClient, fakeClient, "test-hub", "", 0),
 			Logger:         slog.Default(),
 		},
 		Heartbeat: &registry.Heartbeat{
 			Client: fakeClient,
+			Reader: fakeClient,
 			Name:   selfInstanceName,
 			Role:   v1alpha2.RoleControlPlane,
 			Logger: slog.Default(),
@@ -195,11 +197,12 @@ func TestCombinedReconcilerPreservesTTLRequeueForOwnFreshInstance(t *testing.T) 
 		TTL: &registry.TTLReconciler{
 			Client:         fakeClient,
 			StaleThreshold: time.Minute,
-			Locker:         zonelease.NewLocker(fakeClient, "test-hub", "", 0),
+			Locker:         zonelease.NewLocker(fakeClient, fakeClient, "test-hub", "", 0),
 			Logger:         slog.Default(),
 		},
 		Heartbeat: &registry.Heartbeat{
 			Client: fakeClient,
+			Reader: fakeClient,
 			Name:   selfInstanceName,
 			Role:   v1alpha2.RoleControlPlane,
 			Logger: slog.Default(),

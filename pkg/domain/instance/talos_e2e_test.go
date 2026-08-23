@@ -79,7 +79,7 @@ func TestE2EInstanceDiscoversRealTalosContainer(t *testing.T) {
 		Discoverer:    instance.NewTalosDiscoverer(),
 		DialTimeout:   10 * time.Second,
 		RetryInterval: testRetryInterval,
-		Locker:        zonelease.NewLocker(fakeClient, "test-hub", "", 0),
+		Locker:        zonelease.NewLocker(fakeClient, fakeClient, "test-hub", "", 0),
 		Logger:        slog.Default(),
 	}
 
