@@ -310,18 +310,25 @@ func registeredKontinuum(name string) (*v1alpha2.Kontinuum, *corev1.Secret) {
 	return kontinuum, secret
 }
 
+// testJoinedKontinuumName is joinedKontinuum's own fixture name — every
+// call site needs the exact same one (see that function's own doc for
+// why), so it's a constant rather than a parameter every caller passed
+// the same literal for anyway.
+const testJoinedKontinuumName = "zzz-worker"
+
 // joinedKontinuum returns a Kontinuum (plus its backing storage-credential
 // Secret, mirroring registeredKontinuum) registered for
 // testRegion/testZone with a fresh heartbeat — the shape
 // zone.FindJoinedKontinuum looks for once this zone's own kontinuum-server
 // has actually joined the hub's registry (see
-// TestReconcileFlipsReadyOnceKontinuumJoinsRegistry). name is expected to
-// sort after "hub" (the other fixture Kontinuum most of this file's tests
-// register) so anyRegisteredKontinuum's own name-sorted pick — irrelevant
-// to what this helper is testing — keeps landing on a Kontinuum whose
-// Secret actually holds a storage connection string.
-func joinedKontinuum(name string) (*v1alpha2.Kontinuum, *corev1.Secret) {
-	kontinuum, secret := registeredKontinuum(name)
+// TestReconcileFlipsReadyOnceKontinuumJoinsRegistry).
+// testJoinedKontinuumName is expected to sort after "hub" (the other
+// fixture Kontinuum most of this file's tests register) so
+// anyRegisteredKontinuum's own name-sorted pick — irrelevant to what this
+// helper is testing — keeps landing on a Kontinuum whose Secret actually
+// holds a storage connection string.
+func joinedKontinuum() (*v1alpha2.Kontinuum, *corev1.Secret) {
+	kontinuum, secret := registeredKontinuum(testJoinedKontinuumName)
 	kontinuum.Spec = v1alpha2.KontinuumSpec{Region: testRegion, Zone: testZone}
 	kontinuum.Status.LastHeartbeatTime = metav1.Now()
 
@@ -1020,7 +1027,7 @@ func TestReconcileFlipsReadyOnceKontinuumJoinsRegistry(t *testing.T) {
 	_, err = reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
 
-	worker, workerSecret := joinedKontinuum("zzz-worker")
+	worker, workerSecret := joinedKontinuum()
 	require.NoError(t, hubClient.Create(t.Context(), worker))
 	require.NoError(t, hubClient.Create(t.Context(), workerSecret))
 
@@ -1080,7 +1087,7 @@ func TestReconcileKeepsRequeuingReadyZoneOnFloatingImageTag(t *testing.T) {
 	_, err = reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
 
-	worker, workerSecret := joinedKontinuum("zzz-worker")
+	worker, workerSecret := joinedKontinuum()
 	require.NoError(t, hubClient.Create(t.Context(), worker))
 	require.NoError(t, hubClient.Create(t.Context(), workerSecret))
 
@@ -1100,6 +1107,60 @@ func TestReconcileKeepsRequeuingReadyZoneOnFloatingImageTag(t *testing.T) {
 	// imageRefreshInterval.
 	assert.LessOrEqual(t, result.RequeueAfter, 5*time.Minute)
 	assert.Positive(t, result.RequeueAfter)
+}
+
+// TestReconcileToleratesNoRegisteredKontinuumOnceReady covers
+// reconcileImageRefreshSchedule's other early-return: unlike
+// TestReconcileFlipsRegistryJoinedFalseOnceKontinuumGoesStale (which only
+// deletes the joined worker, leaving the hub's own Kontinuum registered),
+// this deletes every registered Kontinuum — hub included — once the Zone
+// is already RegistryJoined, so findKontinuumVersion returns
+// errNoRegisteredKontinuum. Reconcile must still succeed: that error is
+// treated as "nothing to schedule around yet," the same benign way
+// resolveImage's own caller already treats it, not surfaced as a
+// Reconcile failure.
+func TestReconcileToleratesNoRegisteredKontinuumOnceReady(t *testing.T) {
+	t.Parallel()
+
+	kontinuum, kontinuumSecret := registeredKontinuum("hub")
+	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
+		kontinuum, kontinuumSecret)
+	downstream := newDownstreamFakeClient(t)
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: downstream})
+
+	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	var cert certmanagerv1.Certificate
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &cert))
+
+	cert.Status.Conditions = []certmanagerv1.CertificateCondition{
+		{Type: certmanagerv1.CertificateConditionReady, Status: cmmeta.ConditionTrue, Reason: testCertificateReadyReason},
+	}
+	require.NoError(t, downstream.Status().Update(t.Context(), &cert))
+
+	_, err = reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	worker, workerSecret := joinedKontinuum()
+	require.NoError(t, hubClient.Create(t.Context(), worker))
+	require.NoError(t, hubClient.Create(t.Context(), workerSecret))
+
+	_, err = reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	var joined v1alpha2.Zone
+	require.NoError(t, hubClient.Get(t.Context(), testZoneKey(), &joined))
+	require.Equal(t, metav1.ConditionTrue,
+		meta.FindStatusCondition(joined.Status.Conditions, zone.RegistryJoinedConditionType).Status,
+		"test setup must reach RegistryJoined=true before the regression itself can be exercised")
+
+	require.NoError(t, hubClient.Delete(t.Context(), worker))
+	require.NoError(t, hubClient.Delete(t.Context(), kontinuum))
+
+	_, err = reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
 }
 
 // TestReconcileFlipsRegistryJoinedFalseOnceKontinuumGoesStale is the
@@ -1141,7 +1202,7 @@ func TestReconcileFlipsRegistryJoinedFalseOnceKontinuumGoesStale(t *testing.T) {
 	_, err = reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
 
-	worker, workerSecret := joinedKontinuum("zzz-worker")
+	worker, workerSecret := joinedKontinuum()
 	require.NoError(t, hubClient.Create(t.Context(), worker))
 	require.NoError(t, hubClient.Create(t.Context(), workerSecret))
 
