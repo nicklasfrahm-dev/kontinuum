@@ -25,6 +25,7 @@ import (
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/adminrbac"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/etcdproxy"
 	"github.com/nicklasfrahm/kontinuum/pkg/ui"
 )
 
@@ -810,6 +811,116 @@ func TestHandleKontinuumDetailHidesConfigSecretRevealWhenSecretRefEmpty(t *testi
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	assert.NotContains(t, string(body), `id="secret-data-toggle"`)
+}
+
+// TestHandleKontinuumDetailShowsGRPCThumbprintForWorker covers a Worker
+// Kontinuum's gRPC card showing the same etcd gRPC proxy identity
+// thumbprint the zone detail page's own "Etcd proxy identity" card shows
+// (see fetchZoneIdentity) — keyed by the "<region>-<zone>" Zone name
+// zoneNameForKontinuum derives from item's own Spec.Region/Spec.Zone.
+func TestHandleKontinuumDetailShowsGRPCThumbprintForWorker(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	item := v1alpha2.Kontinuum{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker-2"},
+		Spec:       v1alpha2.KontinuumSpec{Region: "us-east", Zone: "a"},
+		Status:     v1alpha2.KontinuumStatus{Role: v1alpha2.RoleWorker},
+	}
+
+	certPEM, _, err := etcdproxy.GenerateIdentity("us-east-a")
+	require.NoError(t, err)
+
+	previousCertPEM, _, err := etcdproxy.GenerateIdentity("us-east-a")
+	require.NoError(t, err)
+
+	// ParsePublicSecret requires both Current and Previous to be non-empty
+	// (see parseIdentity) — a freshly rotated identity still carries its
+	// predecessor for IdentityOverlapWindow, so a real Secret always has
+	// both.
+	pair := etcdproxy.IdentityPair{
+		Current:  etcdproxy.Identity{CertPEM: certPEM, IssuedAt: time.Now()},
+		Previous: etcdproxy.Identity{CertPEM: previousCertPEM, IssuedAt: time.Now().Add(-etcdproxy.IdentityRotationInterval)},
+	}
+	wantThumbprint, err := etcdproxy.Thumbprint(certPEM)
+	require.NoError(t, err)
+
+	// ParsePublicSecret reads secret.Data, not secret.StringData — a real
+	// apiserver merges the two on write, but this test builds the Secret
+	// in-process, so it must do that merge itself.
+	secret := etcdproxy.BuildPublicSecret("us-east-a", v1alpha2.KontinuumSystemNamespace, pair)
+	secret.Data = make(map[string][]byte, len(secret.StringData))
+
+	for k, v := range secret.StringData {
+		secret.Data[k] = []byte(v)
+	}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{items: []v1alpha2.Kontinuum{item}, secret: secret}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-2"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), wantThumbprint)
+}
+
+// TestHandleKontinuumDetailHidesGRPCThumbprintForControlPlane covers the
+// hub's own Kontinuum (RoleControlPlane, empty Spec.Region/Spec.Zone) never
+// showing a thumbprint row — it has no corresponding Zone, so
+// zoneNameForKontinuum reports ok=false and fetchZoneIdentity is never even
+// called.
+func TestHandleKontinuumDetailHidesGRPCThumbprintForControlPlane(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	item := v1alpha2.Kontinuum{
+		ObjectMeta: metav1.ObjectMeta{Name: "hub-1"},
+		Status:     v1alpha2.KontinuumStatus{Role: v1alpha2.RoleControlPlane},
+	}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{items: []v1alpha2.Kontinuum{item}}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/hub-1"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.NotContains(t, string(body), "Thumbprint")
 }
 
 func TestHandleKontinuumDetailHidesConfigSecretRevealWhenSecretNotFound(t *testing.T) {

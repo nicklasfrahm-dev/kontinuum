@@ -979,11 +979,15 @@ func (r *Router) handleZoneDetail(writer http.ResponseWriter, request *http.Requ
 // active (Current) certificate's own thumbprint and issuance time — ok is
 // false for anything that keeps this from resolving (Secret not found
 // yet, no permission to read Secrets, malformed content, ...), in which
-// case the zone detail page simply omits its own "Etcd proxy identity"
-// card rather than erroring the whole page: unlike RegistryJoined/
-// HasCluster, this is a purely informational display, not something the
-// rest of the page depends on.
-func fetchZoneIdentity(ctx context.Context, zones client.Client, zoneName string) (string, time.Time, bool) {
+// case the caller simply omits its own "identity"/"thumbprint" display
+// rather than erroring the whole page: unlike RegistryJoined/HasCluster,
+// this is a purely informational display, not something the rest of a
+// page depends on. Shared by both handleZoneDetail (the zone's own
+// detail page) and handleKontinuumDetail (a Worker Kontinuum's gRPC
+// card, keyed by that Kontinuum's inferred zone name — see
+// zoneNameForKontinuum), so it only requires Get, which KontinuumClient
+// and client.Client both satisfy.
+func fetchZoneIdentity(ctx context.Context, zones KontinuumClient, zoneName string) (string, time.Time, bool) {
 	var secret corev1.Secret
 
 	key := client.ObjectKey{Name: etcdproxy.AuthSecretName(zoneName), Namespace: v1alpha2.KontinuumSystemNamespace}
@@ -1248,7 +1252,29 @@ func (r *Router) handleKontinuumDetail(writer http.ResponseWriter, request *http
 		return
 	}
 
-	r.render(writer, request, pageKontinuum, kontinuumDetailData(item, secretDataYAML != "", r.version, r.authEnabled))
+	thumbprint, issuedAt, hasIdentity := "", time.Time{}, false
+	if zoneName, ok := zoneNameForKontinuum(item); ok {
+		thumbprint, issuedAt, hasIdentity = fetchZoneIdentity(request.Context(), kontinuums, zoneName)
+	}
+
+	r.render(writer, request, pageKontinuum,
+		kontinuumDetailData(item, secretDataYAML != "", r.version, r.authEnabled, thumbprint, issuedAt, hasIdentity))
+}
+
+// zoneNameForKontinuum reports the hub-side Zone object name a Worker
+// Kontinuum corresponds to, so handleKontinuumDetail can look up that
+// zone's own etcd gRPC proxy identity the same way handleZoneDetail does
+// (see fetchZoneIdentity) — deterministic from item's own Region/Zone
+// (see addObjectName's identical "<region>-<zone>" convention), no list/
+// scan needed the way the reverse lookup (zonedomain.FindJoinedKontinuum)
+// requires. ok is false for the ControlPlane (hub) Kontinuum, whose
+// Region/Zone are both empty and which has no corresponding Zone at all.
+func zoneNameForKontinuum(item v1alpha2.Kontinuum) (string, bool) {
+	if item.Spec.Region == "" || item.Spec.Zone == "" {
+		return "", false
+	}
+
+	return item.Spec.Region + "-" + item.Spec.Zone, true
 }
 
 // handleKontinuumSecretDownload is GET /app/kontinuums/{name}/secret's
@@ -1312,12 +1338,17 @@ func (r *Router) handleKontinuumSecretDownload(writer http.ResponseWriter, reque
 // secretDataReady reports whether item's config Secret has data to reveal
 // (see fetchSecretDataYAML), without carrying the data itself: that's
 // fetched separately, on demand, by handleKontinuumSecretDownload.
+// identityThumbprint/identityIssuedAt/hasIdentity are item's own zone
+// identity, if any (see zoneNameForKontinuum/fetchZoneIdentity) — hasIdentity
+// is false for the ControlPlane (hub) Kontinuum, which has no zone identity
+// of its own, so the gRPC card's thumbprint row is omitted for it.
 func kontinuumDetailData(
 	item v1alpha2.Kontinuum, secretDataReady bool, version string, authEnabled bool,
+	identityThumbprint string, identityIssuedAt time.Time, hasIdentity bool,
 ) map[string]any {
 	cfg := item.Status.Config
 
-	return map[string]any{
+	data := map[string]any{
 		dataKeyTitle:                item.Name,
 		dataKeyActiveMenu:           pageRegistry,
 		dataKeyVersion:              version,
@@ -1348,6 +1379,14 @@ func kontinuumDetailData(
 		"OIDCRedirectURL":           cfg.OIDC.RedirectURL,
 		"OIDCAdminGroups":           cfg.OIDC.AdminGroups,
 	}
+
+	data["HasIdentity"] = hasIdentity
+	if hasIdentity {
+		data["GRPCThumbprint"] = identityThumbprint
+		data["GRPCIdentityIssuedAge"] = formatAge(identityIssuedAt)
+	}
+
+	return data
 }
 
 // fetchSecretDataYAML fetches the Secret backing ref (the Kontinuum detail

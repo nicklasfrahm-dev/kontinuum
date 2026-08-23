@@ -121,6 +121,16 @@
                     {{end}}
                 </dd>
             </div>
+            {{if .HasIdentity}}
+            <div class="px-6 py-3 flex items-center justify-between gap-4">
+                <dt class="text-sm text-neutral-500">Thumbprint</dt>
+                <dd class="text-xs font-mono font-medium text-white break-all text-right">{{.GRPCThumbprint}}</dd>
+            </div>
+            <div class="px-6 py-3 flex items-center justify-between gap-4">
+                <dt class="text-sm text-neutral-500">Issued</dt>
+                <dd class="text-sm font-medium text-white">{{.GRPCIdentityIssuedAge}}</dd>
+            </div>
+            {{end}}
         </dl>
     </div>
 
