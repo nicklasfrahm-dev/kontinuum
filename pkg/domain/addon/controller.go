@@ -125,7 +125,7 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		RetryInterval:  c.Config.RetryInterval,
 		ResyncInterval: c.Config.ResyncInterval,
 		Locker: zonelease.NewLocker(
-			mgr.GetClient(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
+			mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
 		Logger: c.Config.Logger,
 	}
 

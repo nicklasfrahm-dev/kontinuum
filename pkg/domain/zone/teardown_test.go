@@ -94,7 +94,7 @@ func TestReconcileTeardownDeletesDownstreamAndTalosCluster(t *testing.T) {
 		ImageRepo:               testImageRepo,
 		RetryInterval:           testRetryInterval,
 		TeardownTimeout:         testTeardownTimeout,
-		Locker:                  zonelease.NewLocker(hubClient, "test-hub", "", 0),
+		Locker:                  zonelease.NewLocker(hubClient, hubClient, "test-hub", "", 0),
 		Logger:                  slog.Default(),
 	}
 
@@ -156,7 +156,7 @@ func TestReconcileTeardownSkipsWhenNeverBootstrapped(t *testing.T) {
 		DownstreamClientBuilder: fakeDownstreamClientBuilder{},
 		RetryInterval:           testRetryInterval,
 		TeardownTimeout:         testTeardownTimeout,
-		Locker:                  zonelease.NewLocker(hubClient, "test-hub", "", 0),
+		Locker:                  zonelease.NewLocker(hubClient, hubClient, "test-hub", "", 0),
 		Logger:                  slog.Default(),
 	}
 
@@ -186,7 +186,7 @@ func TestReconcileTeardownRemovesFinalizerWhenTalosClusterAlreadyGone(t *testing
 		DownstreamClientBuilder: fakeDownstreamClientBuilder{},
 		RetryInterval:           testRetryInterval,
 		TeardownTimeout:         testTeardownTimeout,
-		Locker:                  zonelease.NewLocker(hubClient, "test-hub", "", 0),
+		Locker:                  zonelease.NewLocker(hubClient, hubClient, "test-hub", "", 0),
 		Logger:                  slog.Default(),
 	}
 
@@ -219,7 +219,7 @@ func TestReconcileTeardownRetriesWhenDownstreamUnreachable(t *testing.T) {
 		DownstreamClientBuilder: fakeDownstreamClientBuilder{err: assert.AnError},
 		RetryInterval:           testRetryInterval,
 		TeardownTimeout:         testTeardownTimeout,
-		Locker:                  zonelease.NewLocker(hubClient, "test-hub", "", 0),
+		Locker:                  zonelease.NewLocker(hubClient, hubClient, "test-hub", "", 0),
 		Logger:                  slog.Default(),
 	}
 
@@ -255,7 +255,7 @@ func TestReconcileTeardownGivesUpAfterTimeout(t *testing.T) {
 		DownstreamClientBuilder: fakeDownstreamClientBuilder{err: assert.AnError},
 		RetryInterval:           testRetryInterval,
 		TeardownTimeout:         time.Nanosecond,
-		Locker:                  zonelease.NewLocker(hubClient, "test-hub", "", 0),
+		Locker:                  zonelease.NewLocker(hubClient, hubClient, "test-hub", "", 0),
 		Logger:                  slog.Default(),
 	}
 

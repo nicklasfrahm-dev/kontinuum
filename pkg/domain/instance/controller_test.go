@@ -151,7 +151,7 @@ func newReconciler(fakeClient client.Client, discoverer instance.Discoverer) *in
 		DialTimeout:     time.Second,
 		RetryInterval:   testRetryInterval,
 		RecheckInterval: testRecheckInterval,
-		Locker:          zonelease.NewLocker(fakeClient, "test-hub", "", 0),
+		Locker:          zonelease.NewLocker(fakeClient, fakeClient, "test-hub", "", 0),
 		Logger:          slog.Default(),
 	}
 }

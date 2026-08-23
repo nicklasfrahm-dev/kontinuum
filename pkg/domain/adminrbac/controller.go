@@ -104,7 +104,7 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		AdminGroups: c.Config.AdminGroups,
 		Interval:    c.Config.Interval,
 		Locker: zonelease.NewLocker(
-			mgr.GetClient(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
+			mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
 		Logger: c.Config.Logger,
 	}
 

@@ -183,7 +183,7 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		HealthCheckInterval: c.Config.HealthCheckInterval,
 		TeardownTimeout:     c.Config.TeardownTimeout,
 		Locker: zonelease.NewLocker(
-			mgr.GetClient(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
+			mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
 		Logger: c.Config.Logger,
 	}
 

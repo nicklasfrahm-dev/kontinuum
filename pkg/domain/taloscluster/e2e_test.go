@@ -320,7 +320,7 @@ func setupE2ECluster(
 		Bootstrapper:       taloscluster.NewTalosBootstrapper(logger),
 		HealthCheckTimeout: e2eHealthCheckTimeout,
 		RetryInterval:      e2eRetryInterval,
-		Locker:             zonelease.NewLocker(fakeClient, "test-hub", "", 0),
+		Locker:             zonelease.NewLocker(fakeClient, fakeClient, "test-hub", "", 0),
 		Logger:             logger,
 	}
 
@@ -330,7 +330,7 @@ func setupE2ECluster(
 		PodProber:     addon.NewPodProber(),
 		CRDChecker:    addon.NewCRDChecker(),
 		RetryInterval: e2eRetryInterval,
-		Locker:        zonelease.NewLocker(fakeClient, "test-hub", "", 0),
+		Locker:        zonelease.NewLocker(fakeClient, fakeClient, "test-hub", "", 0),
 		Logger:        logger,
 	}
 

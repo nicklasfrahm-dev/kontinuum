@@ -90,6 +90,16 @@ type Locker struct {
 	// Client talks to this process's own apiserver — always mgr.GetClient()
 	// in production, a fake client in tests.
 	Client client.Client
+	// Reader bypasses Client's watch-backed cache for TryAcquire's own Get
+	// — always mgr.GetAPIReader() in production, the same fake client as
+	// Client in tests (client.Client already satisfies client.Reader). A
+	// Get served from a stalled watch's stale cache is exactly wrong here:
+	// TryAcquire would judge a Lease's holder/expiry from data that's
+	// already out of date, and every Update that follows (renew, takeover)
+	// carries that same stale resourceVersion as its optimistic-concurrency
+	// precondition — see registry.Heartbeat.Reader's own doc for the
+	// identical failure mode this avoids.
+	Reader client.Reader
 	// HolderIdentity names this process as a Lease's spec.holderIdentity —
 	// shared with registry.Heartbeat.Name (see pkg/cli/serve.go) so a
 	// process's lease identity and registry identity match.
@@ -106,14 +116,18 @@ type Locker struct {
 	LeaseDuration time.Duration
 }
 
-// NewLocker builds a Locker, defaulting LeaseDuration when zero.
-func NewLocker(apiClient client.Client, holderIdentity, selfZoneKey string, leaseDuration time.Duration) *Locker {
+// NewLocker builds a Locker, defaulting LeaseDuration when zero. apiReader
+// is typically mgr.GetAPIReader() — see Locker.Reader's own doc.
+func NewLocker(
+	apiClient client.Client, apiReader client.Reader, holderIdentity, selfZoneKey string, leaseDuration time.Duration,
+) *Locker {
 	if leaseDuration <= 0 {
 		leaseDuration = defaultLeaseDuration
 	}
 
 	return &Locker{
 		Client:         apiClient,
+		Reader:         apiReader,
 		HolderIdentity: holderIdentity,
 		SelfZoneKey:    selfZoneKey,
 		LeaseDuration:  leaseDuration,
@@ -135,7 +149,7 @@ func (l *Locker) TryAcquire(ctx context.Context, zoneKey string) (bool, error) {
 
 	var lease coordinationv1.Lease
 
-	err := l.Client.Get(ctx, client.ObjectKey{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace}, &lease)
+	err := l.Reader.Get(ctx, client.ObjectKey{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace}, &lease)
 	if apierrors.IsNotFound(err) {
 		return l.create(ctx, name)
 	}

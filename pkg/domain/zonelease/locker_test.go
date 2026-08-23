@@ -49,7 +49,7 @@ func TestTryAcquire_FreeZoneKeyIsAcquired(t *testing.T) {
 	t.Parallel()
 
 	fakeClient := newFakeClient(t)
-	locker := zonelease.NewLocker(fakeClient, "hub-1", "", testLeaseDuration)
+	locker := zonelease.NewLocker(fakeClient, fakeClient, "hub-1", "", testLeaseDuration)
 
 	acquired, err := locker.TryAcquire(context.Background(), "eu-hel01")
 	require.NoError(t, err)
@@ -67,7 +67,7 @@ func TestTryAcquire_FreeGlobalKeyIsAcquired(t *testing.T) {
 	t.Parallel()
 
 	fakeClient := newFakeClient(t)
-	locker := zonelease.NewLocker(fakeClient, "hub-1", "", testLeaseDuration)
+	locker := zonelease.NewLocker(fakeClient, fakeClient, "hub-1", "", testLeaseDuration)
 
 	acquired, err := locker.TryAcquire(context.Background(), zonelease.GlobalKey)
 	require.NoError(t, err)
@@ -89,7 +89,7 @@ func TestTryAcquire_SelfHeldLeaseIsRenewed(t *testing.T) {
 	}
 
 	fakeClient := newFakeClient(t, existing)
-	locker := zonelease.NewLocker(fakeClient, "hub-1", "", testLeaseDuration)
+	locker := zonelease.NewLocker(fakeClient, fakeClient, "hub-1", "", testLeaseDuration)
 
 	acquired, err := locker.TryAcquire(context.Background(), "eu-hel01")
 	require.NoError(t, err)
@@ -117,7 +117,7 @@ func TestTryAcquire_LiveOtherHolderIsRefused(t *testing.T) {
 	}
 
 	fakeClient := newFakeClient(t, existing)
-	locker := zonelease.NewLocker(fakeClient, "hub-1", "", testLeaseDuration)
+	locker := zonelease.NewLocker(fakeClient, fakeClient, "hub-1", "", testLeaseDuration)
 
 	acquired, err := locker.TryAcquire(context.Background(), "eu-hel01")
 	require.NoError(t, err)
@@ -139,7 +139,7 @@ func TestTryAcquire_ExpiredOtherHolderIsTakenOver(t *testing.T) {
 	}
 
 	fakeClient := newFakeClient(t, existing)
-	locker := zonelease.NewLocker(fakeClient, "hub-1", "", testLeaseDuration)
+	locker := zonelease.NewLocker(fakeClient, fakeClient, "hub-1", "", testLeaseDuration)
 
 	acquired, err := locker.TryAcquire(context.Background(), "eu-hel01")
 	require.NoError(t, err)
@@ -163,7 +163,7 @@ func TestTryAcquire_ExpiredOtherHolderIsTakenOver(t *testing.T) {
 func TestTryAcquire_OwnZoneKeyIsRefusedWithoutAPICall(t *testing.T) {
 	t.Parallel()
 
-	locker := zonelease.NewLocker(nil, "zone-eu-hel01", "eu-hel01", testLeaseDuration)
+	locker := zonelease.NewLocker(nil, nil, "zone-eu-hel01", "eu-hel01", testLeaseDuration)
 
 	acquired, err := locker.TryAcquire(context.Background(), "eu-hel01")
 	require.NoError(t, err)
@@ -177,7 +177,7 @@ func TestTryAcquire_OwnZoneKeyIsRefusedWithoutAPICall(t *testing.T) {
 func TestTryAcquire_GlobalKeyFromWorkerIsRefusedWithoutAPICall(t *testing.T) {
 	t.Parallel()
 
-	locker := zonelease.NewLocker(nil, "zone-eu-hel01", "eu-hel01", testLeaseDuration)
+	locker := zonelease.NewLocker(nil, nil, "zone-eu-hel01", "eu-hel01", testLeaseDuration)
 
 	acquired, err := locker.TryAcquire(context.Background(), zonelease.GlobalKey)
 	require.NoError(t, err)
@@ -193,7 +193,7 @@ func TestTryAcquire_WorkerMayAcquireADifferentZonesKey(t *testing.T) {
 	t.Parallel()
 
 	fakeClient := newFakeClient(t)
-	locker := zonelease.NewLocker(fakeClient, "zone-eu-hel01", "eu-hel01", testLeaseDuration)
+	locker := zonelease.NewLocker(fakeClient, fakeClient, "zone-eu-hel01", "eu-hel01", testLeaseDuration)
 
 	acquired, err := locker.TryAcquire(context.Background(), "eu-hel02")
 	require.NoError(t, err)
@@ -204,7 +204,7 @@ func TestTryAcquire_HubIsNeverRefused(t *testing.T) {
 	t.Parallel()
 
 	fakeClient := newFakeClient(t)
-	locker := zonelease.NewLocker(fakeClient, "hub-1", "", testLeaseDuration)
+	locker := zonelease.NewLocker(fakeClient, fakeClient, "hub-1", "", testLeaseDuration)
 
 	acquired, err := locker.TryAcquire(context.Background(), "eu-hel01")
 	require.NoError(t, err)

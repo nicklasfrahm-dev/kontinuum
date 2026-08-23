@@ -39,7 +39,7 @@ func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
 }
 
 func newLocker(fakeClient client.Client) *zonelease.Locker {
-	return zonelease.NewLocker(fakeClient, "test-hub", "", 0)
+	return zonelease.NewLocker(fakeClient, fakeClient, "test-hub", "", 0)
 }
 
 // startRunnable starts runnable in a background goroutine and returns a

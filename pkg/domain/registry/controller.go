@@ -115,12 +115,13 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		Client:         mgr.GetClient(),
 		StaleThreshold: c.Config.StaleThreshold,
 		Locker: zonelease.NewLocker(
-			mgr.GetClient(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
+			mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
 		Logger: c.Config.Logger,
 	}
 
 	heartbeat := &Heartbeat{
 		Client:     mgr.GetClient(),
+		Reader:     mgr.GetAPIReader(),
 		Name:       InstanceName(os.Hostname()),
 		Role:       c.Config.Role,
 		Spec:       v1alpha2.KontinuumSpec{Region: c.Config.Region, Zone: c.Config.Zone},
