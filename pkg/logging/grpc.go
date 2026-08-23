@@ -81,6 +81,38 @@ func (g *grpcLogger) Fatalf(format string, args ...any) {
 // this process's log volume.
 func (g *grpcLogger) V(int) bool { return false }
 
+// InfoDepth, WarningDepth, ErrorDepth, and FatalDepth implement
+// grpclog.DepthLoggerV2 — grpc-go's own grpclog.Component (what
+// internal/transport's package-level "logger" var, and so every
+// GOAWAY/connection-lifecycle line it logs, actually is) calls these
+// directly rather than the plain Info/Warning/Error/Fatal methods above.
+// Without this, grpclog.SetLoggerV2's own type assertion
+// (l.(internal.DepthLoggerV2)) fails, leaving grpc-go's internal
+// DepthLoggerV2Impl nil — grpclog.ErrorDepth then happens to fall back to
+// calling Errorln on whatever LoggerV2 is installed, which still reaches
+// logError below today, but only because grpc-go's own fallback behavior
+// works out that way, not because this type actually promises it. depth
+// itself is ignored: unlike glog's own DepthLoggerV2 implementation (see
+// grpclog/glogger), slog has no notion of skipping caller frames to
+// attribute a log line to its true origin instead of this wrapper, so
+// there's nothing meaningful to do with it here.
+func (g *grpcLogger) InfoDepth(_ int, args ...any) {
+	g.logger.Info(trimmed(fmt.Sprintln(args...)))
+}
+
+func (g *grpcLogger) WarningDepth(_ int, args ...any) {
+	g.logger.Warn(trimmed(fmt.Sprintln(args...)))
+}
+
+func (g *grpcLogger) ErrorDepth(_ int, args ...any) {
+	g.logError(trimmed(fmt.Sprintln(args...)))
+}
+
+func (g *grpcLogger) FatalDepth(_ int, args ...any) {
+	g.logger.Error(trimmed(fmt.Sprintln(args...)))
+	os.Exit(1)
+}
+
 // logError routes grpc-go's Error-level lines to Warn when they match a
 // known self-recovering condition — see grpcTooManyPingsSubstr — and to
 // Error otherwise.

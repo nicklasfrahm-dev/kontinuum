@@ -169,6 +169,51 @@ func TestNewGRPCLoggerCallShapes(t *testing.T) {
 	}
 }
 
+// TestNewGRPCLoggerImplementsDepthLoggerV2 covers the type assertion
+// grpclog.SetLoggerV2 performs internally (l.(internal.DepthLoggerV2)) to
+// decide whether grpc-go's internal DepthLoggerV2Impl gets populated —
+// grpclog.Component's own ErrorDepth/WarningDepth/InfoDepth (what
+// internal/transport's package-level "logger" var actually is, and so what
+// every GOAWAY notice, including the too_many_pings one, actually logs
+// through) calls straight into these Depth methods, not Errorf/Warningf.
+// Asserting the interface here, rather than only exercising the plain
+// LoggerV2 methods the rest of this file covers, is what actually pins this
+// down as deliberate instead of relying on grpc-go's own fallback-when-
+// absent behavior continuing to work.
+func TestNewGRPCLoggerImplementsDepthLoggerV2(t *testing.T) {
+	t.Parallel()
+
+	grpcLogger := logging.NewGRPCLogger(logging.New(slog.LevelDebug, logging.FormatJSON, &bytes.Buffer{}))
+	_, ok := grpcLogger.(grpclog.DepthLoggerV2)
+	assert.True(t, ok, "grpcLogger must implement grpclog.DepthLoggerV2")
+}
+
+// TestNewGRPCLoggerErrorDepthDowngradesTooManyPings covers ErrorDepth
+// specifically — the method grpclog.Component.ErrorDepth actually calls for
+// the too_many_pings GOAWAY notice once DepthLoggerV2Impl is populated (see
+// TestNewGRPCLoggerImplementsDepthLoggerV2) — proving the downgrade holds
+// on this path too, not just the plain Errorln one
+// TestNewGRPCLoggerErrorlnDowngradesTooManyPings already covers.
+func TestNewGRPCLoggerErrorDepthDowngradesTooManyPings(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+
+	grpcLogger := logging.NewGRPCLogger(logging.New(slog.LevelDebug, logging.FormatJSON, &buf))
+	depthLogger, ok := grpcLogger.(grpclog.DepthLoggerV2)
+	require.True(t, ok, "grpcLogger must implement grpclog.DepthLoggerV2")
+
+	// grpclog.Component's own ErrorDepth passes the "[component]" prefix as
+	// a separate arg (no trailing space — unlike grpcTransportPrefix above,
+	// which mirrors PrefixLogger's string-concatenation shape instead), and
+	// Sprintln joins args with a space of its own.
+	depthLogger.ErrorDepth(1, "[transport]", grpcTooManyPingsMsg)
+
+	entry := decodeLastEntry(t, &buf)
+	assert.Equal(t, "WARN", entry["level"])
+	assert.Contains(t, entry["msg"], "too_many_pings")
+}
+
 func TestNewGRPCLoggerVDisablesVerboseTracing(t *testing.T) {
 	t.Parallel()
 
