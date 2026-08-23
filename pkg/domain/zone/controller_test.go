@@ -867,7 +867,7 @@ func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) 
 
 	var issuer certmanagerv1.ClusterIssuer
 	require.NoError(t, downstream.Get(t.Context(), client.ObjectKey{Name: testDownstreamResourceName}, &issuer))
-	assert.Equal(t, testACMEEmail, issuer.Spec.ACME.Email)
+	assert.Equal(t, testHubConfig().ACME.Email, issuer.Spec.ACME.Email)
 
 	var gateway gatewayv1.Gateway
 	require.NoError(t, downstream.Get(t.Context(),
@@ -1014,7 +1014,7 @@ func TestReconcileFlipsReadyOnceKontinuumJoinsRegistry(t *testing.T) {
 func TestReconcileFlipsRegistryJoinedFalseOnceKontinuumGoesStale(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuum("hub")
+	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderRoute53)
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
 		kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)
