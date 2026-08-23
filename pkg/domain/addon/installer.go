@@ -116,6 +116,22 @@ func loadChart(actionConfig *action.Configuration, chartName, repoURL, version s
 	return chrt, nil
 }
 
+// releaseMaxHistory bounds how many past revisions Helm keeps per release —
+// deliberately below the Helm CLI's own --history-max default of 10, for
+// extra headroom. Storage.History (used both by action.NewHistory, called
+// on every installViaHelm to check whether a release already exists, and
+// internally by Helm itself before every write) always lists and fully
+// decodes every revision Secret it finds with no cap of its own — see
+// helm.sh/helm/v3/pkg/storage.Storage. Leaving MaxHistory unset (as
+// Install/Upgrade both default to) never prunes anything, so a release
+// reconciled repeatedly over a long enough time accumulates one more
+// multi-hundred-KB revision Secret per attempt forever; History.Run then
+// has to decode all of them on every single reconcile, without bound.
+// That's what actually OOM-killed this process — not any storage/gRPC-layer
+// change — once one release's history grew large enough that a single
+// existence check alone took hundreds of MB to decode.
+const releaseMaxHistory = 5
+
 // installRelease runs a fresh `helm install`, creating namespace if it
 // doesn't already exist. Deliberately non-blocking (no Wait/WaitForJobs):
 // this returns as soon as the manifests are applied, without waiting for
@@ -146,6 +162,7 @@ func upgradeRelease(
 ) error {
 	upgradeAction := action.NewUpgrade(actionConfig)
 	upgradeAction.Namespace = namespace
+	upgradeAction.MaxHistory = releaseMaxHistory
 
 	_, err := upgradeAction.RunWithContext(ctx, releaseName, chrt, values)
 	if err != nil {
