@@ -50,6 +50,14 @@ func StaticKey(key ed25519.PrivateKey) KeySource {
 type IdentityKeySource struct {
 	mu  sync.RWMutex
 	key ed25519.PrivateKey
+
+	// reader and namespace are only used by Refresh — the same client and
+	// namespace WatchIdentity's own background watch reads from, kept here
+	// so Refresh can re-fetch on demand without needing either passed in
+	// again by a caller (see Relay's own authRecovery) that only has the
+	// KeySource itself in hand.
+	reader    client.Reader
+	namespace string
 }
 
 // Current implements KeySource.
@@ -58,6 +66,33 @@ func (s *IdentityKeySource) Current() ed25519.PrivateKey {
 	defer s.mu.RUnlock()
 
 	return s.key
+}
+
+// Refresher is implemented by a KeySource that can be told to bypass
+// whatever state its own normal update path is currently in and re-fetch
+// its key immediately — see IdentityKeySource.Refresh. Checked for via a
+// type assertion (e.g. by Relay's own authRecovery) since StaticKey, with
+// no live source behind it at all, has nothing to refresh from.
+type Refresher interface {
+	Refresh(ctx context.Context) error
+}
+
+// Refresh implements Refresher: synchronously re-fetches namespace's own
+// IdentitySecretName Secret via s's own reader, the same one WatchIdentity's
+// background watch reads from, bypassing that watch entirely. For a caller
+// with direct evidence that Current may be stale despite the watch
+// reporting no update — e.g. its ResultChan has silently stopped delivering
+// events without closing, the one failure mode run's own reconnect-on-close
+// logic can't detect on its own.
+func (s *IdentityKeySource) Refresh(ctx context.Context) error {
+	key, err := getIdentityKey(ctx, s.reader, s.namespace)
+	if err != nil {
+		return err
+	}
+
+	s.set(key)
+
+	return nil
 }
 
 func (s *IdentityKeySource) set(key ed25519.PrivateKey) {
@@ -123,7 +158,7 @@ const identityWatchRetryInterval = 5 * time.Second
 func WatchIdentity(
 	ctx context.Context, watchClient client.WithWatch, namespace string, logger *slog.Logger,
 ) (*IdentityKeySource, error) {
-	source := &IdentityKeySource{}
+	source := &IdentityKeySource{reader: watchClient, namespace: namespace}
 
 	watcher, err := startIdentityWatch(ctx, watchClient, namespace)
 	if err != nil {

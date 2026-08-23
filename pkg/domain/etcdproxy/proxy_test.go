@@ -83,12 +83,13 @@ func newProxyTestHubClient(t *testing.T, objects ...client.Object) client.Client
 	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 }
 
-// admittedPublicSecret builds a hub-side identity Secret and simulates the
-// real apiserver's own StringData->Data admission conversion, which the
-// fake client doesn't replicate — see TestBuildAndParsePublicSecretRoundTrip's
-// identical note.
-func admittedPublicSecret(zone string, pair etcdproxy.IdentityPair) *corev1.Secret {
-	secret := etcdproxy.BuildPublicSecret(zone, "kontinuum-system", pair)
+// admittedPublicSecret builds a hub-side identity Secret for
+// verifierTestZone — every caller's own zone, so taken as a given rather
+// than a parameter — and simulates the real apiserver's own
+// StringData->Data admission conversion, which the fake client doesn't
+// replicate — see TestBuildAndParsePublicSecretRoundTrip's identical note.
+func admittedPublicSecret(pair etcdproxy.IdentityPair) *corev1.Secret {
+	secret := etcdproxy.BuildPublicSecret(verifierTestZone, "kontinuum-system", pair)
 	secret.Data = map[string][]byte{}
 
 	for k, v := range secret.StringData {
@@ -135,7 +136,7 @@ func TestRelayForwardsAuthenticatedCallsToHub(t *testing.T) {
 	now := time.Now()
 	current := generateTestIdentity(t)
 	previous := generateTestIdentity(t)
-	secret := admittedPublicSecret("eu-eu-1a", etcdproxy.IdentityPair{
+	secret := admittedPublicSecret(etcdproxy.IdentityPair{
 		Current:  etcdproxy.Identity{CertPEM: current.certPEM, IssuedAt: now},
 		Previous: etcdproxy.Identity{CertPEM: previous.certPEM, IssuedAt: now},
 	})
@@ -184,7 +185,7 @@ func TestRelayAcceptsPreviousIdentityDuringOverlap(t *testing.T) {
 	now := time.Now()
 	newCurrent := generateTestIdentity(t)
 	stillGoodPrevious := generateTestIdentity(t)
-	secret := admittedPublicSecret("eu-eu-1a", etcdproxy.IdentityPair{
+	secret := admittedPublicSecret(etcdproxy.IdentityPair{
 		Current: etcdproxy.Identity{CertPEM: newCurrent.certPEM, IssuedAt: now},
 		Previous: etcdproxy.Identity{
 			CertPEM: stillGoodPrevious.certPEM, IssuedAt: now.Add(-etcdproxy.IdentityRotationInterval),
@@ -227,7 +228,7 @@ func TestHubRejectsWrongBearerKey(t *testing.T) {
 	now := time.Now()
 	current := generateTestIdentity(t)
 	previous := generateTestIdentity(t)
-	secret := admittedPublicSecret("eu-eu-1a", etcdproxy.IdentityPair{
+	secret := admittedPublicSecret(etcdproxy.IdentityPair{
 		Current:  etcdproxy.Identity{CertPEM: current.certPEM, IssuedAt: now},
 		Previous: etcdproxy.Identity{CertPEM: previous.certPEM, IssuedAt: now},
 	})
