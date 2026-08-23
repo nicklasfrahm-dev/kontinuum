@@ -244,26 +244,63 @@ func TestReconcileTeardownDeletesDNSEndpoint(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(err), "DNSEndpoint must be deleted on teardown")
 }
 
-// externalDNSAddonKey and cloudflareCredentialSecretKey are
-// reconcileExternalDNSAddon's own fixed object names/namespaces — see
-// dns_cloudflare.go's own externalDNSCredentialSecretName/externalDNSReleaseName
-// doc for why these literals are duplicated here rather than exported just
-// for tests.
+// externalDNSAddonKey and externalDNSCredentialSecretKey are
+// reconcileExternalDNSAddon's own object names/namespaces — see
+// dns_credentials.go's own externalDNSCredentialSecretName/
+// externalDNSReleaseName doc for why these are recomputed here rather than
+// exported just for tests.
 func externalDNSAddonKey() client.ObjectKey {
 	return client.ObjectKey{Name: testZoneName + "-external-dns", Namespace: v1alpha2.KontinuumSystemNamespace}
 }
 
-func cloudflareCredentialSecretKey() client.ObjectKey {
-	return client.ObjectKey{Name: "external-dns-cloudflare", Namespace: testDownstreamNamespace}
+func externalDNSCredentialSecretKey() client.ObjectKey {
+	return client.ObjectKey{Name: testZoneName + "-external-dns-credentials", Namespace: testDownstreamNamespace}
 }
 
-// TestReconcileWiresCloudflareExternalDNSAddon covers point 1 of the
-// PR #73 review: KONTINUUM_SERVER_DNS_PROVIDER=cloudflare plus a credential
-// gets a working external-dns install with no Addon of the operator's own
-// to write — a Secret holding the raw credential on the zone's own
-// downstream cluster, and an Addon CR on the hub (owned by the zone's own
-// TalosCluster) whose values reference that Secret.
-func TestReconcileWiresCloudflareExternalDNSAddon(t *testing.T) {
+// addonEnvSecretKeyRef extracts the secretKeyRef one env var name's own
+// valueFrom resolves to, out of an Addon's raw spec.values.env — a small
+// helper so the tests below can assert against values without hand-rolling
+// the same JSON-unmarshal-and-walk more than once.
+func addonEnvSecretKeyRef(t *testing.T, addon v1alpha2.Addon, envName string) (string, string) {
+	t.Helper()
+
+	var values struct {
+		Provider struct {
+			Name string `json:"name"`
+		} `json:"provider"`
+		Env []struct {
+			Name      string `json:"name"`
+			ValueFrom struct {
+				SecretKeyRef struct {
+					Name string `json:"name"`
+					Key  string `json:"key"`
+				} `json:"secretKeyRef"`
+			} `json:"valueFrom"`
+		} `json:"env"`
+	}
+
+	require.NoError(t, json.Unmarshal(addon.Spec.Values.Raw, &values))
+
+	for _, env := range values.Env {
+		if env.Name == envName {
+			return env.ValueFrom.SecretKeyRef.Name, env.ValueFrom.SecretKeyRef.Key
+		}
+	}
+
+	t.Fatalf("addon %q values has no env entry named %q", addon.Name, envName)
+
+	return "", ""
+}
+
+// TestReconcileWiresExternalDNSAddonFromDNSCredential covers point 1 of the
+// PR #73 review: a DNS provider/credential configured on the hub gets a
+// working external-dns install with no Addon of the operator's own to
+// write. testDNSCredential (see controller_test.go) is flat YAML with one
+// key, CF_API_TOKEN — Cloudflare's own expected env var name — proving the
+// full chain: that key lands in a Secret on the zone's own downstream
+// cluster, and the seeded Addon on the hub (owned by the zone's own
+// TalosCluster) wires that same key as an env var via secretKeyRef.
+func TestReconcileWiresExternalDNSAddonFromDNSCredential(t *testing.T) {
 	t.Parallel()
 
 	kontinuum, kontinuumSecret := registeredKontinuumWithDNS("cloudflare")
@@ -276,8 +313,8 @@ func TestReconcileWiresCloudflareExternalDNSAddon(t *testing.T) {
 	require.NoError(t, err)
 
 	var secret corev1.Secret
-	require.NoError(t, downstream.Get(t.Context(), cloudflareCredentialSecretKey(), &secret))
-	assert.Equal(t, testDNSCredential, string(secret.Data["apiToken"]))
+	require.NoError(t, downstream.Get(t.Context(), externalDNSCredentialSecretKey(), &secret))
+	assert.Equal(t, testDNSCredentialValue, string(secret.Data["CF_API_TOKEN"]))
 
 	var addon v1alpha2.Addon
 	require.NoError(t, hubClient.Get(t.Context(), externalDNSAddonKey(), &addon))
@@ -291,22 +328,72 @@ func TestReconcileWiresCloudflareExternalDNSAddon(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "cloudflare", provider["name"])
 
+	secretName, key := addonEnvSecretKeyRef(t, addon, "CF_API_TOKEN")
+	assert.Equal(t, externalDNSCredentialSecretKey().Name, secretName)
+	assert.Equal(t, "CF_API_TOKEN", key)
+
 	require.Len(t, addon.OwnerReferences, 1)
 	assert.Equal(t, cluster.Name, addon.OwnerReferences[0].Name)
 	assert.Equal(t, "TalosCluster", addon.OwnerReferences[0].Kind)
 }
 
-// TestReconcileSkipsExternalDNSAddonForNonCloudflareProvider covers a DNS
-// provider/credential configured for some provider other than cloudflare —
-// reconcileDNS/installNetwork still proceed (DNS is "configured" per
-// findKontinuumDNSConfig), but reconcileExternalDNSAddon leaves both the
-// Addon and the credential Secret alone: only cloudflare is auto-wired
-// today, any other provider is still the operator's own responsibility
-// (see reconcileExternalDNSAddon's own doc).
-func TestReconcileSkipsExternalDNSAddonForNonCloudflareProvider(t *testing.T) {
+// TestReconcileWiresExternalDNSAddonWithMultipleCredentialKeys covers a
+// provider needing more than one credential value — Route53's own
+// AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY pair — proving
+// parseDNSCredentialKeys' flat-YAML-to-many-keys mapping isn't
+// special-cased to Cloudflare's own single key. Not every multi-value
+// provider fits this env-var-only mechanism, though — see
+// docs/workflows/zone-add.md's own Azure/GCP examples for two that need a
+// mounted credentials file instead, which this mechanism doesn't cover.
+func TestReconcileWiresExternalDNSAddonWithMultipleCredentialKeys(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderRoute53)
+	kontinuum, kontinuumSecret := registeredKontinuum("hub")
+	kontinuum.Status.Config.Server.DNS.Provider = "aws"
+	kontinuumSecret.Data["KONTINUUM_SERVER_DNS_CREDENTIAL"] = []byte(
+		"AWS_ACCESS_KEY_ID: AKIAEXAMPLE\nAWS_SECRET_ACCESS_KEY: example-secret-key\n")
+	cluster := readyTalosCluster()
+	hubClient := newHubFakeClient(t, testZoneObject(), cluster, kubeconfigSecret(), kontinuum, kontinuumSecret)
+	downstream := newDownstreamFakeClient(t)
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: downstream})
+
+	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	var secret corev1.Secret
+	require.NoError(t, downstream.Get(t.Context(), externalDNSCredentialSecretKey(), &secret))
+	assert.Equal(t, "AKIAEXAMPLE", string(secret.Data["AWS_ACCESS_KEY_ID"]))
+	assert.Equal(t, "example-secret-key", string(secret.Data["AWS_SECRET_ACCESS_KEY"]))
+
+	var addon v1alpha2.Addon
+	require.NoError(t, hubClient.Get(t.Context(), externalDNSAddonKey(), &addon))
+
+	var values map[string]any
+	require.NoError(t, json.Unmarshal(addon.Spec.Values.Raw, &values))
+	provider, ok := values["provider"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "aws", provider["name"])
+
+	for _, envName := range []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"} {
+		secretName, key := addonEnvSecretKeyRef(t, addon, envName)
+		assert.Equal(t, externalDNSCredentialSecretKey().Name, secretName)
+		assert.Equal(t, envName, key)
+	}
+}
+
+// TestReconcileInstalledWaitsForDNSConfigurationWhenCredentialNotFlatYAML
+// covers a DNS provider/credential configured, but the credential isn't
+// parseable as a flat YAML mapping (see parseDNSCredentialKeys) — a nested
+// value, or plain unstructured text left over from before this mechanism
+// existed. Surfaced as Installed=False/InstallFailed, same as any other
+// downstream API failure — not silently ignored, and not treated as
+// "DNS isn't configured" (findKontinuumDNSConfig already succeeded).
+func TestReconcileInstalledWaitsForDNSConfigurationWhenCredentialNotFlatYAML(t *testing.T) {
+	t.Parallel()
+
+	kontinuum, kontinuumSecret := registeredKontinuum("hub")
+	kontinuum.Status.Config.Server.DNS.Provider = "cloudflare"
+	kontinuumSecret.Data["KONTINUUM_SERVER_DNS_CREDENTIAL"] = []byte("CF_API_TOKEN:\n  nested: not-a-string\n")
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
 		kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)
@@ -315,29 +402,27 @@ func TestReconcileSkipsExternalDNSAddonForNonCloudflareProvider(t *testing.T) {
 	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
 
-	err = downstream.Get(t.Context(), cloudflareCredentialSecretKey(), &corev1.Secret{})
-	assert.True(t, apierrors.IsNotFound(err), "no cloudflare credential secret must be created for another provider")
+	var got v1alpha2.Zone
+	require.NoError(t, hubClient.Get(t.Context(), testZoneKey(), &got))
 
-	err = hubClient.Get(t.Context(), externalDNSAddonKey(), &v1alpha2.Addon{})
-	assert.True(t, apierrors.IsNotFound(err), "no external-dns addon must be seeded for another provider")
+	installed := meta.FindStatusCondition(got.Status.Conditions, zone.InstalledConditionType)
+	require.NotNil(t, installed)
+	assert.Equal(t, metav1.ConditionFalse, installed.Status)
+	assert.Equal(t, "InstallFailed", installed.Reason)
 
-	// installNetwork still runs — dns being "configured" (even for a
-	// provider kontinuum doesn't auto-wire) is what gates it, not
-	// specifically cloudflare.
-	err = downstream.Get(t.Context(),
-		client.ObjectKey{Name: testDownstreamResourceName, Namespace: testDownstreamNamespace}, &gatewayv1.Gateway{})
-	assert.NoError(t, err, "gateway must still be created once dns is configured, regardless of provider")
+	err = downstream.Get(t.Context(), externalDNSCredentialSecretKey(), &corev1.Secret{})
+	assert.True(t, apierrors.IsNotFound(err), "no credential secret must be created from an unparseable credential")
 }
 
-// TestReconcileTeardownDeletesCloudflareCredentialSecret covers
-// deleteExternalDNSCredentialSecret's own doc: the Cloudflare credential
-// Secret reconcileExternalDNSAddon creates must be deleted on teardown too,
-// same as every other downstream object teardownDownstream cleans up. The
+// TestReconcileTeardownDeletesExternalDNSCredentialSecret covers
+// deleteExternalDNSCredentialSecret's own doc: the credential Secret
+// reconcileExternalDNSAddon creates must be deleted on teardown too, same
+// as every other downstream object teardownDownstream cleans up. The
 // Addon CR itself isn't asserted here — it lives on the hub, owned by the
 // TalosCluster, and is garbage-collected once that's deleted (see
-// ensureExternalDNSCloudflareAddonSeed's own doc), not explicitly deleted
-// by teardownDownstream.
-func TestReconcileTeardownDeletesCloudflareCredentialSecret(t *testing.T) {
+// ensureExternalDNSAddon's own doc), not explicitly deleted by
+// teardownDownstream.
+func TestReconcileTeardownDeletesExternalDNSCredentialSecret(t *testing.T) {
 	t.Parallel()
 
 	kontinuum, kontinuumSecret := registeredKontinuumWithDNS("cloudflare")
@@ -358,8 +443,8 @@ func TestReconcileTeardownDeletesCloudflareCredentialSecret(t *testing.T) {
 	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
 
-	require.NoError(t, downstream.Get(t.Context(), cloudflareCredentialSecretKey(), &corev1.Secret{}),
-		"install pass must have created the cloudflare credential secret")
+	require.NoError(t, downstream.Get(t.Context(), externalDNSCredentialSecretKey(), &corev1.Secret{}),
+		"install pass must have created the credential secret")
 
 	var toDelete v1alpha2.Zone
 	require.NoError(t, hubClient.Get(t.Context(), testZoneKey(), &toDelete))
@@ -368,6 +453,6 @@ func TestReconcileTeardownDeletesCloudflareCredentialSecret(t *testing.T) {
 	_, err = reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
 
-	err = downstream.Get(t.Context(), cloudflareCredentialSecretKey(), &corev1.Secret{})
-	assert.True(t, apierrors.IsNotFound(err), "cloudflare credential secret must be deleted on teardown")
+	err = downstream.Get(t.Context(), externalDNSCredentialSecretKey(), &corev1.Secret{})
+	assert.True(t, apierrors.IsNotFound(err), "credential secret must be deleted on teardown")
 }
