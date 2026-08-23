@@ -57,16 +57,26 @@
                     <td class="px-6 py-2 text-sm text-neutral-400">{{.LastHeartbeat}}</td>
                     <td class="px-6 py-2 text-sm text-neutral-400">{{.Age}}</td>
                     <td class="px-6 py-2 text-right">
+                        <!--
+                            Icon-only button, so the spinner replaces the
+                            trash icon in place (via the .htmx-request class
+                            htmx adds to this element itself — see
+                            AGENTS.md's UI policy) rather than fading in
+                            beside it: appending a second icon next to the
+                            first, as the text-label buttons elsewhere do,
+                            would stop this square icon button from being
+                            square the moment it's mid-request.
+                        -->
                         <button type="button"
                                 hx-delete="/app/kontinuum.sh/namespaces/{{.Namespace}}/kontinuums/{{.Name}}"
                                 hx-target="#registry-content"
                                 hx-select="#registry-content"
                                 hx-swap="outerHTML"
-                                hx-disabled-elt="this" hx-indicator="find .htmx-indicator"
-                                class="inline-flex items-center gap-1 rounded-lg p-1.5 text-neutral-500 hover:text-red-400 hover:bg-red-500/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                                hx-disabled-elt="this"
+                                class="inline-flex items-center justify-center rounded-lg p-1.5 text-neutral-500 hover:text-red-400 hover:bg-red-500/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                                 aria-label="Delete {{.Name}}">
-                            {{template "icon-trash"}}
-                            <span class="htmx-indicator [&>svg]:h-3 [&>svg]:w-3 [&>svg]:animate-spin">{{template "icon-loader-circle"}}</span>
+                            <span class="[.htmx-request_&]:hidden">{{template "icon-trash"}}</span>
+                            <span class="hidden [.htmx-request_&]:inline-flex [&>svg]:animate-spin">{{template "icon-loader-circle"}}</span>
                         </button>
                     </td>
                 </tr>

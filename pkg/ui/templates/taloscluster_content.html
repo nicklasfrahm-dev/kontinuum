@@ -175,9 +175,10 @@
             </button>
             <button type="button"
                     hx-delete="/app/kontinuum.sh/namespaces/{{.Namespace}}/talosclusters/{{.Name}}"
-                    hx-disabled-elt="this" hx-indicator="find .htmx-indicator"
+                    hx-disabled-elt="this"
                     class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20 disabled:opacity-60 disabled:cursor-not-allowed transition-colors">
-                <span class="htmx-indicator [&>svg]:h-3.5 [&>svg]:w-3.5 [&>svg]:animate-spin">{{template "icon-loader-circle"}}</span>
+                <span class="[.htmx-request_&]:hidden [&>svg]:h-3.5 [&>svg]:w-3.5">{{template "icon-trash"}}</span>
+                <span class="hidden [.htmx-request_&]:inline-flex [&>svg]:h-3.5 [&>svg]:w-3.5 [&>svg]:animate-spin">{{template "icon-loader-circle"}}</span>
                 Delete cluster
             </button>
         </div>
