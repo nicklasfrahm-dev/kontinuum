@@ -57,15 +57,18 @@
     </label>
     <div class="flex justify-end pt-2">
         <!--
-            data-spinner/data-label are toggled by instances_content.html's
-            own htmx:beforeRequest/afterRequest listeners while the POST is
-            in flight, so submitting doesn't leave the user staring at an
-            unchanged form wondering whether the click registered.
+            hx-disabled-elt/hx-indicator (see AGENTS.md's UI policy) disable
+            this button and fade in the spinner span for the POST's own
+            round trip, so submitting doesn't leave the user staring at an
+            unchanged form wondering whether the click registered — and,
+            unlike the JS listeners this replaced, correctly re-enable the
+            button even if the request never gets a response at all (e.g.
+            the network drops).
         -->
-        <button type="submit"
+        <button type="submit" hx-disabled-elt="this" hx-indicator="find .htmx-indicator"
                 class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg bg-accent text-neutral-950 hover:bg-accent/90 disabled:opacity-60 disabled:cursor-not-allowed transition-colors">
-            <span data-spinner class="hidden [&>svg]:h-3.5 [&>svg]:w-3.5 [&>svg]:animate-spin">{{template "icon-loader-circle"}}</span>
-            <span data-label>Add instance</span>
+            <span class="htmx-indicator [&>svg]:h-3.5 [&>svg]:w-3.5 [&>svg]:animate-spin">{{template "icon-loader-circle"}}</span>
+            Add instance
         </button>
     </div>
 </form>

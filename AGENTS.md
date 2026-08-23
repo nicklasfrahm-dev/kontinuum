@@ -13,6 +13,8 @@
 ## UI
 
 - Never use `alert()`, `confirm()`, or `prompt()` (including htmx's `hx-confirm`, which shows the browser's native `confirm()`). All dialogs must be native `<dialog>` modals styled to match the rest of the app (see `pkg/ui/templates/components/zone_leave_modal.html` for the pattern).
+- Every `hx-get`/`hx-post`/`hx-put`/`hx-delete`/`hx-patch` element that fires in direct response to a user action (a form submit, a button click) must carry `hx-disabled-elt="this"` and `hx-indicator="find .htmx-indicator"` (pointing at a `.htmx-indicator` spinner icon already inside that element), instead of a hand-rolled `htmx:beforeRequest`/`afterRequest` listener toggling `disabled`/`hidden` in JS. htmx's own request lifecycle re-enables the element and hides the indicator once the request settles — including on a network error or dropped connection — which a manual listener reliably gets wrong. See `pkg/ui/templates/components/instance_add_modal.html`'s submit button for the pattern.
+- Exception: an element polling on `hx-trigger="every ..."` must NOT get `hx-indicator`/`hx-disabled-elt` — disabling or flashing a spinner over a whole page section on every background refresh tick is worse UX than the polling itself.
 
 ## Documentation
 

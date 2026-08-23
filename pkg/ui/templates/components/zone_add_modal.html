@@ -152,8 +152,17 @@
         </p>
     </div>
     <div class="flex justify-end pt-2">
-        <button type="submit"
-                class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg bg-accent text-neutral-950 hover:bg-accent/90 transition-colors">
+        <!--
+            hx-disabled-elt/hx-indicator (see AGENTS.md's UI policy) disable
+            this button and fade in the spinner span for the POST's own
+            round trip — provisioning a zone kicks off a real bootstrap flow
+            server-side, not an instant write, so this is the submit button
+            most likely to sit in flight long enough for a missing loading
+            state to read as "did my click even register?"
+        -->
+        <button type="submit" hx-disabled-elt="this" hx-indicator="find .htmx-indicator"
+                class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg bg-accent text-neutral-950 hover:bg-accent/90 disabled:opacity-60 disabled:cursor-not-allowed transition-colors">
+            <span class="htmx-indicator [&>svg]:h-3.5 [&>svg]:w-3.5 [&>svg]:animate-spin">{{template "icon-loader-circle"}}</span>
             Add zone
         </button>
     </div>

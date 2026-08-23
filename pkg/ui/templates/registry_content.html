@@ -62,9 +62,11 @@
                                 hx-target="#registry-content"
                                 hx-select="#registry-content"
                                 hx-swap="outerHTML"
-                                class="inline-flex items-center justify-center rounded-lg p-1.5 text-neutral-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                                hx-disabled-elt="this" hx-indicator="find .htmx-indicator"
+                                class="inline-flex items-center gap-1 rounded-lg p-1.5 text-neutral-500 hover:text-red-400 hover:bg-red-500/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                                 aria-label="Delete {{.Name}}">
                             {{template "icon-trash"}}
+                            <span class="htmx-indicator [&>svg]:h-3 [&>svg]:w-3 [&>svg]:animate-spin">{{template "icon-loader-circle"}}</span>
                         </button>
                     </td>
                 </tr>

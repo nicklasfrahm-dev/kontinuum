@@ -129,7 +129,9 @@
                 Cancel
             </button>
             <button type="button" id="delete-instance-modal-confirm"
-                    class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20 transition-colors">
+                    hx-disabled-elt="this" hx-indicator="find .htmx-indicator"
+                    class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20 disabled:opacity-60 disabled:cursor-not-allowed transition-colors">
+                <span class="htmx-indicator [&>svg]:h-3.5 [&>svg]:w-3.5 [&>svg]:animate-spin">{{template "icon-loader-circle"}}</span>
                 Delete instance
             </button>
         </div>
@@ -185,55 +187,6 @@
     deleteInstanceModal.addEventListener('click', function (event) {
         if (event.target === this) {
             this.close();
-        }
-    });
-
-    // Toggle the submit button into a loading state for the POST's own
-    // round trip — delegated on #instance-add-modal-body (stable across
-    // swaps) rather than bound to the button itself, which gets torn down
-    // and replaced by every response.
-    document.getElementById('instance-add-modal-body').addEventListener('htmx:beforeRequest', function (event) {
-        var button = event.target.querySelector('button[type="submit"]');
-        if (!button) {
-            return;
-        }
-
-        button.disabled = true;
-        var spinner = button.querySelector('[data-spinner]');
-        var label = button.querySelector('[data-label]');
-        if (spinner) {
-            spinner.classList.remove('hidden');
-        }
-        if (label) {
-            label.textContent = 'Adding…';
-        }
-    });
-
-    // A successful response (2xx, whether it created the instance or
-    // re-rendered the form with a validation error) always replaces this
-    // button outright via the swap below, so there's nothing left to reset
-    // there. Only a request that never got a response at all (e.g. the
-    // network dropped) leaves the disabled/spinner state stuck on the
-    // original button — reset it so the user can retry instead of being
-    // stuck.
-    document.getElementById('instance-add-modal-body').addEventListener('htmx:afterRequest', function (event) {
-        if (event.detail.successful) {
-            return;
-        }
-
-        var button = event.target.querySelector('button[type="submit"]');
-        if (!button) {
-            return;
-        }
-
-        button.disabled = false;
-        var spinner = button.querySelector('[data-spinner]');
-        var label = button.querySelector('[data-label]');
-        if (spinner) {
-            spinner.classList.add('hidden');
-        }
-        if (label) {
-            label.textContent = 'Add instance';
         }
     });
 
