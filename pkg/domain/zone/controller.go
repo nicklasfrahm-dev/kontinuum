@@ -11,9 +11,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
@@ -195,6 +198,8 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		For(&v1alpha2.Zone{}).
 		Watches(&v1alpha2.TalosCluster{}, handler.EnqueueRequestsFromMapFunc(mapTalosClusterToZone)).
 		Watches(&v1alpha2.Kontinuum{}, handler.EnqueueRequestsFromMapFunc(mapKontinuumToZone)).
+		Watches(&v1alpha2.Kontinuum{}, handler.EnqueueRequestsFromMapFunc(reconciler.mapKontinuumVersionChangeToAllZones),
+			builder.WithPredicates(kontinuumVersionChangedPredicate)).
 		Complete(reconciler)
 	if err != nil {
 		return fmt.Errorf("failed to register zone controller: %w", err)
@@ -243,6 +248,41 @@ func mapKontinuumToZone(_ context.Context, obj client.Object) []ctrl.Request {
 	return []ctrl.Request{{
 		NamespacedName: types.NamespacedName{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace},
 	}}
+}
+
+// kontinuumVersionChangedPredicate gates mapKontinuumVersionChangeToAllZones's
+// own watch to only the Kontinuum events that could actually change what
+// resolveImage would deploy next: a newly registered Kontinuum reporting a
+// version for the first time, or an existing one's status.version actually
+// changing. Without this, that watch — which lists every Zone on a match —
+// would refire on every single heartbeat tick from every registered
+// Kontinuum (status.lastHeartbeatTime changes each interval), listing and
+// re-enqueuing every Zone in the fleet for no reason. A Kontinuum going away
+// (Delete) needs no entry here: that's mapKontinuumToZone's own concern
+// (RegistryJoined), not resolveImage's.
+//
+//nolint:gochecknoglobals // a predicate.Funcs value wired into SetupWithManager's Watches call, not mutable state
+var kontinuumVersionChangedPredicate = predicate.Funcs{
+	CreateFunc: func(evt event.CreateEvent) bool {
+		kontinuum, isKontinuum := evt.Object.(*v1alpha2.Kontinuum)
+
+		return isKontinuum && kontinuum.Status.Version != ""
+	},
+	UpdateFunc: func(evt event.UpdateEvent) bool {
+		oldKontinuum, isKontinuum := evt.ObjectOld.(*v1alpha2.Kontinuum)
+		if !isKontinuum {
+			return false
+		}
+
+		newKontinuum, isKontinuum := evt.ObjectNew.(*v1alpha2.Kontinuum)
+		if !isKontinuum {
+			return false
+		}
+
+		return oldKontinuum.Status.Version != newKontinuum.Status.Version
+	},
+	DeleteFunc:  func(event.DeleteEvent) bool { return false },
+	GenericFunc: func(event.GenericEvent) bool { return false },
 }
 
 // Reconciler installs kontinuum's downstream footprint onto a zone's own
@@ -307,6 +347,46 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	result, err := r.reconcileClusterAndInstall(ctx, &zoneObj)
 
 	return earliestRequeue(result, identityRequeue), err
+}
+
+// mapKontinuumVersionChangeToAllZones enqueues every Zone whenever a
+// registered Kontinuum's own status.version changes (see
+// kontinuumVersionChangedPredicate, which gates this to only fire then) —
+// resolveImage's own anyRegisteredKontinuum can pick any registered
+// Kontinuum, hub or worker alike, as the fleet's target tag (see that
+// function's own doc for why: "every registered Kontinuum is assumed to run
+// the same version"), so any one of their versions changing means every
+// Zone's own deployed tag might now be stale.
+//
+// This is what actually closes the "hub upgrades, zones never catch up" gap
+// mapKontinuumToZone's own narrower, single-zone mapping leaves open: a
+// hub's own Kontinuum has no Spec.Region/Zone (mapKontinuumToZone's key for
+// it is "", matching no Zone at all — see that function's own doc), so a hub
+// upgrade's status.version write there would otherwise wake no Zone
+// Reconcile at all. And even for a worker's own Kontinuum, mapKontinuumToZone
+// only ever enqueues the one Zone it belongs to — not every other Zone whose
+// own Deployment also needs to catch up to that same new tag. Once a Zone
+// reaches Ready, persistStatus stops requeuing it on its own; without this
+// watch, nothing would ever bring it back to re-run resolveImage and notice
+// the fleet's target tag moved on.
+func (r *Reconciler) mapKontinuumVersionChangeToAllZones(ctx context.Context, _ client.Object) []ctrl.Request {
+	var list v1alpha2.ZoneList
+
+	err := r.Client.List(ctx, &list, client.InNamespace(v1alpha2.KontinuumSystemNamespace))
+	if err != nil {
+		r.Logger.Error("failed to list zones to propagate kontinuum version change", "error", err)
+
+		return nil
+	}
+
+	requests := make([]ctrl.Request, 0, len(list.Items))
+	for index := range list.Items {
+		requests = append(requests, ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: list.Items[index].Name, Namespace: list.Items[index].Namespace},
+		})
+	}
+
+	return requests
 }
 
 // reconcileClusterAndInstall is Reconcile's own former body, factored out
