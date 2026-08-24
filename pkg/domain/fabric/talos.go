@@ -54,13 +54,14 @@ var errNoMachineConfig = errors.New("talos did not return a machine config resou
 // production implementation; tests inject a fake to avoid a real gRPC
 // dial.
 type NetworkConfigurer interface {
-	// ApplyInterfaceConfig applies patch — a LinkConfig document (see
-	// BuildInterfaceRoutePatch) — onto addr's own currently running
-	// machine config, strategic-merged so every other already-applied
-	// document (every other interface, install config, the cluster's own
-	// etcd/token secrets, ...) is left untouched, then re-applies the
-	// merged whole with Mode: machineapi.ApplyConfigurationRequest_NO_REBOOT
-	// — a network-only patch that never reboots the node.
+	// ApplyInterfaceConfig applies patch — one or more LinkConfig
+	// documents (see BuildInterfaceAddressPatch) — onto addr's own
+	// currently running machine config, strategic-merged so every other
+	// already-applied document (every other interface, install config,
+	// the cluster's own etcd/token secrets, ...) is left untouched, then
+	// re-applies the merged whole with Mode:
+	// machineapi.ApplyConfigurationRequest_NO_REBOOT — a network-only
+	// patch that never reboots the node.
 	ApplyInterfaceConfig(ctx context.Context, addr string, talosCfg *clientconfig.Config, patch []byte) error
 }
 
@@ -149,30 +150,73 @@ func dial(ctx context.Context, addr string, talosCfg *clientconfig.Config) (*tal
 	return talosClient, nil
 }
 
-// BuildInterfaceRoutePatch returns the LinkConfig document
-// NetworkConfigurer.ApplyInterfaceConfig strategic-merges onto a gateway
-// node's own running config: a single default route on interfaceName,
-// gatewayed via gatewayIP — the zone's own carved-subnet gateway IP (see
-// ipam.go's Allocation.GatewayIP). LinkConfig (config/types/network) is
-// the modern, per-document replacement for the legacy, deprecated
+// fabricBridgeName names the bridge device BuildGatewayAddressPatch
+// creates when a gateway node has more than one interface to advertise
+// the fabric on — see that function's own doc for why bridging is what
+// actually makes assigning one shared gateway address to more than one
+// physical interface valid in the first place.
+const fabricBridgeName = "fabric0"
+
+// BuildGatewayAddressPatch returns the LinkConfig (or, for more than one
+// interface, BridgeConfig) document NetworkConfigurer.ApplyInterfaceConfig
+// strategic-merges onto a gateway node's own running config: gatewayPrefix
+// (e.g. "10.0.0.254/24" — the zone's own carved-subnet gateway IP, see
+// ipam.go's Allocation.GatewayIP, combined with that same subnet's own
+// prefix length) assigned as a real address, making the node an actual
+// gateway on that subnet — holding the address itself, not just a route to
+// it.
+//
+// fabricIfaces is every discovered interface with no address of its own
+// yet (see classifyGatewayInterfaces's own doc for why the node's own
+// already-addressed uplink is deliberately excluded). Assigning the exact
+// same address independently to more than one raw interface is invalid —
+// Linux has no notion of "this one address lives on either of these two
+// links," and each interface would fight over it. So a single interface
+// gets the address directly (a plain LinkConfig document); more than one
+// are first bridged together (fabricBridgeName, enslaving every one of
+// them via BridgeConfig's own BridgeLinks) and the address goes on the
+// bridge device instead — the standard way Linux (and Talos) represents
+// "one logical L3 presence reachable over several physical links." STP is
+// enabled on that bridge purely as a loop-prevention safety net, since
+// this controller has no way to verify those links' own physical topology
+// doesn't already put them on the same L2 segment somewhere upstream.
+//
+// LinkConfig/BridgeConfig (config/types/network) are the modern,
+// per-document replacement for the legacy, deprecated
 // machine.network.interfaces[] field — a strategic-merge patch carrying
-// one adds or replaces cleanly alongside whatever else the node's own
-// machine config already applies, without touching any of it.
-func BuildInterfaceRoutePatch(interfaceName, gatewayIP string) ([]byte, error) {
-	gateway, err := netip.ParseAddr(gatewayIP)
+// one of these adds/replaces cleanly alongside whatever else the node's
+// own machine config already applies, without touching any of it.
+func BuildGatewayAddressPatch(fabricIfaces []string, gatewayPrefix string) ([]byte, error) {
+	prefix, err := netip.ParsePrefix(gatewayPrefix)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse gateway ip %q: %w", gatewayIP, err)
+		return nil, fmt.Errorf("failed to parse gateway prefix %q: %w", gatewayPrefix, err)
 	}
 
-	doc := network.NewLinkConfigV1Alpha1(interfaceName)
-	doc.LinkRoutes = []network.RouteConfig{{RouteGateway: network.Addr{Addr: gateway}}}
+	if len(fabricIfaces) == 1 {
+		doc := network.NewLinkConfigV1Alpha1(fabricIfaces[0])
+		doc.LinkAddresses = []network.AddressConfig{{AddressAddress: prefix}}
 
-	patch, err := yaml.Marshal(doc)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal interface route patch: %w", err)
+		data, err := yaml.Marshal(doc)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal gateway address patch for %q: %w", fabricIfaces[0], err)
+		}
+
+		return data, nil
 	}
 
-	return patch, nil
+	enableSTP := true
+
+	doc := network.NewBridgeConfigV1Alpha1(fabricBridgeName)
+	doc.BridgeLinks = fabricIfaces
+	doc.BridgeSTP = network.BridgeSTPConfig{BridgeSTPEnabled: &enableSTP}
+	doc.LinkAddresses = []network.AddressConfig{{AddressAddress: prefix}}
+
+	data, err := yaml.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal gateway bridge patch for %v: %w", fabricIfaces, err)
+	}
+
+	return data, nil
 }
 
 // LoadSecretsBundle fetches and unmarshals cluster's own stored Talos

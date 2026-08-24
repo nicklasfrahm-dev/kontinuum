@@ -125,9 +125,13 @@ func testTalosCluster(clusterName string) *v1alpha2.TalosCluster {
 }
 
 // testGatewayInstance returns a candidate Instance eligible to be zone's
-// own NAT gateway node: labeled kontinuum.sh/zone=zone and
-// role=gateway (matching testFabricObject's own GatewaySelector), claimed,
-// with one discovered interface.
+// own NAT gateway node: labeled kontinuum.sh/zone=zone and role=gateway
+// (matching testFabricObject's own GatewaySelector), claimed, with two
+// discovered interfaces — "eth0", already carrying an address (this
+// fixture's own WAN/uplink, per classifyGatewayInterfaces — also what
+// dialAddress resolves to reach it on), and "eth1", with none (the one
+// free interface every "elects a gateway" test expects the fabric's own
+// address to land on).
 func testGatewayInstance(name, zone string) *v1alpha2.Instance {
 	return &v1alpha2.Instance{
 		ObjectMeta: metav1.ObjectMeta{
@@ -140,7 +144,10 @@ func testGatewayInstance(name, zone string) *v1alpha2.Instance {
 			},
 		},
 		Status: v1alpha2.InstanceStatus{
-			Interfaces: []v1alpha2.InstanceInterfaceStatus{{Name: "eth0", Addresses: []string{"10.0.1.5/24"}}},
+			Interfaces: []v1alpha2.InstanceInterfaceStatus{
+				{Name: "eth0", Addresses: []string{"10.0.1.5/24"}},
+				{Name: "eth1"},
+			},
 		},
 	}
 }
@@ -178,15 +185,20 @@ func fabricManagerDeployment() *appsv1.Deployment {
 
 // fakeNetworkConfigurer is fabric.NetworkConfigurer's test double.
 type fakeNetworkConfigurer struct {
-	err   error
-	calls *[]string
+	err     error
+	calls   *[]string
+	patches *[][]byte
 }
 
 func (f fakeNetworkConfigurer) ApplyInterfaceConfig(
-	_ context.Context, addr string, _ *clientconfig.Config, _ []byte,
+	_ context.Context, addr string, _ *clientconfig.Config, patch []byte,
 ) error {
 	if f.calls != nil {
 		*f.calls = append(*f.calls, addr)
+	}
+
+	if f.patches != nil {
+		*f.patches = append(*f.patches, patch)
 	}
 
 	return f.err
@@ -593,4 +605,84 @@ func TestReconcileTeardownGivesUpAfterTimeout(t *testing.T) {
 	err = hubClient.Get(t.Context(), fabricObjectKey(), &check)
 	assert.True(t, apierrors.IsNotFound(err),
 		"the finalizer must be removed once the teardown timeout is exceeded, even though teardown itself never succeeded")
+}
+
+// singleInterfaceInstance returns a candidate Instance with only one
+// discovered interface, already carrying an address — a single-NIC node,
+// unlike testGatewayInstance's own two-interface fixture. Once elected,
+// classifyGatewayInterfaces reports it as an all-WAN, no-free-interface
+// node: there's nothing left to advertise the fabric on.
+func singleInterfaceInstance(name, zone string) *v1alpha2.Instance {
+	inst := testGatewayInstance(name, zone)
+	inst.Status.Interfaces = []v1alpha2.InstanceInterfaceStatus{
+		{Name: "eth0", Addresses: []string{"10.0.1.5/24"}},
+	}
+
+	return inst
+}
+
+func TestReconcileSingleInterfaceGatewayNeverConfiguresNetwork(t *testing.T) {
+	t.Parallel()
+
+	hubClient := newHubFakeClient(t,
+		testFabricObject(), testZoneObject(testZoneAName, "a"),
+		testTalosCluster(testZoneAName), talosClusterSecret(t, testZoneAName),
+		singleInterfaceInstance("node-a1", "a"))
+
+	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{}, fakeDownstreamClientBuilder{})
+
+	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+	assert.Equal(t, testRetryInterval, result.RequeueAfter)
+
+	var fabricObj v1alpha2.Fabric
+
+	require.NoError(t, hubClient.Get(t.Context(), fabricObjectKey(), &fabricObj))
+	require.Len(t, fabricObj.Status.Zones, 1)
+
+	zoneStatus := fabricObj.Status.Zones[0]
+	assert.True(t, meta.IsStatusConditionTrue(zoneStatus.Conditions, fabric.GatewayNodeSelectedConditionType),
+		"the node itself is still a valid gateway candidate — only its own network config fails")
+
+	networkCondition := meta.FindStatusCondition(zoneStatus.Conditions, fabric.NetworkConfiguredConditionType)
+	require.NotNil(t, networkCondition)
+	assert.Equal(t, metav1.ConditionFalse, networkCondition.Status)
+	assert.Contains(t, networkCondition.Message, "no free interface",
+		"a single-NIC node must fail on the interface-classification step specifically, not e.g. a missing talos cluster")
+	assert.Empty(t, zoneStatus.GatewayInterfaces)
+}
+
+func TestReconcileBridgesMultipleFabricInterfaces(t *testing.T) {
+	t.Parallel()
+
+	downstream := newDownstreamFakeClient(t)
+
+	gatewayNode := testGatewayInstance("node-a1", "a")
+	gatewayNode.Status.Interfaces = append(gatewayNode.Status.Interfaces, v1alpha2.InstanceInterfaceStatus{Name: "eth2"})
+
+	hubClient := newHubFakeClient(t,
+		testFabricObject(), testZoneObject(testZoneAName, "a"),
+		testTalosCluster(testZoneAName), talosClusterSecret(t, testZoneAName), gatewayNode)
+
+	var patches [][]byte
+
+	reconciler := newReconciler(hubClient,
+		fakeNetworkConfigurer{patches: &patches}, fakeDownstreamClientBuilder{client: downstream})
+
+	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, result)
+
+	require.Len(t, patches, 1)
+	patch := string(patches[0])
+	assert.Contains(t, patch, "kind: BridgeConfig",
+		"two free interfaces must be bridged, not each assigned the same address")
+	assert.Contains(t, patch, "eth1")
+	assert.Contains(t, patch, "eth2")
+
+	var fabricObj v1alpha2.Fabric
+
+	require.NoError(t, hubClient.Get(t.Context(), fabricObjectKey(), &fabricObj))
+	require.Len(t, fabricObj.Status.Zones, 1)
+	assert.ElementsMatch(t, []string{"eth1", "eth2"}, fabricObj.Status.Zones[0].GatewayInterfaces)
 }

@@ -118,9 +118,9 @@ func (r *Reconciler) teardownZoneWorkload(
 		return fmt.Errorf("failed to build downstream client for zone %q: %w", zoneStatus.Zone, err)
 	}
 
-	// The Deployment's own name is scoped by interface (see
+	// The Deployment's own name is scoped by its own WAN interface (see
 	// fabricManagerDeploymentName's own doc) — reconstructing it needs the
-	// same gatewayNode.Status.Interfaces[0].Name reconcileNetworkConfig
+	// same classifyGatewayInterfaces result reconcileNetworkConfig
 	// originally used. A gateway Instance already gone by teardown time
 	// means there's no way left to know which interface-scoped Deployment
 	// name it was — treated the same "nothing left reachable" way a
@@ -141,11 +141,12 @@ func (r *Reconciler) teardownZoneWorkload(
 		return fmt.Errorf("failed to get gateway instance %q: %w", zoneStatus.GatewayNodeRef.Name, err)
 	}
 
-	if len(gatewayNode.Status.Interfaces) == 0 {
+	wan, _ := classifyGatewayInterfaces(gatewayNode)
+	if wan == "" {
 		return nil
 	}
 
-	return deleteFabricManagerWorkload(ctx, downstream, gatewayNode.Status.Interfaces[0].Name)
+	return deleteFabricManagerWorkload(ctx, downstream, wan)
 }
 
 // findZoneObject finds the Zone object identifying zoneName within

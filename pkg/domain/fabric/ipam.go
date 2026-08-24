@@ -72,6 +72,22 @@ type Allocation struct {
 	GatewayIP string
 }
 
+// GatewayPrefix combines gatewayIP with cidr's own prefix length into a
+// single "address/prefixLength" string (e.g. "10.0.0.254/24") — the shape
+// BuildGatewayAddressPatch needs to assign the gateway address as a real
+// interface (or bridge) address, not just a bare IP with no mask of its
+// own.
+func GatewayPrefix(cidr, gatewayIP string) (string, error) {
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return "", fmt.Errorf("%w: %q", errInvalidFabricCIDR, cidr)
+	}
+
+	ones, _ := ipNet.Mask.Size()
+
+	return gatewayIP + "/" + strconv.Itoa(ones), nil
+}
+
 // Allocate carves one subnet per entry in liveZones out of fabricCIDR,
 // each zonePrefixLength long, deterministically and reproducibly:
 //

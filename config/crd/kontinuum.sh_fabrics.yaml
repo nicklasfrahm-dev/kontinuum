@@ -305,6 +305,19 @@ spec:
                         VRRP/anycast/BGP needed since no zone shares a broadcast domain with
                         any other (see FabricSpec's own doc).
                       type: string
+                    gatewayInterfaces:
+                      description: |-
+                        GatewayInterfaces lists GatewayNodeRef's own interfaces this fabric's
+                        GatewayIP was assigned on — every interface Talos discovery reported
+                        for that Instance with no address of its own already, i.e. every one
+                        except whichever interface is already linked up with an address
+                        (that one interface stays this node's own uplink: what
+                        GatewayNodeRef is dialed on, and what NAT masquerades outbound
+                        traffic through). Empty until GatewayNodeRef is resolved and has at
+                        least one such interface.
+                      items:
+                        type: string
+                      type: array
                     gatewayNodeRef:
                       description: |-
                         GatewayNodeRef points at the Instance elected to run this zone's own

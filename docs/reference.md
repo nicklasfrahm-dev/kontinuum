@@ -62,7 +62,7 @@ All kinds below belong to the `kontinuum.sh/v1alpha2` API group/version (`kontin
 | --- | --- | --- |
 | `Kontinuum` | `pkg/domain/registry` | Self-registration record for a running kontinuum process — role, region/zone, version, heartbeat. |
 | `Zone` | `pkg/domain/zone` | A single availability zone. Once its `TalosCluster` is Ready, installs kontinuum's downstream footprint (namespace, Deployment/Service, Gateway/Certificate) onto that zone's own cluster — see [Add zone](workflows/zone-add.md). |
-| `Fabric` | `pkg/domain/fabric` | A region-scoped network: carves a subnet and gateway IP per zone out of `spec.cidr`, and (unless `spec.nat.disabled`) elects and configures a per-zone NAT gateway node via `spec.gatewaySelector`. |
+| `Fabric` | `pkg/domain/fabric` | A region-scoped network: carves a subnet and gateway IP per zone out of `spec.cidr`, and (unless `spec.nat.disabled`) elects a per-zone gateway node via `spec.gatewaySelector`, assigning the gateway address to every one of its interfaces not already in use (bridged together if there's more than one) — see `status.zones[].gatewayInterfaces`. |
 | `Instance` | `pkg/domain/instance` | A candidate machine, discovered over the Talos maintenance-mode API. |
 | `InstancePool` | `pkg/domain/instancepool` | Claims a set of `Instance`s matching a selector, up to `spec.replicas`. |
 | `TalosCluster` | `pkg/domain/taloscluster` | Bootstraps a Talos Kubernetes cluster from a control-plane `InstancePool` and optional worker pools. |

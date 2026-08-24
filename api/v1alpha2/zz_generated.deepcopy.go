@@ -318,6 +318,11 @@ func (in *FabricZoneStatus) DeepCopyInto(out *FabricZoneStatus) {
 		*out = new(ObjectReference)
 		**out = **in
 	}
+	if in.GatewayInterfaces != nil {
+		in, out := &in.GatewayInterfaces, &out.GatewayInterfaces
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]metav1.Condition, len(*in))

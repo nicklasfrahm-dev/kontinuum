@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"time"
 
@@ -520,11 +521,25 @@ func (r *Reconciler) reconcileNATForGatewayNode(
 		return
 	}
 
-	networkOK := r.reconcileNetworkConfig(ctx, &cluster, gatewayNode, entry)
+	wan, fabricIfaces := classifyGatewayInterfaces(*gatewayNode)
+	if wan == "" || len(fabricIfaces) == 0 {
+		err := interfaceClassificationError(gatewayNode.Name, wan)
+		r.Logger.Warn("gateway node interfaces not usable yet",
+			"fabric", fabricObj.Name, "zone", entry.Zone, "node", gatewayNode.Name, "error", err)
+		meta.SetStatusCondition(&entry.Conditions, metav1.Condition{
+			Type: NetworkConfiguredConditionType, Status: metav1.ConditionFalse,
+			Reason: reasonNetworkConfigFailed, Message: err.Error(),
+		})
+		setZoneReadyCondition(entry, false, reasonZoneNotReady, "gateway node interfaces not usable yet")
+
+		return
+	}
+
+	networkOK := r.reconcileNetworkConfig(ctx, &cluster, gatewayNode, fabricIfaces, entry)
 
 	natOK := false
 	if networkOK {
-		natOK = r.reconcileNATWorkload(ctx, &cluster, gatewayNode, entry)
+		natOK = r.reconcileNATWorkload(ctx, &cluster, gatewayNode, wan, entry)
 	}
 
 	switch {
@@ -535,6 +550,20 @@ func (r *Reconciler) reconcileNATForGatewayNode(
 	default:
 		setZoneReadyCondition(entry, false, reasonZoneNotReady, "gateway node network not configured yet")
 	}
+}
+
+// interfaceClassificationError builds reconcileNATForGatewayNode's own
+// error for a gateway node whose interfaces (see classifyGatewayInstances)
+// aren't usable yet — wan is "" when no interface has an address at all
+// (errNoWANInterface); a non-empty wan reaching here means every
+// discovered interface already has one, leaving none free to advertise the
+// fabric on (errNoFabricInterface).
+func interfaceClassificationError(nodeName, wan string) error {
+	if wan == "" {
+		return fmt.Errorf("%w: instance %q", errNoWANInterface, nodeName)
+	}
+
+	return fmt.Errorf("%w: instance %q", errNoFabricInterface, nodeName)
 }
 
 // setZoneReadyCondition sets entry's own ZoneReadyConditionType.
@@ -603,16 +632,19 @@ func (r *Reconciler) resolveGatewayNode(
 	return &chosen, true, nil
 }
 
-// reconcileNetworkConfig pushes gatewayNode's own static default route via
-// Talos (see NetworkConfigurer), reporting the outcome as entry's own
-// NetworkConfiguredConditionType and returning whether it succeeded — every
-// failure here (interfaces not discovered yet, secrets bundle not stored
-// yet, the node itself unreachable) is caught and logged, never propagated
-// as a hard Reconcile error, mirroring reconcileZoneEntry's own doc.
+// reconcileNetworkConfig assigns entry's own GatewayIP as a real address
+// on fabricIfaces (see NetworkConfigurer/BuildGatewayAddressPatch),
+// reporting the outcome as entry's own NetworkConfiguredConditionType and
+// returning whether it succeeded — every failure here (secrets bundle not
+// stored yet, the node itself unreachable) is caught and logged, never
+// propagated as a hard Reconcile error, mirroring reconcileZoneEntry's own
+// doc. Records entry.GatewayInterfaces on success — see that field's own
+// doc.
 func (r *Reconciler) reconcileNetworkConfig(
-	ctx context.Context, cluster *v1alpha2.TalosCluster, gatewayNode *v1alpha2.Instance, entry *v1alpha2.FabricZoneStatus,
+	ctx context.Context, cluster *v1alpha2.TalosCluster, gatewayNode *v1alpha2.Instance,
+	fabricIfaces []string, entry *v1alpha2.FabricZoneStatus,
 ) bool {
-	err := r.pushNetworkConfig(ctx, cluster, *entry, gatewayNode)
+	err := r.pushNetworkConfig(ctx, cluster, *entry, gatewayNode, fabricIfaces)
 	if err != nil {
 		r.Logger.Warn("failed to push gateway node network config",
 			"cluster", cluster.Name, "zone", entry.Zone, "node", gatewayNode.Name, "error", err)
@@ -624,9 +656,12 @@ func (r *Reconciler) reconcileNetworkConfig(
 		return false
 	}
 
+	entry.GatewayInterfaces = fabricIfaces
+
 	meta.SetStatusCondition(&entry.Conditions, metav1.Condition{
 		Type: NetworkConfiguredConditionType, Status: metav1.ConditionTrue, Reason: reasonNetworkConfigured,
-		Message: fmt.Sprintf("pushed default route via %s to instance %q", entry.GatewayIP, gatewayNode.Name),
+		Message: fmt.Sprintf("assigned gateway address %s on instance %q, interfaces %v",
+			entry.GatewayIP, gatewayNode.Name, fabricIfaces),
 	})
 
 	return true
@@ -635,13 +670,13 @@ func (r *Reconciler) reconcileNetworkConfig(
 // pushNetworkConfig does the actual work reconcileNetworkConfig reports the
 // outcome of.
 func (r *Reconciler) pushNetworkConfig(
-	ctx context.Context, cluster *v1alpha2.TalosCluster, entry v1alpha2.FabricZoneStatus, gatewayNode *v1alpha2.Instance,
+	ctx context.Context, cluster *v1alpha2.TalosCluster, entry v1alpha2.FabricZoneStatus,
+	gatewayNode *v1alpha2.Instance, fabricIfaces []string,
 ) error {
-	if len(gatewayNode.Status.Interfaces) == 0 {
-		return fmt.Errorf("%w: instance %q has no discovered interfaces", errNoGatewayInterface, gatewayNode.Name)
+	gatewayPrefix, err := GatewayPrefix(entry.CIDR, entry.GatewayIP)
+	if err != nil {
+		return err
 	}
-
-	interfaceName := gatewayNode.Status.Interfaces[0].Name
 
 	bundle, err := LoadSecretsBundle(ctx, r.Client, cluster.Status.SecretRef)
 	if err != nil {
@@ -655,7 +690,7 @@ func (r *Reconciler) pushNetworkConfig(
 		return err
 	}
 
-	patch, err := BuildInterfaceRoutePatch(interfaceName, entry.GatewayIP)
+	patch, err := BuildGatewayAddressPatch(fabricIfaces, gatewayPrefix)
 	if err != nil {
 		return err
 	}
@@ -669,26 +704,16 @@ func (r *Reconciler) pushNetworkConfig(
 }
 
 // reconcileNATWorkload ensures gatewayNode's own NAT-masquerade workload is
-// running on cluster's own downstream cluster, reporting the outcome as
-// entry's own NATInstalledConditionType and returning whether it
-// succeeded — only reached once reconcileNetworkConfig has already
-// succeeded (see reconcileZoneEntry).
+// running on cluster's own downstream cluster, masquerading outbound
+// traffic through wanInterface (see classifyGatewayInterfaces), reporting
+// the outcome as entry's own NATInstalledConditionType and returning
+// whether it succeeded — only reached once reconcileNetworkConfig has
+// already succeeded (see reconcileZoneEntry).
 func (r *Reconciler) reconcileNATWorkload(
-	ctx context.Context, cluster *v1alpha2.TalosCluster, gatewayNode *v1alpha2.Instance, target *v1alpha2.FabricZoneStatus,
+	ctx context.Context, cluster *v1alpha2.TalosCluster, gatewayNode *v1alpha2.Instance,
+	wanInterface string, target *v1alpha2.FabricZoneStatus,
 ) bool {
-	if len(gatewayNode.Status.Interfaces) == 0 {
-		err := fmt.Errorf("%w: instance %q has no discovered interfaces", errNoGatewayInterface, gatewayNode.Name)
-		r.Logger.Warn("failed to install nat gateway workload",
-			"cluster", cluster.Name, "zone", target.Zone, "node", gatewayNode.Name, "error", err)
-		meta.SetStatusCondition(&target.Conditions, metav1.Condition{
-			Type: NATInstalledConditionType, Status: metav1.ConditionFalse,
-			Reason: reasonNATInstallFailed, Message: err.Error(),
-		})
-
-		return false
-	}
-
-	err := r.installNATWorkload(ctx, cluster, gatewayNode.Name, gatewayNode.Status.Interfaces[0].Name)
+	err := r.installNATWorkload(ctx, cluster, gatewayNode.Name, wanInterface)
 	if err != nil {
 		r.Logger.Warn("failed to install nat gateway workload",
 			"cluster", cluster.Name, "zone", target.Zone, "node", gatewayNode.Name, "error", err)
@@ -809,6 +834,10 @@ func equalZoneStatus(existing, updated v1alpha2.FabricZoneStatus) bool {
 	}
 
 	if !equalObjectRef(existing.GatewayNodeRef, updated.GatewayNodeRef) {
+		return false
+	}
+
+	if !slices.Equal(existing.GatewayInterfaces, updated.GatewayInterfaces) {
 		return false
 	}
 

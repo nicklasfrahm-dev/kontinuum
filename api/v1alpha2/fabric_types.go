@@ -74,6 +74,16 @@ type FabricZoneStatus struct {
 	// claimed candidate in this zone.
 	// +optional
 	GatewayNodeRef *ObjectReference `json:"gatewayNodeRef,omitempty"`
+	// GatewayInterfaces lists GatewayNodeRef's own interfaces this fabric's
+	// GatewayIP was assigned on — every interface Talos discovery reported
+	// for that Instance with no address of its own already, i.e. every one
+	// except whichever interface is already linked up with an address
+	// (that one interface stays this node's own uplink: what
+	// GatewayNodeRef is dialed on, and what NAT masquerades outbound
+	// traffic through). Empty until GatewayNodeRef is resolved and has at
+	// least one such interface.
+	// +optional
+	GatewayInterfaces []string `json:"gatewayInterfaces,omitempty"`
 	// Conditions reports this zone entry's own readiness within the
 	// fabric, e.g. GatewayNodeSelected.
 	// +optional

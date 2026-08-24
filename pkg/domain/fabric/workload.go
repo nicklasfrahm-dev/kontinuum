@@ -17,12 +17,72 @@ import (
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 )
 
-// errNoGatewayInterface is reconcileNetworkConfig/reconcileNATWorkload's
-// sentinel for an elected gateway Instance with no status.interfaces
-// discovered yet — expected right after election, before maintenance-mode
-// (or, once claimed, cluster-joined) probing has populated it; the next
-// requeue retries.
-var errNoGatewayInterface = errors.New("gateway instance has no discovered interfaces")
+// errNoWANInterface is reconcileNATForGatewayNode's sentinel for an
+// elected gateway Instance with no interface carrying an address yet —
+// nothing reachable to dial the node on, and nothing to masquerade
+// outbound traffic through. Expected right after election, before
+// maintenance-mode (or, once claimed, cluster-joined) probing has
+// populated status.interfaces; the next requeue retries.
+var errNoWANInterface = errors.New("gateway instance has no interface with an assigned address yet")
+
+// errNoFabricInterface is reconcileNATForGatewayNode's sentinel for an
+// elected gateway Instance whose every discovered interface already
+// carries an address — see classifyGatewayInterfaces's own doc for why
+// that leaves nothing to advertise the fabric's own gateway address on. A
+// single-NIC node can never satisfy this: advertising a fabric needs a
+// gateway node with at least one interface beyond its own already
+// addressed uplink.
+var errNoFabricInterface = errors.New("gateway instance has no free interface to advertise the fabric on")
+
+// classifyGatewayInterfaces splits inst's own discovered interfaces into
+// wan — the one already carrying a real (non-loopback) address, this
+// node's own pre-existing uplink, both what it's dialed on (see
+// dialAddress) and what NAT masquerades outbound traffic through — and
+// fabricIfaces, every other interface with no address of its own yet, the
+// candidates this zone's own gateway address gets assigned to (see
+// BuildInterfaceAddressPatch). This is the concrete rule behind "advertise
+// the fabric on every interface except the one already linked up to a
+// public IP, or otherwise already carrying an address": an interface
+// Talos discovery already reports holding an address is always treated as
+// this node's own pre-existing uplink, never as a fabric candidate. wan is
+// "" if no interface has one yet; fabricIfaces is empty if every
+// discovered interface already does (e.g. a single-NIC node).
+func classifyGatewayInterfaces(inst v1alpha2.Instance) (string, []string) {
+	var wan string
+
+	var fabricIfaces []string
+
+	for _, iface := range inst.Status.Interfaces {
+		if iface.Name == "lo" {
+			continue
+		}
+
+		if hasUsableAddress(iface) {
+			if wan == "" {
+				wan = iface.Name
+			}
+
+			continue
+		}
+
+		fabricIfaces = append(fabricIfaces, iface.Name)
+	}
+
+	return wan, fabricIfaces
+}
+
+// hasUsableAddress reports whether iface already carries at least one
+// real (non-loopback) address.
+func hasUsableAddress(iface v1alpha2.InstanceInterfaceStatus) bool {
+	for _, addr := range iface.Addresses {
+		ip, _, err := net.ParseCIDR(addr)
+		if err == nil && !ip.IsLoopback() {
+			return true
+		}
+	}
+
+	return false
+}
 
 // kubeconfigSecretKey is the key a TalosCluster's own kubeconfig is stored
 // under in the Secret its status.secretRef points to — must match
