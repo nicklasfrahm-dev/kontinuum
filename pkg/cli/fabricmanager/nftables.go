@@ -29,7 +29,7 @@ const (
 
 // ifnameSize is IFNAMSIZ — the kernel's own fixed interface-name buffer
 // size, and the length nftables' own meta oifname/iifname comparisons
-// expect their operand encoded as (see ifnameBytes).
+// expect their operand encoded as (see IfnameBytes).
 const ifnameSize = 16
 
 // ipForwardPath is the sysctl this package flips to actually let the
@@ -158,7 +158,7 @@ func ensureMasquerade(fabricID, iface string) error {
 			// [ meta load oifname => reg 1 ]
 			&expr.Meta{Key: expr.MetaKeyOIFNAME, Register: 1},
 			// [ cmp eq reg 1 <iface> ]
-			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: ifnameBytes(iface)},
+			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: IfnameBytes(iface)},
 			// [ masq ]
 			&expr.Masq{},
 		},
@@ -218,11 +218,11 @@ func queueDeleteExistingTable(conn *nftables.Conn, fabricID, iface string) error
 	return nil
 }
 
-// ifnameBytes encodes iface the way nftables' own meta oifname/iifname
+// IfnameBytes encodes iface the way nftables' own meta oifname/iifname
 // comparisons expect their operand: a fixed ifnameSize-byte, NUL-padded
 // buffer — mirrors the nftables Go client's own test helper of the same
 // shape.
-func ifnameBytes(iface string) []byte {
+func IfnameBytes(iface string) []byte {
 	buf := make([]byte, ifnameSize)
 	copy(buf, iface+"\x00")
 

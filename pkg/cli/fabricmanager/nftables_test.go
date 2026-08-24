@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/nicklasfrahm/kontinuum/pkg/cli/fabricmanager"
 )
@@ -53,4 +54,13 @@ func TestNATTableNameDoesNotCollideOnSegmentBoundary(t *testing.T) {
 
 	assert.NotEqual(t,
 		fabricmanager.NATTableName(".", "abcd"), fabricmanager.NATTableName("", "2e\xabcd"))
+}
+
+func TestIfnameBytesPadsToFixedSizeAndNulTerminates(t *testing.T) {
+	t.Parallel()
+
+	buf := fabricmanager.IfnameBytes("eth0")
+	require.Len(t, buf, 16)
+	assert.Equal(t, "eth0\x00", string(buf[:5]))
+	assert.Equal(t, make([]byte, 11), buf[5:])
 }
