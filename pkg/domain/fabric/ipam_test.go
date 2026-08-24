@@ -142,6 +142,19 @@ func TestAllocateZonePrefixLeavesNoGatewayRoomErrors(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestAllocateZonePrefixOneBitShortOfFabricLeavesNoGatewayRoomErrors is a
+// regression test for an off-by-one: a /31 zone prefix out of a /24 fabric
+// carves a 2-address block whose gateway IP (blockAddresses' own
+// broadcastInt-1) collides with the block's own network address — not a
+// distinct, usable gateway address at all. This used to be accepted
+// (validateZonePrefixLength's own bound was totalBits-1, not totalBits-2).
+func TestAllocateZonePrefixOneBitShortOfFabricLeavesNoGatewayRoomErrors(t *testing.T) {
+	t.Parallel()
+
+	_, err := fabric.Allocate(blockCIDR0, 31, []string{"a"}, nil)
+	require.ErrorContains(t, err, "leaves no room for a gateway address")
+}
+
 func TestAllocateExhaustedBlocksErrors(t *testing.T) {
 	t.Parallel()
 

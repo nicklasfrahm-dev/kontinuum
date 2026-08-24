@@ -175,13 +175,17 @@ func Allocate(
 // validateZonePrefixLength checks that zonePrefixLength both carves a
 // strictly smaller block than the fabric CIDR itself and leaves at least
 // two usable addresses (network + gateway, distinct) per block, without
-// carving more than maxZonePrefixDiff blocks.
+// carving more than maxZonePrefixDiff blocks. blockAddresses' own
+// gatewayInt is broadcastInt-1: a /(totalBits-1) block (blockSize 2) has
+// broadcastInt == networkInt+1, making gatewayInt == networkInt — the
+// same address twice, not two distinct ones — so the block must leave
+// room for at least four addresses (blockSize 4, i.e. totalBits-2).
 func validateZonePrefixLength(fabricPrefixLen, totalBits int, zonePrefixLength int32) error {
 	if int(zonePrefixLength) <= fabricPrefixLen {
 		return fmt.Errorf("%w: fabric is /%d, zone prefix is /%d", errZonePrefixTooShort, fabricPrefixLen, zonePrefixLength)
 	}
 
-	if int(zonePrefixLength) > totalBits-1 {
+	if int(zonePrefixLength) > totalBits-2 {
 		return fmt.Errorf("%w: /%d", errZonePrefixNoGatewayRoom, zonePrefixLength)
 	}
 
