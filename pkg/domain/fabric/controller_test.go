@@ -13,6 +13,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -20,6 +21,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
 	talosconfig "github.com/siderolabs/talos/pkg/machinery/config"
@@ -143,6 +145,37 @@ func testGatewayInstance(name, zone string) *v1alpha2.Instance {
 	}
 }
 
+// testFabricManagerName/testFabricManagerNamespace mirror what
+// pkg/domain/fabric/workload.go's own unexported
+// fabricManagerDeploymentName("eth0")/fabricManagerNamespace resolve to for
+// every teardown fixture's own gateway node (see testGatewayInstance,
+// always given interface "eth0") — the teardown tests assert against these
+// local copies rather than a literal repeated at every call site.
+const testFabricManagerName = "kontinuum-fabric-manager-eth0"
+
+func testFabricManagerNamespace() string { return v1alpha2.KontinuumSystemNamespace }
+
+// fabricManagerDeployment returns a stand-in for the Deployment
+// ensureFabricManagerWorkload installs — a teardown fixture representing
+// "already installed on this zone's downstream cluster," not something the
+// tests exercising the install path themselves create.
+func fabricManagerDeployment() *appsv1.Deployment {
+	labels := map[string]string{"app.kubernetes.io/name": testFabricManagerName}
+
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: testFabricManagerName, Namespace: testFabricManagerNamespace()},
+		Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: labels},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: testFabricManagerName, Image: testImage}},
+				},
+			},
+		},
+	}
+}
+
 // fakeNetworkConfigurer is fabric.NetworkConfigurer's test double.
 type fakeNetworkConfigurer struct {
 	err   error
@@ -198,7 +231,7 @@ func newHubFakeClient(t *testing.T, objects ...client.Object) client.Client {
 		Build()
 }
 
-func newDownstreamFakeClient(t *testing.T) client.Client {
+func newDownstreamFakeClient(t *testing.T, objects ...client.Object) client.Client {
 	t.Helper()
 
 	scheme := runtime.NewScheme()
@@ -206,8 +239,14 @@ func newDownstreamFakeClient(t *testing.T) client.Client {
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, appsv1.AddToScheme(scheme))
 
-	return fake.NewClientBuilder().WithScheme(scheme).Build()
+	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 }
+
+// testTeardownTimeout is newReconciler's own default Reconciler.TeardownTimeout
+// — long enough that TestReconcileTeardown* fixtures whose DeletionTimestamp
+// is "now" never spuriously hit it; TestReconcileTeardownGivesUpAfterTimeout
+// overrides it directly on the returned *fabric.Reconciler instead.
+const testTeardownTimeout = 15 * time.Minute
 
 func newReconciler(
 	hubClient client.Client, networkConfigurer fabric.NetworkConfigurer, downstreamBuilder zone.DownstreamClientBuilder,
@@ -218,6 +257,7 @@ func newReconciler(
 		DownstreamClientBuilder: downstreamBuilder,
 		Image:                   testImage,
 		RetryInterval:           testRetryInterval,
+		TeardownTimeout:         testTeardownTimeout,
 		Locker:                  zonelease.NewLocker(hubClient, hubClient, "test-hub", "", 0),
 		Logger:                  slog.Default(),
 	}
@@ -321,7 +361,7 @@ func TestReconcileElectsGatewayPushesNetworkConfigAndInstallsNAT(t *testing.T) {
 	var deployment appsv1.Deployment
 
 	err = downstream.Get(t.Context(),
-		client.ObjectKey{Name: "kontinuum-nat-gateway", Namespace: v1alpha2.KontinuumSystemNamespace}, &deployment)
+		client.ObjectKey{Name: testFabricManagerName, Namespace: v1alpha2.KontinuumSystemNamespace}, &deployment)
 	require.NoError(t, err, "nat gateway deployment must be installed on the zone's own downstream cluster")
 
 	assert.Equal(t, "node-a1", deployment.Spec.Template.Spec.NodeSelector["kubernetes.io/hostname"])
@@ -435,4 +475,122 @@ func TestReconcileNoGatewayCandidateOnlyBlocksThatZone(t *testing.T) {
 
 	assert.False(t, meta.IsStatusConditionTrue(byZone["a"].Conditions, fabric.GatewayNodeSelectedConditionType))
 	assert.True(t, meta.IsStatusConditionTrue(byZone["b"].Conditions, fabric.ZoneReadyConditionType))
+}
+
+func TestReconcileAddsFinalizer(t *testing.T) {
+	t.Parallel()
+
+	hubClient := newHubFakeClient(t, testFabricObject())
+	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{}, fakeDownstreamClientBuilder{})
+
+	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	var fabricObj v1alpha2.Fabric
+
+	require.NoError(t, hubClient.Get(t.Context(), fabricObjectKey(), &fabricObj))
+	assert.True(t, controllerutil.ContainsFinalizer(&fabricObj, fabric.FabricFinalizer))
+}
+
+// fabricPendingDeletion builds a Fabric already carrying FabricFinalizer
+// and a status.zones entry pointing at an elected gateway node — the
+// fixture every teardown test starts from, standing in for a Fabric whose
+// own reconcileFabric already ran to completion at least once before
+// deletion was requested.
+func fabricPendingDeletion() *v1alpha2.Fabric {
+	fabricObj := testFabricObject()
+	controllerutil.AddFinalizer(fabricObj, fabric.FabricFinalizer)
+	fabricObj.Status.Zones = []v1alpha2.FabricZoneStatus{
+		{
+			Zone: "a", CIDR: blockCIDR0, GatewayIP: "10.0.0.254",
+			GatewayNodeRef: &v1alpha2.ObjectReference{
+				APIVersion: v1alpha2.GroupVersion().String(), Kind: "Instance", Name: "node-a1",
+			},
+		},
+	}
+
+	return fabricObj
+}
+
+func TestReconcileTeardownDeletesFabricManagerWorkloadAndRemovesFinalizer(t *testing.T) {
+	t.Parallel()
+
+	downstream := newDownstreamFakeClient(t, fabricManagerDeployment())
+
+	fabricObj := fabricPendingDeletion()
+
+	hubClient := newHubFakeClient(t,
+		fabricObj, testZoneObject(testZoneAName, "a"), testTalosCluster(testZoneAName), talosClusterSecret(t, testZoneAName),
+		testGatewayInstance("node-a1", "a"))
+
+	require.NoError(t, hubClient.Delete(t.Context(), fabricObj))
+
+	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{}, fakeDownstreamClientBuilder{client: downstream})
+
+	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, result)
+
+	var deployment appsv1.Deployment
+
+	err = downstream.Get(t.Context(),
+		client.ObjectKey{Name: testFabricManagerName, Namespace: testFabricManagerNamespace()}, &deployment)
+	assert.True(t, apierrors.IsNotFound(err), "the zone's own fabric manager workload must be torn down")
+
+	var check v1alpha2.Fabric
+
+	err = hubClient.Get(t.Context(), fabricObjectKey(), &check)
+	assert.True(t, apierrors.IsNotFound(err), "the fabric itself must be gone once its finalizer is removed")
+}
+
+func TestReconcileTeardownToleratesAlreadyGoneZone(t *testing.T) {
+	t.Parallel()
+
+	// No Zone/TalosCluster fixtures at all — the zone this Fabric once
+	// carved a subnet for is already gone by the time teardown runs.
+	fabricObj := fabricPendingDeletion()
+
+	hubClient := newHubFakeClient(t, fabricObj)
+
+	require.NoError(t, hubClient.Delete(t.Context(), fabricObj))
+
+	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{},
+		fakeDownstreamClientBuilder{err: errTestDownstreamBuild})
+
+	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, result)
+
+	var check v1alpha2.Fabric
+
+	err = hubClient.Get(t.Context(), fabricObjectKey(), &check)
+	assert.True(t, apierrors.IsNotFound(err), "teardown must not get stuck on a zone that's already gone")
+}
+
+func TestReconcileTeardownGivesUpAfterTimeout(t *testing.T) {
+	t.Parallel()
+
+	fabricObj := fabricPendingDeletion()
+
+	hubClient := newHubFakeClient(t,
+		fabricObj, testZoneObject(testZoneAName, "a"), testTalosCluster(testZoneAName), talosClusterSecret(t, testZoneAName))
+
+	require.NoError(t, hubClient.Delete(t.Context(), fabricObj))
+
+	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{},
+		fakeDownstreamClientBuilder{err: errTestDownstreamBuild})
+	// A near-zero timeout guarantees reconcileTeardown sees itself as
+	// already past deadline on this very first attempt, even though the
+	// downstream build below would otherwise fail teardown forever.
+	reconciler.TeardownTimeout = time.Nanosecond
+
+	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, result)
+
+	var check v1alpha2.Fabric
+
+	err = hubClient.Get(t.Context(), fabricObjectKey(), &check)
+	assert.True(t, apierrors.IsNotFound(err),
+		"the finalizer must be removed once the teardown timeout is exceeded, even though teardown itself never succeeded")
 }

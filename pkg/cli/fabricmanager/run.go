@@ -1,4 +1,4 @@
-package natgateway
+package fabricmanager
 
 import (
 	"context"
@@ -13,7 +13,10 @@ import (
 	"github.com/nicklasfrahm/kontinuum/pkg/logging"
 )
 
-// NewRunCmd builds the "nat-gateway run" command.
+// NewRunCmd builds the "fabricmanager run" command. Only NAT is
+// implemented today (see this package's own doc) — future zone network
+// duties (DHCP, ...) are expected to extend this same command with more
+// flags, not spawn a second, separately named one.
 func NewRunCmd() *cobra.Command {
 	var iface string
 
@@ -24,11 +27,11 @@ func NewRunCmd() *cobra.Command {
 			"every packet leaving this node through --interface is source-NATed to " +
 			"this node's own address, then blocks until terminated — the process " +
 			"itself is the workload's own liveness signal (see " +
-			"pkg/domain/fabric.ensureNATGatewayWorkload); the rule is removed on a " +
+			"pkg/domain/fabric.ensureFabricManagerWorkload); the rule is removed on a " +
 			"graceful shutdown.",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runNATGateway(cmd.Context(), iface)
+			return runFabricManager(cmd.Context(), iface)
 		},
 	}
 
@@ -45,10 +48,10 @@ func NewRunCmd() *cobra.Command {
 	return cmd
 }
 
-// runNATGateway enables ipv4 forwarding, installs the masquerade rule, then
-// blocks until ctx is canceled or a termination signal is received —
+// runFabricManager enables ipv4 forwarding, installs the masquerade rule,
+// then blocks until ctx is canceled or a termination signal is received —
 // mirrors pkg/cli.runServe's own signal-handling shape.
-func runNATGateway(ctx context.Context, iface string) error {
+func runFabricManager(ctx context.Context, iface string) error {
 	logger := logging.New(slog.LevelInfo, logging.FormatJSON, os.Stdout)
 
 	err := enableIPForwarding()
@@ -75,7 +78,7 @@ func runNATGateway(ctx context.Context, iface string) error {
 		logger.Info("Context canceled, shutting down")
 	}
 
-	err = deleteMasquerade()
+	err = deleteMasquerade(iface)
 	if err != nil {
 		logger.Warn("Failed to remove nftables masquerade rule on shutdown", "error", err)
 	}

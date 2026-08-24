@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
@@ -50,13 +51,20 @@ const (
 	NetworkConfiguredConditionType = "NetworkConfigured"
 	// NATInstalledConditionType is one zone entry's own condition set once
 	// its NAT-masquerade workload is running on its elected gateway node —
-	// see ensureNATGatewayWorkload.
+	// see ensureFabricManagerWorkload.
 	NATInstalledConditionType = "NATInstalled"
 	// ZoneReadyConditionType is one zone entry's own aggregate condition —
 	// mirrors ReadyConditionType's identical "kubectl-tree needs a literal
 	// Ready-Typed condition" reasoning, scoped to this one status.zones[]
 	// entry instead of the whole Fabric.
 	ZoneReadyConditionType = "Ready"
+
+	// TeardownConditionType is set false while a Fabric being deleted is
+	// still waiting on a zone's own NAT gateway workload teardown — see
+	// teardown.go's own doc. Mirrors zone.TeardownConditionType's identical
+	// "never observed true" shape: the finalizer is removed in the same
+	// reconcile pass that would otherwise have set it.
+	TeardownConditionType = "Teardown"
 
 	reasonInvalidSpec         = "InvalidSpec"
 	reasonValidSpec           = "ValidSpec"
@@ -69,8 +77,22 @@ const (
 	reasonNATDisabled         = "NATDisabled"
 	reasonZoneReady           = "ZoneReady"
 	reasonZoneNotReady        = "ZoneNotReady"
+	// reasonNATTeardownFailed is teardown.go's own retryable-failure reason
+	// — see reconcileTeardown.
+	reasonNATTeardownFailed = "NATTeardownFailed"
 
 	defaultRetryInterval = 15 * time.Second
+	// defaultTeardownTimeout bounds how long a Fabric's finalizer keeps
+	// retrying downstream NAT gateway teardown before giving up and
+	// removing itself anyway — mirrors zone.defaultTeardownTimeout's
+	// identical "not a finalizer that blocks deletion forever" reasoning.
+	defaultTeardownTimeout = 15 * time.Minute
+
+	// FabricFinalizer is the finalizer teardown.go adds to every Fabric
+	// this package reconciles, and only ever removes once every zone's own
+	// NAT gateway workload is torn down (or teardown has been abandoned
+	// after defaultTeardownTimeout — see reconcileTeardown).
+	FabricFinalizer = "kontinuum.sh/fabric-teardown"
 )
 
 // Config configures a Controller.
@@ -97,6 +119,11 @@ type Config struct {
 	// RetryInterval is how long Reconcile waits before retrying a step
 	// that hasn't converged yet. Defaults to fifteen seconds when zero.
 	RetryInterval time.Duration
+	// TeardownTimeout bounds how long a Fabric being deleted keeps retrying
+	// downstream NAT gateway teardown before giving up and removing its
+	// finalizer anyway — see teardown.go's own doc. Defaults to fifteen
+	// minutes when zero.
+	TeardownTimeout time.Duration
 	// ZoneLease is this process's own zonelease.Locker identity — see
 	// zonelease.Identity's own doc. Fabric is region-scoped, hub-owned
 	// fleet state (not any one zone's own resource — issue #24's "one
@@ -114,7 +141,8 @@ type Controller struct {
 }
 
 // NewController builds a Controller from cfg, defaulting NetworkConfigurer,
-// DownstreamClientBuilder, and RetryInterval when left zero.
+// DownstreamClientBuilder, RetryInterval, and TeardownTimeout when left
+// zero.
 func NewController(cfg Config) *Controller {
 	if cfg.NetworkConfigurer == nil {
 		cfg.NetworkConfigurer = NewNetworkConfigurer()
@@ -126,6 +154,10 @@ func NewController(cfg Config) *Controller {
 
 	if cfg.RetryInterval == 0 {
 		cfg.RetryInterval = defaultRetryInterval
+	}
+
+	if cfg.TeardownTimeout == 0 {
+		cfg.TeardownTimeout = defaultTeardownTimeout
 	}
 
 	return &Controller{Config: cfg}
@@ -142,6 +174,7 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		DownstreamClientBuilder: c.Config.DownstreamClientBuilder,
 		Image:                   c.Config.Image,
 		RetryInterval:           c.Config.RetryInterval,
+		TeardownTimeout:         c.Config.TeardownTimeout,
 		Locker: zonelease.NewLocker(
 			mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
 		Logger: c.Config.Logger,
@@ -180,6 +213,7 @@ type Reconciler struct {
 	DownstreamClientBuilder zone.DownstreamClientBuilder
 	Image                   string
 	RetryInterval           time.Duration
+	TeardownTimeout         time.Duration
 	// Locker gates every write below against zonelease — see
 	// Config.ZoneLease's own doc.
 	Locker *zonelease.Locker
@@ -206,6 +240,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	if !acquired {
 		return ctrl.Result{RequeueAfter: zonelease.Jitter(r.RetryInterval)}, nil
+	}
+
+	if !fabricObj.DeletionTimestamp.IsZero() {
+		return r.reconcileTeardown(ctx, &fabricObj)
+	}
+
+	if controllerutil.AddFinalizer(&fabricObj, FabricFinalizer) {
+		err = r.Client.Update(ctx, &fabricObj)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to add finalizer to fabric %q: %w", fabricObj.Name, err)
+		}
 	}
 
 	return r.reconcileFabric(ctx, &fabricObj)
@@ -678,7 +723,7 @@ func (r *Reconciler) installNATWorkload(
 		return fmt.Errorf("failed to build downstream client for cluster %q: %w", cluster.Name, err)
 	}
 
-	err = ensureNATGatewayWorkload(ctx, downstream, r.Image, nodeName, interfaceName)
+	err = ensureFabricManagerWorkload(ctx, downstream, r.Image, nodeName, interfaceName)
 	if err != nil {
 		return fmt.Errorf("failed to install nat gateway workload: %w", err)
 	}

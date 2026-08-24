@@ -1,0 +1,35 @@
+// Package fabricmanager implements kontinuum's "fabricmanager" cobra
+// command tree (currently just "fabricmanager run") — the workload
+// pkg/domain/fabric's own Fabric controller deploys onto a zone's elected
+// gateway node (see that package's ensureFabricManagerWorkload) as the
+// node-local agent for a zone's own network duties. Named for that growing
+// scope rather than "nat-gateway": NAT is the only thing it does today, but
+// DHCP and other per-zone network responsibilities are expected to land
+// here as further subcommands/flags later, not as a second, separately
+// named agent.
+//
+// This repo's own container image is distroless
+// (gcr.io/distroless/static-debian13, no shell, no nft(8) binary — see
+// Containerfile), so "run nft(8) as a subprocess" isn't an option for the
+// NAT piece; "run" instead programs the kernel's nftables ruleset directly
+// over netlink, via github.com/google/nftables — a pure Go client library
+// with no external binary or CGO dependency, matching this repo's
+// CGO_ENABLED=0 build.
+package fabricmanager
+
+import (
+	"github.com/spf13/cobra"
+)
+
+// NewCmd builds the fabricmanager command, which groups this node agent's
+// own subcommands.
+func NewCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "fabricmanager",
+		Short: "Run this node as a fabric zone's own network agent",
+	}
+
+	cmd.AddCommand(NewRunCmd())
+
+	return cmd
+}

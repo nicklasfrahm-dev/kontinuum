@@ -87,42 +87,81 @@ func dialAddress(inst v1alpha2.Instance) string {
 	return ""
 }
 
-// natGatewayNamespace is the namespace ensureNATGatewayWorkload installs
-// the NAT gateway workload into on a zone's own downstream cluster —
-// reuses v1alpha2.KontinuumSystemNamespace's own value directly, matching
-// pkg/domain/zone/workload.go's identical downstreamNamespace convention:
-// this is the same namespace that zone's own kontinuum-server Deployment
-// already lives in on this same downstream cluster.
-const natGatewayNamespace = v1alpha2.KontinuumSystemNamespace
+// fabricManagerNamespace is the namespace ensureFabricManagerWorkload
+// installs the fabric manager workload into on a zone's own downstream
+// cluster — reuses v1alpha2.KontinuumSystemNamespace's own value directly,
+// matching pkg/domain/zone/workload.go's identical downstreamNamespace
+// convention: this is the same namespace that zone's own kontinuum-server
+// Deployment already lives in on this same downstream cluster.
+const fabricManagerNamespace = v1alpha2.KontinuumSystemNamespace
 
-// natGatewayName names the Deployment/ServiceAccount ensureNATGatewayWorkload
-// upserts.
-const natGatewayName = "kontinuum-nat-gateway"
+// fabricManagerBaseName is the prefix every Deployment
+// ensureFabricManagerWorkload upserts is named from — see
+// fabricManagerDeploymentName's own doc for why the full name is scoped
+// per interface, not this bare prefix alone.
+const fabricManagerBaseName = "kontinuum-fabric-manager"
 
-// natGatewayNodeLabel is the well-known Kubernetes node label
-// ensureNATGatewayWorkload pins the workload's own nodeSelector to —
+// fabricManagerDeploymentName derives the interface-scoped Deployment name
+// ensureFabricManagerWorkload upserts. A gateway node terminating more than
+// one VLAN (a trunk port with several tagged sub-interfaces, each backing
+// a different zone's own Fabric) runs one fabricmanager process — and so
+// one Deployment — per interface, matching the identical per-interface
+// scoping pkg/cli/fabricmanager/nftables.go's own natTableName already
+// uses for the nftables side. Without this, a second Fabric electing the
+// very same node for a different interface would silently overwrite the
+// first Fabric's own Deployment (same static name, same Selector), taking
+// down that interface's own NAT gateway.
+func fabricManagerDeploymentName(interfaceName string) string {
+	return fabricManagerBaseName + "-" + sanitizeForK8sName(interfaceName)
+}
+
+// sanitizeForK8sName maps s onto a valid Kubernetes object name segment: a
+// VLAN sub-interface's own kernel name (e.g. "eth0.100") contains a "."
+// and uppercase letters aren't valid in a DNS-1123 label either, so
+// anything other than a lowercase ASCII letter, digit, or hyphen is
+// replaced with "-".
+func sanitizeForK8sName(s string) string {
+	var sanitized strings.Builder
+
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
+			sanitized.WriteRune(r)
+		default:
+			sanitized.WriteRune('-')
+		}
+	}
+
+	return sanitized.String()
+}
+
+// fabricManagerNodeLabel is the well-known Kubernetes node label
+// ensureFabricManagerWorkload pins the workload's own nodeSelector to —
 // Talos sets a node's own kubectl-visible hostname to its owning
 // Instance's own name (see pkg/domain/taloscluster/config.go's configBytes
 // doc), so this always resolves to exactly the elected gateway Instance.
-const natGatewayNodeLabel = "kubernetes.io/hostname"
+const fabricManagerNodeLabel = "kubernetes.io/hostname"
 
-// ensureNATGatewayWorkload upserts the NAT gateway Deployment on
+// ensureFabricManagerWorkload upserts the fabric manager Deployment on
 // downstream: a single replica, pinned via nodeSelector to nodeName,
-// running `kontinuum nat-gateway run --interface interfaceName` (see
-// pkg/cli/natgateway) — a small, privileged (CAP_NET_ADMIN only, every
-// other Linux capability dropped), host-network Pod, since programming the
-// kernel's nftables ruleset and toggling ipv4 forwarding both require
-// direct access to the node's own real network namespace, not this Pod's
-// isolated one.
-func ensureNATGatewayWorkload(
+// running `kontinuum fabricmanager run --interface interfaceName` (see
+// pkg/cli/fabricmanager — named for the node agent's own growing scope,
+// not just NAT: DHCP and other per-zone network duties are expected to
+// land as further fabricmanager subcommands/flags later) — a small,
+// privileged (CAP_NET_ADMIN only, every other Linux capability dropped),
+// host-network Pod, since programming the kernel's nftables ruleset and
+// toggling ipv4 forwarding both require direct access to the node's own
+// real network namespace, not this Pod's isolated one.
+func ensureFabricManagerWorkload(
 	ctx context.Context, downstream client.Client, image, nodeName, interfaceName string,
 ) error {
-	err := ensureNATGatewayNamespace(ctx, downstream)
+	err := ensureFabricManagerNamespace(ctx, downstream)
 	if err != nil {
 		return err
 	}
 
-	deployment := buildNATGatewayDeployment(image, nodeName, interfaceName)
+	deployment := buildFabricManagerDeployment(image, nodeName, interfaceName)
+	name := deployment.Name
 
 	err = downstream.Create(ctx, deployment)
 	if apierrors.IsAlreadyExists(err) {
@@ -130,35 +169,56 @@ func ensureNATGatewayWorkload(
 
 		err = downstream.Get(ctx, client.ObjectKeyFromObject(deployment), &existing)
 		if err != nil {
-			return fmt.Errorf("failed to fetch existing %q deployment: %w", natGatewayName, err)
+			return fmt.Errorf("failed to fetch existing %q deployment: %w", name, err)
 		}
 
 		existing.Spec = deployment.Spec
 
 		err = downstream.Update(ctx, &existing)
 		if err != nil {
-			return fmt.Errorf("failed to update %q deployment: %w", natGatewayName, err)
+			return fmt.Errorf("failed to update %q deployment: %w", name, err)
 		}
 
 		return nil
 	}
 
 	if err != nil {
-		return fmt.Errorf("failed to create %q deployment: %w", natGatewayName, err)
+		return fmt.Errorf("failed to create %q deployment: %w", name, err)
 	}
 
 	return nil
 }
 
-// ensureNATGatewayNamespace creates natGatewayNamespace on downstream if it
-// doesn't already exist — mirrors pkg/domain/zone/workload.go's identical
-// ensureNamespace; tolerated running twice (zone's own installWorkload
-// likely already created this same namespace) since both calls are
-// idempotent.
-func ensureNATGatewayNamespace(ctx context.Context, downstream client.Client) error {
-	err := downstream.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: natGatewayNamespace}})
+// deleteFabricManagerWorkload deletes interfaceName's own Deployment (see
+// fabricManagerDeploymentName), tolerating NotFound — used by teardown.go
+// when a Fabric is deleted. Deliberately leaves fabricManagerNamespace
+// itself (and any earlier interface/route config Talos already applied to
+// the node) alone: unlike zone.uninstallWorkload's own last step, this
+// namespace is shared with zone's own kontinuum-server Deployment (and
+// potentially a sibling interface's own fabricmanager Deployment too — see
+// fabricManagerDeploymentName's own doc), so deleting it here could take
+// those down too.
+func deleteFabricManagerWorkload(ctx context.Context, downstream client.Client, interfaceName string) error {
+	name := fabricManagerDeploymentName(interfaceName)
+	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: fabricManagerNamespace}}
+
+	err := client.IgnoreNotFound(downstream.Delete(ctx, deployment))
+	if err != nil {
+		return fmt.Errorf("failed to delete %q deployment: %w", name, err)
+	}
+
+	return nil
+}
+
+// ensureFabricManagerNamespace creates fabricManagerNamespace on downstream
+// if it doesn't already exist — mirrors pkg/domain/zone/workload.go's
+// identical ensureNamespace; tolerated running twice (zone's own
+// installWorkload likely already created this same namespace) since both
+// calls are idempotent.
+func ensureFabricManagerNamespace(ctx context.Context, downstream client.Client) error {
+	err := downstream.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: fabricManagerNamespace}})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("failed to ensure %q namespace: %w", natGatewayNamespace, err)
+		return fmt.Errorf("failed to ensure %q namespace: %w", fabricManagerNamespace, err)
 	}
 
 	return nil
@@ -182,22 +242,27 @@ func imagePullPolicy(image string) corev1.PullPolicy {
 	return corev1.PullAlways
 }
 
-// natGatewayLabels is the NAT gateway Deployment's own pod-template labels.
-func natGatewayLabels() map[string]string {
-	return map[string]string{"app.kubernetes.io/name": natGatewayName}
+// fabricManagerLabels is name's own Deployment's pod-template labels —
+// name already carries the interface (see fabricManagerDeploymentName),
+// so two Deployments for different interfaces on the same node never
+// share a Selector (which would otherwise let one Deployment's controller
+// adopt the other's Pods).
+func fabricManagerLabels(name string) map[string]string {
+	return map[string]string{"app.kubernetes.io/name": name}
 }
 
-// buildNATGatewayDeployment returns the desired NAT gateway Deployment —
-// see ensureNATGatewayWorkload's own doc for the full rationale behind its
-// shape.
-func buildNATGatewayDeployment(image, nodeName, interfaceName string) *appsv1.Deployment {
-	labels := natGatewayLabels()
+// buildFabricManagerDeployment returns the desired fabric manager
+// Deployment — see ensureFabricManagerWorkload's own doc for the full
+// rationale behind its shape.
+func buildFabricManagerDeployment(image, nodeName, interfaceName string) *appsv1.Deployment {
+	name := fabricManagerDeploymentName(interfaceName)
+	labels := fabricManagerLabels(name)
 	replicas := int32(1)
 	allowPrivilegeEscalation := false
 	readOnlyRootFilesystem := true
 
 	return &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: natGatewayName, Namespace: natGatewayNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: fabricManagerNamespace},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
@@ -206,12 +271,12 @@ func buildNATGatewayDeployment(image, nodeName, interfaceName string) *appsv1.De
 				Spec: corev1.PodSpec{
 					HostNetwork:  true,
 					DNSPolicy:    corev1.DNSClusterFirstWithHostNet,
-					NodeSelector: map[string]string{natGatewayNodeLabel: nodeName},
+					NodeSelector: map[string]string{fabricManagerNodeLabel: nodeName},
 					Containers: []corev1.Container{{
-						Name:            natGatewayName,
+						Name:            fabricManagerBaseName,
 						Image:           image,
 						ImagePullPolicy: imagePullPolicy(image),
-						Args:            []string{"nat-gateway", "run", "--interface", interfaceName},
+						Args:            []string{"fabricmanager", "run", "--interface", interfaceName},
 						SecurityContext: &corev1.SecurityContext{
 							AllowPrivilegeEscalation: &allowPrivilegeEscalation,
 							ReadOnlyRootFilesystem:   &readOnlyRootFilesystem,
