@@ -27,7 +27,7 @@ const (
 	// parse and the IPAM allocator (see Allocate) successfully carves a
 	// subnet for every currently live zone in spec.region — this fabric's
 	// own terminal gate, both directions mirrored onto ReadyConditionType
-	// (see setValidSpecCondition's own doc), since nothing else at the
+	// (see updateValidSpecCondition's own doc), since nothing else at the
 	// fabric level blocks Ready — per-zone gateway/NAT progress is tracked
 	// on each entry's own status.zones[].conditions instead (see
 	// GatewayNodeSelectedConditionType and friends), deliberately not
@@ -349,20 +349,20 @@ func (r *Reconciler) reconcileFabric(ctx context.Context, fabricObj *v1alpha2.Fa
 
 	allocations, err := Allocate(fabricObj.Spec.CIDR, fabricObj.Spec.ZonePrefixLength, liveZones, previous)
 	if err != nil {
-		return r.setValidSpecCondition(ctx, fabricObj, metav1.ConditionFalse, reasonInvalidSpec, err.Error())
+		conditionChanged := r.updateValidSpecCondition(fabricObj, metav1.ConditionFalse, reasonInvalidSpec, err.Error())
+
+		return r.persistZoneStatuses(ctx, fabricObj, conditionChanged, true)
 	}
 
 	newZones, zonesSettled := r.reconcileZoneStatuses(ctx, fabricObj, zonesByName, allocations)
 
-	changed := !equalZoneStatuses(fabricObj.Status.Zones, newZones)
+	zonesChanged := !equalZoneStatuses(fabricObj.Status.Zones, newZones)
 	fabricObj.Status.Zones = newZones
 
-	result, err := r.setValidSpecCondition(ctx, fabricObj, metav1.ConditionTrue, reasonValidSpec, "fabric spec is valid")
-	if err != nil {
-		return result, err
-	}
+	conditionChanged := r.updateValidSpecCondition(
+		fabricObj, metav1.ConditionTrue, reasonValidSpec, "fabric spec is valid")
 
-	return r.persistZoneStatuses(ctx, fabricObj, changed, zonesSettled)
+	return r.persistZoneStatuses(ctx, fabricObj, conditionChanged || zonesChanged, zonesSettled)
 }
 
 // listZonesForRegion lists every Zone in fabricObj's own namespace whose
@@ -802,14 +802,19 @@ func (r *Reconciler) installNATWorkload(
 	return nil
 }
 
-// setValidSpecCondition sets ValidSpecConditionType and mirrors it onto
+// updateValidSpecCondition sets ValidSpecConditionType and mirrors it onto
 // ReadyConditionType in both directions — this is Fabric's own only
 // blocking gate (see ValidSpecConditionType's own doc), the same "terminal
 // gate propagates both ways" reasoning as
-// zone.Reconciler.setRegistryJoinedCondition.
-func (r *Reconciler) setValidSpecCondition(
-	ctx context.Context, fabricObj *v1alpha2.Fabric, status metav1.ConditionStatus, reason, message string,
-) (ctrl.Result, error) {
+// zone.Reconciler.setRegistryJoinedCondition. In-memory only: reports
+// whether either condition actually changed, leaving the caller
+// (reconcileFabric) to persist it together with any status.zones change in
+// the very same pass, via one shared persistZoneStatuses call — rather
+// than this and persistZoneStatuses each running their own separate
+// Status().Update against the same object.
+func (r *Reconciler) updateValidSpecCondition(
+	fabricObj *v1alpha2.Fabric, status metav1.ConditionStatus, reason, message string,
+) bool {
 	specChanged := meta.SetStatusCondition(&fabricObj.Status.Conditions, metav1.Condition{
 		Type: ValidSpecConditionType, Status: status, Reason: reason, Message: message,
 	})
@@ -818,19 +823,7 @@ func (r *Reconciler) setValidSpecCondition(
 		Type: ReadyConditionType, Status: status, Reason: reason, Message: message,
 	})
 
-	changed := specChanged || readyChanged
-	if changed {
-		err := r.Client.Status().Update(ctx, fabricObj)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to update fabric %q status: %w", fabricObj.Name, err)
-		}
-	}
-
-	if status == metav1.ConditionFalse {
-		return ctrl.Result{}, nil
-	}
-
-	return ctrl.Result{}, nil
+	return specChanged || readyChanged
 }
 
 // persistZoneStatuses writes fabricObj's status.zones (already mutated by

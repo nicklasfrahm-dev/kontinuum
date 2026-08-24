@@ -22,6 +22,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
@@ -326,6 +327,52 @@ func TestReconcileCarvesSubnetAndSetsValidSpecReady(t *testing.T) {
 	assert.Equal(t, testBlockCIDR0GatewayIP, fabricObj.Status.Zones[0].GatewayIP)
 	assert.False(t,
 		meta.IsStatusConditionTrue(fabricObj.Status.Zones[0].Conditions, fabric.GatewayNodeSelectedConditionType))
+}
+
+// TestReconcileWritesStatusOnceWhenZonesAndConditionBothChange is a
+// regression test: reconcileFabric used to mutate fabricObj.Status.Zones,
+// then call setValidSpecCondition (whose own conditional Status().Update
+// already persisted that mutation alongside the condition change), then
+// call persistZoneStatuses, which wrote the identical, already-persisted
+// object a second time — a redundant Status().Update whenever both zones
+// and the ValidSpec/Ready condition changed in the same pass, as they do
+// on a Fabric's first successful reconcile (this test's own scenario,
+// shared with TestReconcileCarvesSubnetAndSetsValidSpecReady).
+func TestReconcileWritesStatusOnceWhenZonesAndConditionBothChange(t *testing.T) {
+	t.Parallel()
+
+	var statusUpdates int
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1alpha2.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, coordinationv1.AddToScheme(scheme))
+
+	hubClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&v1alpha2.Fabric{}).
+		WithObjects(testFabricObject(), testZoneObject(testZoneAName, "a")).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceUpdate: func(
+				ctx context.Context, cli client.Client, subResourceName string,
+				obj client.Object, opts ...client.SubResourceUpdateOption,
+			) error {
+				if subResourceName == "status" {
+					statusUpdates++
+				}
+
+				return cli.SubResource(subResourceName).Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{}, fakeDownstreamClientBuilder{})
+
+	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, statusUpdates,
+		"zones and the ValidSpec/Ready condition both changed in this one pass, so this must be a single write")
 }
 
 func TestReconcileInvalidSpecBlocksReadyWithNoRequeue(t *testing.T) {
