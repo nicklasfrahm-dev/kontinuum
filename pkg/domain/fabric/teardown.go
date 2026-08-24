@@ -60,14 +60,26 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, fabricObj *v1alpha2.
 // teardownZones tears down every zone's own NAT gateway workload — a zone
 // entry with no GatewayNodeRef never had one installed (either NAT was
 // disabled, or no candidate was ever resolved), so there's nothing to do
-// for it.
+// for it. Zones are listed once up front (see listZonesForRegion) rather
+// than once per zone, since teardownZoneWorkload only ever needs a single
+// lookup out of that same, unchanging map.
 func (r *Reconciler) teardownZones(ctx context.Context, fabricObj *v1alpha2.Fabric) error {
+	zonesByName, err := r.listZonesForRegion(ctx, fabricObj)
+	if err != nil {
+		return err
+	}
+
 	for _, zoneStatus := range fabricObj.Status.Zones {
 		if zoneStatus.GatewayNodeRef == nil {
 			continue
 		}
 
-		err := r.teardownZoneWorkload(ctx, fabricObj, zoneStatus)
+		zoneObj, found := zonesByName[zoneStatus.Zone]
+		if !found {
+			continue
+		}
+
+		err := r.teardownZoneWorkload(ctx, fabricObj, zoneObj, zoneStatus)
 		if err != nil {
 			return fmt.Errorf("zone %q: %w", zoneStatus.Zone, err)
 		}
@@ -83,20 +95,11 @@ func (r *Reconciler) teardownZones(ctx context.Context, fabricObj *v1alpha2.Fabr
 // zone.Reconciler.teardownDownstream already gives an unreachable
 // downstream during its own teardown.
 func (r *Reconciler) teardownZoneWorkload(
-	ctx context.Context, fabricObj *v1alpha2.Fabric, zoneStatus v1alpha2.FabricZoneStatus,
+	ctx context.Context, fabricObj *v1alpha2.Fabric, zoneObj v1alpha2.Zone, zoneStatus v1alpha2.FabricZoneStatus,
 ) error {
-	zoneObj, found, err := r.findZoneObject(ctx, fabricObj, zoneStatus.Zone)
-	if err != nil {
-		return err
-	}
-
-	if !found {
-		return nil
-	}
-
 	var cluster v1alpha2.TalosCluster
 
-	err = r.Client.Get(ctx, client.ObjectKey{Name: zoneObj.Name, Namespace: fabricObj.Namespace}, &cluster)
+	err := r.Client.Get(ctx, client.ObjectKey{Name: zoneObj.Name, Namespace: fabricObj.Namespace}, &cluster)
 	if apierrors.IsNotFound(err) {
 		return nil
 	}
@@ -147,24 +150,6 @@ func (r *Reconciler) teardownZoneWorkload(
 	}
 
 	return deleteFabricManagerWorkload(ctx, downstream, wan)
-}
-
-// findZoneObject finds the Zone object identifying zoneName within
-// fabricObj's own spec.region — see listZonesForRegion's own doc for why
-// this can't just be zoneStatus.Zone itself (the Zone object's own
-// metadata.name, needed to look up its TalosCluster, follows the
-// <region>-<zone> convention instead).
-func (r *Reconciler) findZoneObject(
-	ctx context.Context, fabricObj *v1alpha2.Fabric, zoneName string,
-) (v1alpha2.Zone, bool, error) {
-	zonesByName, err := r.listZonesForRegion(ctx, fabricObj)
-	if err != nil {
-		return v1alpha2.Zone{}, false, err
-	}
-
-	zoneObj, found := zonesByName[zoneName]
-
-	return zoneObj, found, nil
 }
 
 // teardownTimedOut reports whether fabricObj has been stuck in teardown for
