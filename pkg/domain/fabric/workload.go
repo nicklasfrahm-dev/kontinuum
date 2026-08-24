@@ -172,23 +172,35 @@ const fabricManagerBaseName = "kontinuum-fabric-manager"
 // first Fabric's own Deployment (same static name, same Selector), taking
 // down that interface's own NAT gateway.
 func fabricManagerDeploymentName(interfaceName string) string {
-	return fabricManagerBaseName + "-" + sanitizeForK8sName(interfaceName)
+	return fabricManagerBaseName + "-" + SanitizeForK8sName(interfaceName)
 }
 
-// sanitizeForK8sName maps s onto a valid Kubernetes object name segment: a
+// SanitizeForK8sName maps s onto a valid Kubernetes object name segment: a
 // VLAN sub-interface's own kernel name (e.g. "eth0.100") contains a "."
-// and uppercase letters aren't valid in a DNS-1123 label either, so
-// anything other than a lowercase ASCII letter, digit, or hyphen is
-// replaced with "-".
-func sanitizeForK8sName(s string) string {
+// and uppercase letters aren't valid in a DNS-1123 label either (case is
+// folded first, since real kernel interface names are lowercase already —
+// no information lost there), so any remaining byte other than a
+// lowercase ASCII letter or digit is escaped as "-" followed by its two
+// lowercase hex digits (e.g. "." becomes "-2e") — including a literal "-"
+// itself (escaped as "-2d"), so every "-" in the output unambiguously
+// starts an escape sequence. Collapsing every disallowed byte to the same
+// literal "-" (as an earlier version of this function did) let two
+// different interfaces collide onto the same name (e.g. "eth0.1" and
+// "eth0-1" both became "eth0-1"); this escaping is injective, so distinct
+// inputs always produce distinct outputs.
+func SanitizeForK8sName(s string) string {
 	var sanitized strings.Builder
 
-	for _, r := range strings.ToLower(s) {
+	lowered := strings.ToLower(s)
+
+	for i := range len(lowered) {
+		charByte := lowered[i]
+
 		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
-			sanitized.WriteRune(r)
+		case charByte >= 'a' && charByte <= 'z', charByte >= '0' && charByte <= '9':
+			sanitized.WriteByte(charByte)
 		default:
-			sanitized.WriteRune('-')
+			fmt.Fprintf(&sanitized, "-%02x", charByte)
 		}
 	}
 

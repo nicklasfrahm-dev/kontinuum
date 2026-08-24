@@ -64,22 +64,31 @@ func enableIPForwarding() error {
 // from iface — see natTablePrefix's own doc for why this is scoped per
 // interface rather than shared.
 func natTableName(iface string) string {
-	return natTablePrefix + "_" + sanitizeForTableName(iface)
+	return natTablePrefix + "_" + SanitizeForTableName(iface)
 }
 
-// sanitizeForTableName maps iface onto a valid nftables identifier: a VLAN
+// SanitizeForTableName maps iface onto a valid nftables identifier: a VLAN
 // sub-interface's own kernel name (e.g. "eth0.100") contains a "." nft
-// table/chain names don't reliably accept, so anything other than an
-// ASCII letter, digit, or underscore is replaced with "_".
-func sanitizeForTableName(iface string) string {
+// table/chain names don't reliably accept, so any byte other than an ASCII
+// letter or digit is escaped as "_" followed by its two lowercase hex
+// digits (e.g. "." becomes "_2e") — including a literal "_" itself
+// (escaped as "_5f"), so every "_" in the output unambiguously starts an
+// escape sequence. Collapsing every disallowed byte to the same literal
+// "_" (as an earlier version of this function did) let two different
+// interfaces collide onto the same table name (e.g. "eth0.1" and "eth0_1"
+// both became "eth0_1"); this escaping is injective, so distinct inputs
+// always produce distinct outputs.
+func SanitizeForTableName(iface string) string {
 	var sanitized strings.Builder
 
-	for _, r := range iface {
+	for i := range len(iface) {
+		charByte := iface[i]
+
 		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
-			sanitized.WriteRune(r)
+		case charByte >= 'a' && charByte <= 'z', charByte >= 'A' && charByte <= 'Z', charByte >= '0' && charByte <= '9':
+			sanitized.WriteByte(charByte)
 		default:
-			sanitized.WriteRune('_')
+			fmt.Fprintf(&sanitized, "_%02x", charByte)
 		}
 	}
 
