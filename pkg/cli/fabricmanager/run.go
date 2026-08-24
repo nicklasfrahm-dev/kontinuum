@@ -18,6 +18,8 @@ import (
 // duties (DHCP, ...) are expected to extend this same command with more
 // flags, not spawn a second, separately named one.
 func NewRunCmd() *cobra.Command {
+	var fabricID string
+
 	var iface string
 
 	cmd := &cobra.Command{
@@ -31,18 +33,23 @@ func NewRunCmd() *cobra.Command {
 			"graceful shutdown.",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runFabricManager(cmd.Context(), iface)
+			return runFabricManager(cmd.Context(), fabricID, iface)
 		},
 	}
 
+	cmd.Flags().StringVar(&fabricID, "id", "",
+		"Owning Fabric's own metadata.name, scoping this process's nftables table so it "+
+			"never collides with a different Fabric electing the same node/interface")
 	cmd.Flags().StringVar(&iface, "interface", "", "Uplink network interface to masquerade outbound traffic through")
 
-	err := cmd.MarkFlagRequired("interface")
-	if err != nil {
-		// Only reachable if the flag name above is misspelled — a defect in
-		// this file itself, not a condition any caller could meaningfully
-		// recover from.
-		panic(fmt.Sprintf("failed to mark --interface required: %v", err))
+	for _, name := range []string{"id", "interface"} {
+		err := cmd.MarkFlagRequired(name)
+		if err != nil {
+			// Only reachable if a flag name above is misspelled — a defect
+			// in this file itself, not a condition any caller could
+			// meaningfully recover from.
+			panic(fmt.Sprintf("failed to mark --%s required: %v", name, err))
+		}
 	}
 
 	return cmd
@@ -51,7 +58,7 @@ func NewRunCmd() *cobra.Command {
 // runFabricManager enables ipv4 forwarding, installs the masquerade rule,
 // then blocks until ctx is canceled or a termination signal is received —
 // mirrors pkg/cli.runServe's own signal-handling shape.
-func runFabricManager(ctx context.Context, iface string) error {
+func runFabricManager(ctx context.Context, fabricID, iface string) error {
 	logger := logging.New(slog.LevelInfo, logging.FormatJSON, os.Stdout)
 
 	err := enableIPForwarding()
@@ -59,12 +66,12 @@ func runFabricManager(ctx context.Context, iface string) error {
 		return fmt.Errorf("failed to enable ipv4 forwarding: %w", err)
 	}
 
-	err = ensureMasquerade(iface)
+	err = ensureMasquerade(fabricID, iface)
 	if err != nil {
 		return fmt.Errorf("failed to configure nftables masquerade rule: %w", err)
 	}
 
-	logger.Info("NAT gateway configured", "interface", iface)
+	logger.Info("NAT gateway configured", "fabric", fabricID, "interface", iface)
 
 	sigChan := make(chan os.Signal, 1)
 
@@ -78,7 +85,7 @@ func runFabricManager(ctx context.Context, iface string) error {
 		logger.Info("Context canceled, shutting down")
 	}
 
-	err = deleteMasquerade(iface)
+	err = deleteMasquerade(fabricID, iface)
 	if err != nil {
 		logger.Warn("Failed to remove nftables masquerade rule on shutdown", "error", err)
 	}

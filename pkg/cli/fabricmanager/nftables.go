@@ -11,7 +11,7 @@ import (
 
 // natTablePrefix and postroutingChainName name the ip-family table/chain
 // this package owns exclusively. The table itself is named
-// natTablePrefix+"_"+<sanitized interface name> (see natTableName), not a
+// natTablePrefix+"_"+<sanitized interface name> (see NATTableName), not a
 // single fixed name shared by every interface — a gateway node terminating
 // more than one VLAN (a trunk port with several tagged sub-interfaces,
 // each backing a different zone's own Fabric) runs one fabricmanager
@@ -60,11 +60,21 @@ func enableIPForwarding() error {
 	return nil
 }
 
-// natTableName derives this process's own exclusively-owned table name
-// from iface — see natTablePrefix's own doc for why this is scoped per
-// interface rather than shared.
-func natTableName(iface string) string {
-	return natTablePrefix + "_" + SanitizeForTableName(iface)
+// NATTableName derives this process's own exclusively-owned table name
+// from fabricID (the owning Fabric's own metadata.name) and iface — see
+// natTablePrefix's own doc for why this is scoped per interface, and
+// fabricID's own doc (passed down from --id) for why per-interface scoping
+// alone isn't enough: nothing stops two different Fabric objects from
+// electing the same gateway node for the same interface. The sanitized
+// fabricID segment is length-prefixed so its boundary with the sanitized
+// interface segment is unambiguous — without that, two different
+// (fabricID, iface) pairs could still combine into the identical table
+// name (e.g. fabricID "eu" + iface "1_eth0" vs fabricID "eu_1" + iface
+// "eth0").
+func NATTableName(fabricID, iface string) string {
+	sanitizedID := SanitizeForTableName(fabricID)
+
+	return fmt.Sprintf("%s_%d_%s_%s", natTablePrefix, len(sanitizedID), sanitizedID, SanitizeForTableName(iface))
 }
 
 // SanitizeForTableName maps iface onto a valid nftables identifier: a VLAN
@@ -95,7 +105,7 @@ func SanitizeForTableName(iface string) string {
 	return sanitized.String()
 }
 
-// ensureMasquerade (re)creates iface's own table (see natTableName) from
+// ensureMasquerade (re)creates iface's own table (see NATTableName) from
 // scratch with one rule: masquerade every packet leaving iface — the
 // standard, simplest possible NAT gateway rule (`nft add rule nat
 // postrouting oifname $iface masquerade`), the same shape as the nftables
@@ -120,18 +130,18 @@ func SanitizeForTableName(iface string) string {
 // ever matches traffic leaving through iface — this node's own uplink/VLAN
 // interface — never a CNI's own overlay/virtual interfaces (cilium_host,
 // lxc*, ...), so pod-to-pod (east-west) traffic never reaches it at all.
-func ensureMasquerade(iface string) error {
+func ensureMasquerade(fabricID, iface string) error {
 	conn, err := nftables.New()
 	if err != nil {
 		return fmt.Errorf("failed to open nftables connection: %w", err)
 	}
 
-	err = queueDeleteExistingTable(conn, iface)
+	err = queueDeleteExistingTable(conn, fabricID, iface)
 	if err != nil {
 		return err
 	}
 
-	table := conn.AddTable(&nftables.Table{Family: nftables.TableFamilyIPv4, Name: natTableName(iface)})
+	table := conn.AddTable(&nftables.Table{Family: nftables.TableFamilyIPv4, Name: NATTableName(fabricID, iface)})
 
 	chain := conn.AddChain(&nftables.Chain{
 		Name:     postroutingChainName,
@@ -162,42 +172,42 @@ func ensureMasquerade(iface string) error {
 	return nil
 }
 
-// deleteMasquerade removes iface's own table (see natTableName), tolerating
+// deleteMasquerade removes iface's own table (see NATTableName), tolerating
 // it already being gone.
-func deleteMasquerade(iface string) error {
+func deleteMasquerade(fabricID, iface string) error {
 	conn, err := nftables.New()
 	if err != nil {
 		return fmt.Errorf("failed to open nftables connection: %w", err)
 	}
 
-	err = queueDeleteExistingTable(conn, iface)
+	err = queueDeleteExistingTable(conn, fabricID, iface)
 	if err != nil {
 		return err
 	}
 
 	err = conn.Flush()
 	if err != nil {
-		return fmt.Errorf("failed to remove existing %q table: %w", natTableName(iface), err)
+		return fmt.Errorf("failed to remove existing %q table: %w", NATTableName(fabricID, iface), err)
 	}
 
 	return nil
 }
 
 // queueDeleteExistingTable queues a delete of iface's own table (see
-// natTableName), if it currently exists, onto conn — without flushing.
+// NATTableName), if it currently exists, onto conn — without flushing.
 // ensureMasquerade queues its own replacement table/chain/rule right after
 // calling this and flushes both together in one atomic transaction (see
 // its own doc); deleteMasquerade flushes this alone, as the only thing in
 // its own batch. Only ever matches this exact, interface-scoped table
 // name — see natTablePrefix's own doc for why that matters both for
 // multi-VLAN safety and for never touching the CNI's own tables.
-func queueDeleteExistingTable(conn *nftables.Conn, iface string) error {
+func queueDeleteExistingTable(conn *nftables.Conn, fabricID, iface string) error {
 	tables, err := conn.ListTablesOfFamily(nftables.TableFamilyIPv4)
 	if err != nil {
 		return fmt.Errorf("failed to list existing ipv4 tables: %w", err)
 	}
 
-	name := natTableName(iface)
+	name := NATTableName(fabricID, iface)
 
 	for _, table := range tables {
 		if table.Name == name {

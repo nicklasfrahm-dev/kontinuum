@@ -122,7 +122,7 @@ func (r *Reconciler) teardownZoneWorkload(
 	}
 
 	// The Deployment's own name is scoped by its own WAN interface (see
-	// fabricManagerDeploymentName's own doc) — reconstructing it needs the
+	// ManagerDeploymentName's own doc) — reconstructing it needs the
 	// same classifyGatewayInterfaces result reconcileNetworkConfig
 	// originally used. A gateway Instance already gone by teardown time
 	// means there's no way left to know which interface-scoped Deployment
@@ -149,7 +149,7 @@ func (r *Reconciler) teardownZoneWorkload(
 		return nil
 	}
 
-	return deleteFabricManagerWorkload(ctx, downstream, wan)
+	return deleteFabricManagerWorkload(ctx, downstream, fabricObj.Name, wan)
 }
 
 // teardownTimedOut reports whether fabricObj has been stuck in teardown for

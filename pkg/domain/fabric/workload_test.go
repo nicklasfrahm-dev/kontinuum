@@ -26,3 +26,15 @@ func TestSanitizeForK8sNameLowersCaseAndEscapesDisallowedBytes(t *testing.T) {
 	assert.Equal(t, "eth0-2e1", fabric.SanitizeForK8sName("eth0.1"))
 	assert.Equal(t, "eth0-2d1", fabric.SanitizeForK8sName("eth0-1"))
 }
+
+// TestManagerDeploymentNameDoesNotCollideAcrossFabrics is a
+// regression test: an earlier version scoped the Deployment name by
+// interface alone, so two different Fabric objects (nothing enforces
+// uniqueness on spec.region) electing the same gateway node for the same
+// interface would race to own the identical Deployment.
+func TestManagerDeploymentNameDoesNotCollideAcrossFabrics(t *testing.T) {
+	t.Parallel()
+
+	assert.NotEqual(t,
+		fabric.ManagerDeploymentName("fabric-a", "eth0"), fabric.ManagerDeploymentName("fabric-b", "eth0"))
+}

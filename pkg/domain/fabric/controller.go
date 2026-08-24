@@ -585,7 +585,7 @@ func (r *Reconciler) reconcileNATForGatewayNode(
 
 	natOK := false
 	if networkOK {
-		natOK = r.reconcileNATWorkload(ctx, &cluster, gatewayNode, wan, entry)
+		natOK = r.reconcileNATWorkload(ctx, &cluster, gatewayNode, fabricObj.Name, wan, entry)
 	}
 
 	switch {
@@ -757,9 +757,9 @@ func (r *Reconciler) pushNetworkConfig(
 // already succeeded (see reconcileZoneEntry).
 func (r *Reconciler) reconcileNATWorkload(
 	ctx context.Context, cluster *v1alpha2.TalosCluster, gatewayNode *v1alpha2.Instance,
-	wanInterface string, target *v1alpha2.FabricZoneStatus,
+	fabricID, wanInterface string, target *v1alpha2.FabricZoneStatus,
 ) bool {
-	err := r.installNATWorkload(ctx, cluster, gatewayNode.Name, wanInterface)
+	err := r.installNATWorkload(ctx, cluster, gatewayNode.Name, fabricID, wanInterface)
 	if err != nil {
 		r.Logger.Warn("failed to install nat gateway workload",
 			"cluster", cluster.Name, "zone", target.Zone, "node", gatewayNode.Name, "error", err)
@@ -782,7 +782,7 @@ func (r *Reconciler) reconcileNATWorkload(
 // installNATWorkload does the actual work reconcileNATWorkload reports the
 // outcome of.
 func (r *Reconciler) installNATWorkload(
-	ctx context.Context, cluster *v1alpha2.TalosCluster, nodeName, interfaceName string,
+	ctx context.Context, cluster *v1alpha2.TalosCluster, nodeName, fabricID, interfaceName string,
 ) error {
 	kubeconfig, err := loadClusterKubeconfig(ctx, r.Client, cluster)
 	if err != nil {
@@ -794,7 +794,7 @@ func (r *Reconciler) installNATWorkload(
 		return fmt.Errorf("failed to build downstream client for cluster %q: %w", cluster.Name, err)
 	}
 
-	err = ensureFabricManagerWorkload(ctx, downstream, r.Image, nodeName, interfaceName)
+	err = ensureFabricManagerWorkload(ctx, downstream, r.Image, nodeName, fabricID, interfaceName)
 	if err != nil {
 		return fmt.Errorf("failed to install nat gateway workload: %w", err)
 	}

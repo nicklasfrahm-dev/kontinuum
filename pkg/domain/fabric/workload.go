@@ -157,22 +157,33 @@ const fabricManagerNamespace = v1alpha2.KontinuumSystemNamespace
 
 // fabricManagerBaseName is the prefix every Deployment
 // ensureFabricManagerWorkload upserts is named from — see
-// fabricManagerDeploymentName's own doc for why the full name is scoped
+// ManagerDeploymentName's own doc for why the full name is scoped
 // per interface, not this bare prefix alone.
 const fabricManagerBaseName = "kontinuum-fabric-manager"
 
-// fabricManagerDeploymentName derives the interface-scoped Deployment name
-// ensureFabricManagerWorkload upserts. A gateway node terminating more than
-// one VLAN (a trunk port with several tagged sub-interfaces, each backing
-// a different zone's own Fabric) runs one fabricmanager process — and so
-// one Deployment — per interface, matching the identical per-interface
-// scoping pkg/cli/fabricmanager/nftables.go's own natTableName already
-// uses for the nftables side. Without this, a second Fabric electing the
-// very same node for a different interface would silently overwrite the
-// first Fabric's own Deployment (same static name, same Selector), taking
-// down that interface's own NAT gateway.
-func fabricManagerDeploymentName(interfaceName string) string {
-	return fabricManagerBaseName + "-" + SanitizeForK8sName(interfaceName)
+// ManagerDeploymentName derives the Fabric- and interface-scoped
+// Deployment name ensureFabricManagerWorkload upserts. A gateway node
+// terminating more than one VLAN (a trunk port with several tagged
+// sub-interfaces, each backing a different zone's own Fabric) runs one
+// fabricmanager process — and so one Deployment — per interface, matching
+// the identical per-interface scoping pkg/cli/fabricmanager/nftables.go's
+// own NATTableName already uses for the nftables side. Scoping by
+// interface alone isn't enough, though: nothing enforces uniqueness on
+// spec.region, so two different Fabric objects could both elect the same
+// node for the same interface and race to own the identical Deployment
+// name (same static name, same Selector), each silently overwriting the
+// other's and taking down that interface's own NAT gateway. fabricID (the
+// owning Fabric's own metadata.name) closes that gap. The sanitized
+// fabricID segment is length-prefixed so its boundary with the sanitized
+// interface segment is unambiguous — without that, two different
+// (fabricID, interfaceName) pairs could still combine into the identical
+// name (e.g. fabricID "eu" + interface "1-eth0" vs fabricID "eu-1" +
+// interface "eth0").
+func ManagerDeploymentName(fabricID, interfaceName string) string {
+	sanitizedID := SanitizeForK8sName(fabricID)
+
+	return fmt.Sprintf(
+		"%s-%d-%s-%s", fabricManagerBaseName, len(sanitizedID), sanitizedID, SanitizeForK8sName(interfaceName))
 }
 
 // SanitizeForK8sName maps s onto a valid Kubernetes object name segment: a
@@ -225,14 +236,14 @@ const fabricManagerNodeLabel = "kubernetes.io/hostname"
 // toggling ipv4 forwarding both require direct access to the node's own
 // real network namespace, not this Pod's isolated one.
 func ensureFabricManagerWorkload(
-	ctx context.Context, downstream client.Client, image, nodeName, interfaceName string,
+	ctx context.Context, downstream client.Client, image, nodeName, fabricID, interfaceName string,
 ) error {
 	err := ensureFabricManagerNamespace(ctx, downstream)
 	if err != nil {
 		return err
 	}
 
-	deployment := buildFabricManagerDeployment(image, nodeName, interfaceName)
+	deployment := buildFabricManagerDeployment(image, nodeName, fabricID, interfaceName)
 	name := deployment.Name
 
 	err = downstream.Create(ctx, deployment)
@@ -262,16 +273,16 @@ func ensureFabricManagerWorkload(
 }
 
 // deleteFabricManagerWorkload deletes interfaceName's own Deployment (see
-// fabricManagerDeploymentName), tolerating NotFound — used by teardown.go
+// ManagerDeploymentName), tolerating NotFound — used by teardown.go
 // when a Fabric is deleted. Deliberately leaves fabricManagerNamespace
 // itself (and any earlier interface/route config Talos already applied to
 // the node) alone: unlike zone.uninstallWorkload's own last step, this
 // namespace is shared with zone's own kontinuum-server Deployment (and
 // potentially a sibling interface's own fabricmanager Deployment too — see
-// fabricManagerDeploymentName's own doc), so deleting it here could take
+// ManagerDeploymentName's own doc), so deleting it here could take
 // those down too.
-func deleteFabricManagerWorkload(ctx context.Context, downstream client.Client, interfaceName string) error {
-	name := fabricManagerDeploymentName(interfaceName)
+func deleteFabricManagerWorkload(ctx context.Context, downstream client.Client, fabricID, interfaceName string) error {
+	name := ManagerDeploymentName(fabricID, interfaceName)
 	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: fabricManagerNamespace}}
 
 	err := client.IgnoreNotFound(downstream.Delete(ctx, deployment))
@@ -315,7 +326,7 @@ func imagePullPolicy(image string) corev1.PullPolicy {
 }
 
 // fabricManagerLabels is name's own Deployment's pod-template labels —
-// name already carries the interface (see fabricManagerDeploymentName),
+// name already carries the interface (see ManagerDeploymentName),
 // so two Deployments for different interfaces on the same node never
 // share a Selector (which would otherwise let one Deployment's controller
 // adopt the other's Pods).
@@ -326,8 +337,8 @@ func fabricManagerLabels(name string) map[string]string {
 // buildFabricManagerDeployment returns the desired fabric manager
 // Deployment — see ensureFabricManagerWorkload's own doc for the full
 // rationale behind its shape.
-func buildFabricManagerDeployment(image, nodeName, interfaceName string) *appsv1.Deployment {
-	name := fabricManagerDeploymentName(interfaceName)
+func buildFabricManagerDeployment(image, nodeName, fabricID, interfaceName string) *appsv1.Deployment {
+	name := ManagerDeploymentName(fabricID, interfaceName)
 	labels := fabricManagerLabels(name)
 	replicas := int32(1)
 	allowPrivilegeEscalation := false
@@ -348,7 +359,7 @@ func buildFabricManagerDeployment(image, nodeName, interfaceName string) *appsv1
 						Name:            fabricManagerBaseName,
 						Image:           image,
 						ImagePullPolicy: imagePullPolicy(image),
-						Args:            []string{"fabricmanager", "run", "--interface", interfaceName},
+						Args:            []string{"fabricmanager", "run", "--id", fabricID, "--interface", interfaceName},
 						SecurityContext: &corev1.SecurityContext{
 							AllowPrivilegeEscalation: &allowPrivilegeEscalation,
 							ReadOnlyRootFilesystem:   &readOnlyRootFilesystem,

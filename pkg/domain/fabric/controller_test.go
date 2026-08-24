@@ -162,11 +162,14 @@ func testGatewayInstance(name, zone string) *v1alpha2.Instance {
 
 // testFabricManagerName/testFabricManagerNamespace mirror what
 // pkg/domain/fabric/workload.go's own unexported
-// fabricManagerDeploymentName("eth0")/fabricManagerNamespace resolve to for
-// every teardown fixture's own gateway node (see testGatewayInstance,
-// always given interface "eth0") — the teardown tests assert against these
-// local copies rather than a literal repeated at every call site.
-const testFabricManagerName = "kontinuum-fabric-manager-eth0"
+// ManagerDeploymentName(testFabricName, "eth0")/fabricManagerNamespace
+// resolve to for every teardown fixture's own gateway node (see
+// testGatewayInstance, always given interface "eth0") — the teardown tests
+// assert against these local copies rather than a literal repeated at every
+// call site. SanitizeForK8sName(testFabricName) is "eu-2dfabric" (its own
+// "-" escaped to "-2d"), 11 bytes long, hence the "-11-" length prefix (see
+// ManagerDeploymentName's own doc for why that prefix exists).
+const testFabricManagerName = "kontinuum-fabric-manager-11-eu-2dfabric-eth0"
 
 func testFabricManagerNamespace() string { return v1alpha2.KontinuumSystemNamespace }
 
