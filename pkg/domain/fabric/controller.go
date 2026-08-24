@@ -455,17 +455,22 @@ func (r *Reconciler) reconcileZoneEntry(
 ) {
 	previousGatewayNodeRef := entry.GatewayNodeRef
 
-	gatewayNode, ok := r.recordGatewayNodeSelection(ctx, fabricObj, entry, zoneObj.Spec.Zone)
+	gatewayNode, resolved := r.recordGatewayNodeSelection(ctx, fabricObj, entry, zoneObj.Spec.Zone)
 
 	r.teardownStaleGatewayNode(ctx, fabricObj, zoneObj, entry.Zone, previousGatewayNodeRef, entry.GatewayNodeRef)
 
-	if !ok {
-		return
-	}
-
+	// Checked before the !resolved return below: NAT is the only thing a
+	// resolved gateway node is used for today, so a zone with NAT disabled
+	// must not stay stuck NotReady just because no gateway candidate
+	// exists — see setZoneReadyCondition already called for the
+	// !resolved cases above, which this deliberately overrides.
 	if fabricObj.Spec.NAT.Disabled {
 		setZoneReadyCondition(entry, true, reasonNATDisabled, "nat is disabled for this fabric")
 
+		return
+	}
+
+	if !resolved {
 		return
 	}
 

@@ -466,6 +466,37 @@ func TestReconcileSkipsNetworkAndNATWhenDisabled(t *testing.T) {
 		zoneStatus.Conditions, fabric.NetworkConfiguredConditionType, metav1.ConditionTrue))
 }
 
+// TestReconcileNATDisabledZoneReadyWithNoGatewayCandidate is a regression
+// test: the spec.nat.disabled check used to run after recordGatewayNodeSelection
+// already returned early on failure, so a zone with NAT disabled and no
+// gateway candidate at all could never become Ready — even though NAT is
+// the only thing that selector's outcome is used for.
+func TestReconcileNATDisabledZoneReadyWithNoGatewayCandidate(t *testing.T) {
+	t.Parallel()
+
+	fabricObj := testFabricObject()
+	fabricObj.Spec.NAT.Disabled = true
+
+	hubClient := newHubFakeClient(t, fabricObj, testZoneObject(testZoneAName, "a"))
+
+	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{}, fakeDownstreamClientBuilder{})
+
+	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, result, "nat disabled: no gateway candidate is not a reason to keep retrying")
+
+	var updated v1alpha2.Fabric
+
+	require.NoError(t, hubClient.Get(t.Context(), fabricObjectKey(), &updated))
+	require.Len(t, updated.Status.Zones, 1)
+
+	zoneStatus := updated.Status.Zones[0]
+	assert.False(t, meta.IsStatusConditionTrue(zoneStatus.Conditions, fabric.GatewayNodeSelectedConditionType),
+		"no candidate exists, so this must genuinely stay false")
+	assert.True(t, meta.IsStatusConditionTrue(zoneStatus.Conditions, fabric.ZoneReadyConditionType),
+		"nat disabled means the missing gateway candidate must not block readiness")
+}
+
 func TestReconcileNoGatewayCandidateOnlyBlocksThatZone(t *testing.T) {
 	t.Parallel()
 
