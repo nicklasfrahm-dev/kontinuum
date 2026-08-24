@@ -233,7 +233,10 @@ func (f fakeDownstreamClientBuilder) Build(_ []byte) (client.Client, error) {
 	return f.client, nil
 }
 
-var errTestDownstreamBuild = errors.New("downstream build failed")
+var (
+	errTestDownstreamBuild = errors.New("downstream build failed")
+	errTestNodeUnreachable = errors.New("node unreachable")
+)
 
 func newHubFakeClient(t *testing.T, objects ...client.Object) client.Client {
 	t.Helper()
@@ -784,4 +787,38 @@ func TestReconcilePersistsConditionTransitionOnAlreadyKnownZone(t *testing.T) {
 		"the False->True transition must actually be written to the API server, not just computed in memory")
 	assert.True(t, meta.IsStatusConditionTrue(persisted.Status.Zones[0].Conditions, fabric.ZoneReadyConditionType),
 		"the False->True transition must actually be written to the API server, not just computed in memory")
+}
+
+// TestReconcileKeepsPreviousGatewayInterfacesWhenNetworkConfigPushFails is a
+// regression test: reconcileZoneStatuses used to start each zone's own
+// GatewayInterfaces from zero every reconcile, relying entirely on
+// reconcileNetworkConfig to repopulate it on success. When a later reconcile's
+// own network config push transiently fails (node unreachable, secrets bundle
+// missing), that left status.zones[].gatewayInterfaces empty even though the
+// gateway address is still actually assigned to those interfaces from a prior,
+// successful push — an incorrect status regression, not a reflection of
+// reality. GatewayInterfaces must be carried forward from the previous status
+// by default, the same way GatewayNodeRef already is.
+func TestReconcileKeepsPreviousGatewayInterfacesWhenNetworkConfigPushFails(t *testing.T) {
+	t.Parallel()
+
+	downstream := newDownstreamFakeClient(t)
+	fabricObj := testAlreadyKnownZoneFabricObject()
+
+	hubClient := newHubFakeClient(t,
+		fabricObj, testZoneObject(testZoneAName, "a"), testTalosCluster(testZoneAName), talosClusterSecret(t, testZoneAName),
+		testGatewayInstance("node-a1", "a"))
+
+	failingConfigurer := fakeNetworkConfigurer{err: errTestNodeUnreachable}
+	reconciler := newReconciler(hubClient, failingConfigurer, fakeDownstreamClientBuilder{client: downstream})
+
+	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	var persisted v1alpha2.Fabric
+
+	require.NoError(t, hubClient.Get(t.Context(), fabricObjectKey(), &persisted))
+	require.Len(t, persisted.Status.Zones, 1)
+	assert.Equal(t, []string{testFabricInterface}, persisted.Status.Zones[0].GatewayInterfaces,
+		"a transient network config push failure must not wipe out the previously recorded gateway interfaces")
 }

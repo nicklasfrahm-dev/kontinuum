@@ -414,6 +414,7 @@ func (r *Reconciler) reconcileZoneStatuses(
 		entry := v1alpha2.FabricZoneStatus{Zone: alloc.Zone, CIDR: alloc.CIDR, GatewayIP: alloc.GatewayIP}
 		if hadPrevious {
 			entry.GatewayNodeRef = previous.GatewayNodeRef
+			entry.GatewayInterfaces = previous.GatewayInterfaces
 			// A plain slice assignment here would alias the same backing
 			// array as fabricObj.Status.Zones[i].Conditions — the "before"
 			// snapshot equalZoneStatuses compares against below. meta.
