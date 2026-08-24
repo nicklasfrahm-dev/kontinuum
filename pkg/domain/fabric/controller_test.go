@@ -822,3 +822,47 @@ func TestReconcileKeepsPreviousGatewayInterfacesWhenNetworkConfigPushFails(t *te
 	assert.Equal(t, []string{testFabricInterface}, persisted.Status.Zones[0].GatewayInterfaces,
 		"a transient network config push failure must not wipe out the previously recorded gateway interfaces")
 }
+
+// TestReconcileTearsDownStaleGatewayNodeOnReElection is a regression test:
+// re-electing a zone's own gateway node (its previous pick stopped matching
+// spec.gatewaySelector — see resolveGatewayNode) used to leave the old
+// node's own nat gateway Deployment running forever on its downstream
+// cluster, orphaned and still masquerading traffic nobody expects it to.
+// NAT is disabled here so the newly elected node never gets its own
+// Deployment installed (which would otherwise collide by name with the
+// stale one, both testGatewayInstance fixtures sharing the same "eth0"
+// WAN interface) — isolating the assertion to the stale teardown alone.
+func TestReconcileTearsDownStaleGatewayNodeOnReElection(t *testing.T) {
+	t.Parallel()
+
+	fabricObj := testAlreadyKnownZoneFabricObject()
+	fabricObj.Spec.NAT.Disabled = true
+
+	staleNode := testGatewayInstance("node-a1", "a")
+	delete(staleNode.Labels, testGatewayLabel)
+
+	downstream := newDownstreamFakeClient(t, fabricManagerDeployment())
+	hubClient := newHubFakeClient(t,
+		fabricObj, testZoneObject(testZoneAName, "a"), testTalosCluster(testZoneAName), talosClusterSecret(t, testZoneAName),
+		staleNode, testGatewayInstance("node-a2", "a"))
+
+	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{}, fakeDownstreamClientBuilder{client: downstream})
+
+	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	var persisted v1alpha2.Fabric
+
+	require.NoError(t, hubClient.Get(t.Context(), fabricObjectKey(), &persisted))
+	require.Len(t, persisted.Status.Zones, 1)
+	require.NotNil(t, persisted.Status.Zones[0].GatewayNodeRef)
+	assert.Equal(t, "node-a2", persisted.Status.Zones[0].GatewayNodeRef.Name,
+		"node-a1 no longer matches the gateway selector, so node-a2 must be elected instead")
+
+	var deployment appsv1.Deployment
+
+	deploymentKey := client.ObjectKey{Name: testFabricManagerName, Namespace: testFabricManagerNamespace()}
+	err = downstream.Get(t.Context(), deploymentKey, &deployment)
+	assert.True(t, apierrors.IsNotFound(err),
+		"the stale gateway node's own nat workload must be torn down once it's no longer elected")
+}

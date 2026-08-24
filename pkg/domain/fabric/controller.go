@@ -453,7 +453,12 @@ func (r *Reconciler) reconcileZoneStatuses(
 func (r *Reconciler) reconcileZoneEntry(
 	ctx context.Context, fabricObj *v1alpha2.Fabric, zoneObj v1alpha2.Zone, entry *v1alpha2.FabricZoneStatus,
 ) {
+	previousGatewayNodeRef := entry.GatewayNodeRef
+
 	gatewayNode, ok := r.recordGatewayNodeSelection(ctx, fabricObj, entry, zoneObj.Spec.Zone)
+
+	r.teardownStaleGatewayNode(ctx, fabricObj, zoneObj, entry.Zone, previousGatewayNodeRef, entry.GatewayNodeRef)
+
 	if !ok {
 		return
 	}
@@ -465,6 +470,31 @@ func (r *Reconciler) reconcileZoneEntry(
 	}
 
 	r.reconcileNATForGatewayNode(ctx, fabricObj, zoneObj, gatewayNode, entry)
+}
+
+// teardownStaleGatewayNode tears down previousRef's own nat gateway
+// workload if this reconcile just replaced it with a different node (or no
+// node at all) — otherwise a re-elected gateway node leaves the old one's
+// nat-masquerade workload running forever, orphaned and still forwarding
+// traffic nobody expects it to. A nil previousRef, or one that still
+// matches the newly resolved node, means nothing changed — the common
+// case, checked first so the (idempotent, but not free) teardown attempt
+// below only runs on an actual re-election.
+func (r *Reconciler) teardownStaleGatewayNode(
+	ctx context.Context, fabricObj *v1alpha2.Fabric, zoneObj v1alpha2.Zone,
+	zoneName string, previousRef, currentRef *v1alpha2.ObjectReference,
+) {
+	if previousRef == nil || (currentRef != nil && currentRef.Name == previousRef.Name) {
+		return
+	}
+
+	staleStatus := v1alpha2.FabricZoneStatus{Zone: zoneName, GatewayNodeRef: previousRef}
+
+	err := r.teardownZoneWorkload(ctx, fabricObj, zoneObj, staleStatus)
+	if err != nil {
+		r.Logger.Warn("failed to tear down stale gateway node's nat workload",
+			"fabric", fabricObj.Name, "zone", zoneName, "node", previousRef.Name, "error", err)
+	}
 }
 
 // recordGatewayNodeSelection resolves entry's own gateway node (see
