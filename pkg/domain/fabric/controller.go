@@ -414,7 +414,17 @@ func (r *Reconciler) reconcileZoneStatuses(
 		entry := v1alpha2.FabricZoneStatus{Zone: alloc.Zone, CIDR: alloc.CIDR, GatewayIP: alloc.GatewayIP}
 		if hadPrevious {
 			entry.GatewayNodeRef = previous.GatewayNodeRef
-			entry.Conditions = previous.Conditions
+			// A plain slice assignment here would alias the same backing
+			// array as fabricObj.Status.Zones[i].Conditions — the "before"
+			// snapshot equalZoneStatuses compares against below. meta.
+			// SetStatusCondition (called throughout this zone's own
+			// reconcile below) mutates an existing condition's fields in
+			// place through a pointer into that array, which would
+			// silently rewrite the "before" snapshot to match "after"
+			// before the comparison ever runs, hiding real transitions
+			// from change detection. Copying the slice keeps the two
+			// arrays independent.
+			entry.Conditions = append([]metav1.Condition(nil), previous.Conditions...)
 		}
 
 		r.reconcileZoneEntry(ctx, fabricObj, zonesByName[alloc.Zone], &entry)

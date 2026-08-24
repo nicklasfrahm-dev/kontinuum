@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
@@ -44,6 +45,13 @@ const (
 	testImage         = "ghcr.io/nicklasfrahm-dev/kontinuum:dev"
 	testGatewayLabel  = "role"
 	testGatewayValue  = "gateway"
+	// testBlockCIDR0GatewayIP is blockCIDR0's own GatewayIP (broadcast-1
+	// of 10.0.0.0/24) — shared across fixtures purely so goconst doesn't
+	// flag the repeated literal.
+	testBlockCIDR0GatewayIP = "10.0.0.254"
+	// testFabricInterface is testGatewayInstance's own free (non-WAN)
+	// interface name.
+	testFabricInterface = "eth1"
 	// testTalosContractVersion is the Talos version testSecretsBundle
 	// generates its version contract from — an arbitrary, always-valid
 	// pinned version, mirroring
@@ -146,7 +154,7 @@ func testGatewayInstance(name, zone string) *v1alpha2.Instance {
 		Status: v1alpha2.InstanceStatus{
 			Interfaces: []v1alpha2.InstanceInterfaceStatus{
 				{Name: "eth0", Addresses: []string{"10.0.1.5/24"}},
-				{Name: "eth1"},
+				{Name: testFabricInterface},
 			},
 		},
 	}
@@ -309,7 +317,7 @@ func TestReconcileCarvesSubnetAndSetsValidSpecReady(t *testing.T) {
 	require.Len(t, fabricObj.Status.Zones, 1)
 	assert.Equal(t, "a", fabricObj.Status.Zones[0].Zone)
 	assert.Equal(t, "10.0.0.0/24", fabricObj.Status.Zones[0].CIDR)
-	assert.Equal(t, "10.0.0.254", fabricObj.Status.Zones[0].GatewayIP)
+	assert.Equal(t, testBlockCIDR0GatewayIP, fabricObj.Status.Zones[0].GatewayIP)
 	assert.False(t,
 		meta.IsStatusConditionTrue(fabricObj.Status.Zones[0].Conditions, fabric.GatewayNodeSelectedConditionType))
 }
@@ -514,7 +522,7 @@ func fabricPendingDeletion() *v1alpha2.Fabric {
 	controllerutil.AddFinalizer(fabricObj, fabric.FabricFinalizer)
 	fabricObj.Status.Zones = []v1alpha2.FabricZoneStatus{
 		{
-			Zone: "a", CIDR: blockCIDR0, GatewayIP: "10.0.0.254",
+			Zone: "a", CIDR: blockCIDR0, GatewayIP: testBlockCIDR0GatewayIP,
 			GatewayNodeRef: &v1alpha2.ObjectReference{
 				APIVersion: v1alpha2.GroupVersion().String(), Kind: "Instance", Name: "node-a1",
 			},
@@ -677,12 +685,103 @@ func TestReconcileBridgesMultipleFabricInterfaces(t *testing.T) {
 	patch := string(patches[0])
 	assert.Contains(t, patch, "kind: BridgeConfig",
 		"two free interfaces must be bridged, not each assigned the same address")
-	assert.Contains(t, patch, "eth1")
+	assert.Contains(t, patch, testFabricInterface)
 	assert.Contains(t, patch, "eth2")
 
 	var fabricObj v1alpha2.Fabric
 
 	require.NoError(t, hubClient.Get(t.Context(), fabricObjectKey(), &fabricObj))
 	require.Len(t, fabricObj.Status.Zones, 1)
-	assert.ElementsMatch(t, []string{"eth1", "eth2"}, fabricObj.Status.Zones[0].GatewayInterfaces)
+	assert.ElementsMatch(t, []string{testFabricInterface, "eth2"}, fabricObj.Status.Zones[0].GatewayInterfaces)
+}
+
+// testAlreadyKnownZoneFabricObject returns testFabricObject() with its
+// status pre-populated as if a previous reconcile had already run: fabric-
+// level ValidSpec/Ready, and zone "a"'s GatewayNodeRef/CIDR/GatewayIP/
+// GatewayInterfaces plus GatewayNodeSelected/NetworkConfigured conditions,
+// all set to exactly what TestReconcilePersistsConditionTransitionOnAlreadyKnownZone's
+// reconcile will recompute anyway — only NATInstalled/ZoneReady are left
+// False, so they're the only conditions that actually change.
+func testAlreadyKnownZoneFabricObject() *v1alpha2.Fabric {
+	fabricObj := testFabricObject()
+	fabricObj.Status.Conditions = []metav1.Condition{
+		{
+			Type: fabric.ValidSpecConditionType, Status: metav1.ConditionTrue,
+			Reason: "ValidSpec", Message: "fabric spec is valid", LastTransitionTime: metav1.Now(),
+		},
+		{
+			Type: fabric.ReadyConditionType, Status: metav1.ConditionTrue,
+			Reason: "ValidSpec", Message: "fabric spec is valid", LastTransitionTime: metav1.Now(),
+		},
+	}
+	networkConfiguredMessage := fmt.Sprintf(
+		"assigned gateway address %s on instance %q, interfaces [%s]",
+		testBlockCIDR0GatewayIP, "node-a1", testFabricInterface)
+
+	fabricObj.Status.Zones = []v1alpha2.FabricZoneStatus{
+		{
+			Zone: "a", CIDR: blockCIDR0, GatewayIP: testBlockCIDR0GatewayIP,
+			GatewayNodeRef: &v1alpha2.ObjectReference{
+				APIVersion: v1alpha2.GroupVersion().String(), Kind: "Instance", Name: "node-a1",
+			},
+			GatewayInterfaces: []string{testFabricInterface},
+			Conditions: []metav1.Condition{
+				{
+					Type: fabric.GatewayNodeSelectedConditionType, Status: metav1.ConditionTrue,
+					Reason: "GatewayNodeSelected", Message: `instance "node-a1" selected as this zone's nat gateway node`,
+					LastTransitionTime: metav1.Now(),
+				},
+				{
+					Type: fabric.NetworkConfiguredConditionType, Status: metav1.ConditionTrue,
+					Reason: "NetworkConfigured", Message: networkConfiguredMessage, LastTransitionTime: metav1.Now(),
+				},
+				{
+					Type: fabric.NATInstalledConditionType, Status: metav1.ConditionFalse,
+					Reason: "NATInstallFailed", Message: "downstream unreachable", LastTransitionTime: metav1.Now(),
+				},
+				{
+					Type: fabric.ZoneReadyConditionType, Status: metav1.ConditionFalse,
+					Reason: "ZoneNotReady", Message: "nat gateway workload not installed yet", LastTransitionTime: metav1.Now(),
+				},
+			},
+		},
+	}
+
+	return fabricObj
+}
+
+// TestReconcilePersistsConditionTransitionOnAlreadyKnownZone is a
+// regression test for the Conditions-slice-aliasing bug: entry.Conditions
+// used to be assigned directly from the previous status.zones entry
+// (`entry.Conditions = previous.Conditions`), sharing the same backing
+// array as fabricObj.Status.Zones[i].Conditions. meta.SetStatusCondition
+// mutates an existing condition's fields in place through a pointer into
+// that array, which silently rewrote the "before" snapshot
+// equalZoneStatuses compares against to already match "after" — hiding a
+// real transition from change detection and skipping the Status().Update
+// that should have persisted it.
+func TestReconcilePersistsConditionTransitionOnAlreadyKnownZone(t *testing.T) {
+	t.Parallel()
+
+	downstream := newDownstreamFakeClient(t)
+	fabricObj := testAlreadyKnownZoneFabricObject()
+
+	hubClient := newHubFakeClient(t,
+		fabricObj, testZoneObject(testZoneAName, "a"), testTalosCluster(testZoneAName), talosClusterSecret(t, testZoneAName),
+		testGatewayInstance("node-a1", "a"))
+
+	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{}, fakeDownstreamClientBuilder{client: downstream})
+
+	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, result, "the zone actually converges this pass, so no more retries are needed")
+
+	var persisted v1alpha2.Fabric
+
+	require.NoError(t, hubClient.Get(t.Context(), fabricObjectKey(), &persisted))
+	require.Len(t, persisted.Status.Zones, 1)
+	assert.True(t, meta.IsStatusConditionTrue(persisted.Status.Zones[0].Conditions, fabric.NATInstalledConditionType),
+		"the False->True transition must actually be written to the API server, not just computed in memory")
+	assert.True(t, meta.IsStatusConditionTrue(persisted.Status.Zones[0].Conditions, fabric.ZoneReadyConditionType),
+		"the False->True transition must actually be written to the API server, not just computed in memory")
 }

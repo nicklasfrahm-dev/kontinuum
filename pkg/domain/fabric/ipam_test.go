@@ -29,7 +29,7 @@ func TestAllocateFreshCarvesLowestBlocksInSortedOrder(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, allocations, 3)
 
-	assert.Equal(t, fabric.Allocation{Zone: "a", CIDR: blockCIDR0, GatewayIP: "10.0.0.254"}, allocations[0])
+	assert.Equal(t, fabric.Allocation{Zone: "a", CIDR: blockCIDR0, GatewayIP: testBlockCIDR0GatewayIP}, allocations[0])
 	assert.Equal(t, fabric.Allocation{Zone: "b", CIDR: blockCIDR1, GatewayIP: "10.0.1.254"}, allocations[1])
 	assert.Equal(t, fabric.Allocation{Zone: "c", CIDR: blockCIDR2, GatewayIP: "10.0.2.254"}, allocations[2])
 }
