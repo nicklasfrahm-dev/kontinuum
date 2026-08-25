@@ -305,6 +305,40 @@ func TestReconcileIgnoresMissingFabric(t *testing.T) {
 	assert.Equal(t, ctrl.Result{}, result)
 }
 
+// TestReconcileDefaultsZonePrefixLengthOnceFromLiveZoneCount exercises
+// ensureZonePrefixLengthDefaulted: spec.zonePrefixLength left unset (0)
+// gets computed from the live zone count on the first reconcile — testCIDR
+// is a /16 and two live zones need only a 2-block split, so the smallest
+// valid zonePrefixLength is /17 (see defaultZonePrefixLength's own doc for
+// the sizing rule) — and never recomputed again afterward, even once a
+// third zone joins and outgrows that /17's own 2-block capacity.
+func TestReconcileDefaultsZonePrefixLengthOnceFromLiveZoneCount(t *testing.T) {
+	t.Parallel()
+
+	fabricObj := testFabricObject()
+	fabricObj.Spec.ZonePrefixLength = 0
+
+	hubClient := newHubFakeClient(t, fabricObj, testZoneObject(testZoneAName, "a"), testZoneObject(testZoneBName, "b"))
+	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{}, fakeDownstreamClientBuilder{})
+
+	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	var updated v1alpha2.Fabric
+
+	require.NoError(t, hubClient.Get(t.Context(), fabricObjectKey(), &updated))
+	assert.EqualValues(t, 17, updated.Spec.ZonePrefixLength)
+
+	require.NoError(t, hubClient.Create(t.Context(), testZoneObject("eu-c", "c")))
+
+	_, err = reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	require.NoError(t, hubClient.Get(t.Context(), fabricObjectKey(), &updated))
+	assert.EqualValues(t, 17, updated.Spec.ZonePrefixLength,
+		"defaulted once, must never be silently recomputed as the live zone count grows")
+}
+
 func TestReconcileCarvesSubnetAndSetsValidSpecReady(t *testing.T) {
 	t.Parallel()
 

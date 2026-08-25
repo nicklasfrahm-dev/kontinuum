@@ -143,14 +143,19 @@ spec:
                 description: |-
                   ZonePrefixLength is the prefix length of each zone's own carved
                   subnet, e.g. 24. Must be longer than CIDR's own prefix length —
-                  validated by the controller.
+                  validated by the controller. Left unset, it's computed once, the
+                  first time this Fabric is reconciled, from the number of zones
+                  already live in spec.region at that moment (see
+                  Reconciler.ensureZonePrefixLengthDefaulted) — never recomputed
+                  afterward, so scaling past that many zones later needs an explicit
+                  edit here instead of an automatic, silent renumbering of every
+                  already-carved zone.
                 format: int32
                 type: integer
             required:
             - cidr
             - gatewaySelector
             - region
-            - zonePrefixLength
             type: object
             x-kubernetes-validations:
             - message: region and cidr are both required

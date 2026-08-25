@@ -197,6 +197,37 @@ func validateZonePrefixLength(fabricPrefixLen, totalBits int, zonePrefixLength i
 	return nil
 }
 
+// defaultZonePrefixLength computes a zonePrefixLength that fits zoneCount
+// live zones into fabricCIDR: the smallest prefix length whose block count
+// (a power of two) is at least zoneCount, floored one bit longer than
+// fabricCIDR's own prefix so a Fabric with no zones yet still gets room
+// for at least two (diff 0 would also fail validateZonePrefixLength's own
+// "strictly longer than the fabric's own prefix" check). Used only once,
+// by Reconciler.ensureZonePrefixLengthDefaulted, when spec.zonePrefixLength
+// is first defaulted on a Fabric's own first reconcile — never recomputed
+// afterward, so a zone count that later outgrows this returns
+// validateZonePrefixLength's own errBlocksExhausted the same way a
+// manually undersized value would, rather than silently renumbering every
+// already-carved zone. A fabricCIDR that fails to parse returns that same
+// error unwrapped — Allocate's own identical net.ParseCIDR call surfaces
+// it identically through the ordinary InvalidSpec path right after this
+// is skipped.
+func defaultZonePrefixLength(fabricCIDR string, zoneCount int) (int32, error) {
+	_, fabricNet, err := net.ParseCIDR(fabricCIDR)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %q: %w", errInvalidFabricCIDR, fabricCIDR, err)
+	}
+
+	fabricPrefixLen, _ := fabricNet.Mask.Size()
+
+	diff := int32(1)
+	for int64(1)<<uint(diff) < int64(zoneCount) {
+		diff++
+	}
+
+	return int32(fabricPrefixLen) + diff, nil //nolint:gosec // fabricPrefixLen caps at 128 (IPv6)
+}
+
 // dedupeSorted returns zones as a set, silently collapsing duplicates —
 // Allocate's own caller (listing Zone objects by spec.region) can't produce
 // one, but Allocate stays a total function regardless of what it's handed.

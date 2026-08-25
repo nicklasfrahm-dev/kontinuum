@@ -43,8 +43,15 @@ type FabricSpec struct {
 	CIDR string `json:"cidr"`
 	// ZonePrefixLength is the prefix length of each zone's own carved
 	// subnet, e.g. 24. Must be longer than CIDR's own prefix length —
-	// validated by the controller.
-	ZonePrefixLength int32 `json:"zonePrefixLength"`
+	// validated by the controller. Left unset, it's computed once, the
+	// first time this Fabric is reconciled, from the number of zones
+	// already live in spec.region at that moment (see
+	// Reconciler.ensureZonePrefixLengthDefaulted) — never recomputed
+	// afterward, so scaling past that many zones later needs an explicit
+	// edit here instead of an automatic, silent renumbering of every
+	// already-carved zone.
+	// +optional
+	ZonePrefixLength int32 `json:"zonePrefixLength,omitempty"`
 	// NAT configures this fabric's default per-zone NAT gateway — see
 	// FabricNATSpec's own doc.
 	// +optional

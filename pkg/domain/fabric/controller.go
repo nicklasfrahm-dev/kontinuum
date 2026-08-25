@@ -342,6 +342,11 @@ func (r *Reconciler) reconcileFabric(ctx context.Context, fabricObj *v1alpha2.Fa
 		liveZones = append(liveZones, zoneName)
 	}
 
+	err = r.ensureZonePrefixLengthDefaulted(ctx, fabricObj, len(liveZones))
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	previous := make([]PreviousAllocation, 0, len(fabricObj.Status.Zones))
 	for _, zoneStatus := range fabricObj.Status.Zones {
 		previous = append(previous, PreviousAllocation{Zone: zoneStatus.Zone, CIDR: zoneStatus.CIDR})
@@ -363,6 +368,42 @@ func (r *Reconciler) reconcileFabric(ctx context.Context, fabricObj *v1alpha2.Fa
 		fabricObj, metav1.ConditionTrue, reasonValidSpec, "fabric spec is valid")
 
 	return r.persistZoneStatuses(ctx, fabricObj, conditionChanged || zonesChanged, zonesSettled)
+}
+
+// ensureZonePrefixLengthDefaulted defaults fabricObj's own
+// spec.zonePrefixLength, once, the first time it's reconciled with the
+// field left unset (its zero value) — computed from zoneCount, the number
+// of zones currently live in this fabric's own region (see
+// defaultZonePrefixLength's own package-level doc for the actual sizing
+// rule). Persisted back onto spec.zonePrefixLength itself, not just used
+// in memory this one pass — the same "mutate then Update, then keep going
+// in this same reconcile" shape Reconcile's own AddFinalizer step already
+// uses — so every following reconcile finds the field already set and
+// skips this entirely, mirroring a one-time admission-time default
+// without an actual admission webhook (this repo has none). A CIDR that
+// fails to parse is left alone here: Allocate's own identical
+// net.ParseCIDR call, reached right after this returns, surfaces that
+// same error through the ordinary InvalidSpec path instead.
+func (r *Reconciler) ensureZonePrefixLengthDefaulted(
+	ctx context.Context, fabricObj *v1alpha2.Fabric, zoneCount int,
+) error {
+	if fabricObj.Spec.ZonePrefixLength != 0 {
+		return nil
+	}
+
+	zonePrefixLength, err := defaultZonePrefixLength(fabricObj.Spec.CIDR, zoneCount)
+	if err != nil {
+		return nil //nolint:nilerr // invalid CIDR: Allocate's own identical parse surfaces this through InvalidSpec instead
+	}
+
+	fabricObj.Spec.ZonePrefixLength = zonePrefixLength
+
+	err = r.Client.Update(ctx, fabricObj)
+	if err != nil {
+		return fmt.Errorf("failed to default zonePrefixLength for fabric %q: %w", fabricObj.Name, err)
+	}
+
+	return nil
 }
 
 // listZonesForRegion lists every Zone in fabricObj's own namespace whose
