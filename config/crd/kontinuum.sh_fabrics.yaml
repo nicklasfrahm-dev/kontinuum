@@ -59,9 +59,9 @@ spec:
               cluster with no L2 adjacency to any other zone (issue #24's "one cluster
               per zone" decision), so there's no shared broadcast domain to build a
               VRRP/anycast VIP over in the first place, and one AZ's network failing
-              never affects another's. VLAN assignment and DHCP are deliberately out of
-              scope — a future CRD's concern, the same way Zone's own status doc used
-              to forward-reference this one.
+              never affects another's. DHCP is deliberately out of scope — a future
+              CRD's concern, the same way Zone's own status doc used to
+              forward-reference this one. VLAN tagging (see VLANID) is in scope.
             properties:
               cidr:
                 description: |-
@@ -139,6 +139,20 @@ spec:
                   Region is the region this fabric belongs to — every Zone whose own
                   spec.region matches gets a carved-out subnet from this fabric's CIDR.
                 type: string
+              vlanID:
+                description: |-
+                  VLANID optionally tags this fabric's own per-zone gateway address
+                  onto an 802.1q VLAN sub-interface created over each gateway node's
+                  own free interface(s) — see FabricZoneStatus.GatewayInterfaces —
+                  instead of assigning that address directly to the raw interface.
+                  One VLAN ID for the whole fabric, uniform across every zone, not
+                  scoped per zone. Left unset (0), the gateway address is assigned
+                  directly to the raw interface (or bridge), this fabric's own
+                  original, untagged behavior.
+                format: int32
+                maximum: 4094
+                minimum: 1
+                type: integer
               zonePrefixLength:
                 description: |-
                   ZonePrefixLength is the prefix length of each zone's own carved

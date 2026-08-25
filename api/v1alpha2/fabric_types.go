@@ -30,9 +30,9 @@ type FabricNATSpec struct {
 // cluster with no L2 adjacency to any other zone (issue #24's "one cluster
 // per zone" decision), so there's no shared broadcast domain to build a
 // VRRP/anycast VIP over in the first place, and one AZ's network failing
-// never affects another's. VLAN assignment and DHCP are deliberately out of
-// scope — a future CRD's concern, the same way Zone's own status doc used
-// to forward-reference this one.
+// never affects another's. DHCP is deliberately out of scope — a future
+// CRD's concern, the same way Zone's own status doc used to
+// forward-reference this one. VLAN tagging (see VLANID) is in scope.
 type FabricSpec struct {
 	// Region is the region this fabric belongs to — every Zone whose own
 	// spec.region matches gets a carved-out subnet from this fabric's CIDR.
@@ -62,6 +62,18 @@ type FabricSpec struct {
 	// no default/fallback node-selection heuristic, an empty or over-broad
 	// selector is the operator's own call, not the controller's.
 	GatewaySelector metav1.LabelSelector `json:"gatewaySelector"`
+	// VLANID optionally tags this fabric's own per-zone gateway address
+	// onto an 802.1q VLAN sub-interface created over each gateway node's
+	// own free interface(s) — see FabricZoneStatus.GatewayInterfaces —
+	// instead of assigning that address directly to the raw interface.
+	// One VLAN ID for the whole fabric, uniform across every zone, not
+	// scoped per zone. Left unset (0), the gateway address is assigned
+	// directly to the raw interface (or bridge), this fabric's own
+	// original, untagged behavior.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4094
+	VLANID int32 `json:"vlanID,omitempty"`
 }
 
 // FabricZoneStatus reports one zone's own IPAM allocation and NAT gateway
