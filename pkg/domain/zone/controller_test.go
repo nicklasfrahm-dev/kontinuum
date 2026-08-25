@@ -874,6 +874,60 @@ func assertIdentityRBACInstalled(t *testing.T, downstream client.Client) {
 	assert.Equal(t, etcdIdentityServiceAccountName, binding.RoleRef.Name)
 }
 
+// fabricManagerResourceName mirrors the zone package's own unexported
+// fabricManagerServiceAccountName/fabricManagerDaemonSetName — both share
+// this same value, so one local constant here covers every resource kind
+// asserted below — see etcdIdentityServiceAccountName's own doc for why
+// this is duplicated rather than exported.
+const fabricManagerResourceName = "kontinuum-fabricmanager"
+
+func assertFabricManagerInstalled(t *testing.T, downstream client.Client) {
+	t.Helper()
+
+	var sa corev1.ServiceAccount
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: fabricManagerResourceName, Namespace: testDownstreamNamespace}, &sa))
+
+	var role rbacv1.ClusterRole
+	require.NoError(t, downstream.Get(t.Context(), client.ObjectKey{Name: fabricManagerResourceName}, &role))
+	require.Len(t, role.Rules, 1)
+	assert.Equal(t, []string{"kontinuum.sh"}, role.Rules[0].APIGroups)
+	assert.Equal(t, []string{"fabrics"}, role.Rules[0].Resources)
+	assert.ElementsMatch(t, []string{"get", "list", "watch"}, role.Rules[0].Verbs)
+
+	var binding rbacv1.ClusterRoleBinding
+	require.NoError(t, downstream.Get(t.Context(), client.ObjectKey{Name: fabricManagerResourceName}, &binding))
+	require.Len(t, binding.Subjects, 1)
+	assert.Equal(t, fabricManagerResourceName, binding.Subjects[0].Name)
+	assert.Equal(t, testDownstreamNamespace, binding.Subjects[0].Namespace)
+	assert.Equal(t, fabricManagerResourceName, binding.RoleRef.Name)
+	assert.Equal(t, "ClusterRole", binding.RoleRef.Kind)
+
+	var daemonSet appsv1.DaemonSet
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: fabricManagerResourceName, Namespace: testDownstreamNamespace}, &daemonSet))
+
+	podSpec := daemonSet.Spec.Template.Spec
+	assert.Equal(t, fabricManagerResourceName, podSpec.ServiceAccountName)
+	assert.True(t, podSpec.HostNetwork, "nftables/ip_forward both need the node's own real network namespace")
+
+	require.Len(t, podSpec.Containers, 1)
+	container := podSpec.Containers[0]
+	assert.Equal(t, testImage, container.Image)
+	assert.Equal(t, []string{"fabricmanager", "run"}, container.Args)
+
+	require.Len(t, container.Env, 1)
+	assert.Equal(t, "NODE_NAME", container.Env[0].Name)
+	require.NotNil(t, container.Env[0].ValueFrom)
+	require.NotNil(t, container.Env[0].ValueFrom.FieldRef)
+	assert.Equal(t, "spec.nodeName", container.Env[0].ValueFrom.FieldRef.FieldPath)
+
+	require.NotNil(t, container.SecurityContext)
+	require.NotNil(t, container.SecurityContext.Capabilities)
+	assert.Equal(t, []corev1.Capability{"NET_ADMIN"}, container.SecurityContext.Capabilities.Add)
+	assert.Equal(t, []corev1.Capability{"ALL"}, container.SecurityContext.Capabilities.Drop)
+}
+
 func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) {
 	t.Helper()
 
@@ -902,6 +956,7 @@ func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) 
 	assert.NotEmpty(t, identitySecret.Data[corev1.TLSPrivateKeyKey])
 
 	assertIdentityRBACInstalled(t, downstream)
+	assertFabricManagerInstalled(t, downstream)
 
 	var configMap corev1.ConfigMap
 	require.NoError(t, downstream.Get(t.Context(),
