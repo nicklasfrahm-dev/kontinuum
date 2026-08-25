@@ -1,12 +1,14 @@
 // Package fabricmanager implements kontinuum's "fabricmanager" cobra
-// command tree (currently just "fabricmanager run") — the workload
-// pkg/domain/fabric's own Fabric controller deploys onto a zone's elected
-// gateway node (see that package's ensureFabricManagerWorkload) as the
-// node-local agent for a zone's own network duties. Named for that growing
-// scope rather than "nat-gateway": NAT is the only thing it does today, but
-// DHCP and other per-zone network responsibilities are expected to land
-// here as further subcommands/flags later, not as a second, separately
-// named agent.
+// command tree (currently just "fabricmanager run") — the node-local
+// network agent pkg/domain/zone.ensureFabricManagerDaemonSet installs as
+// a DaemonSet onto every node of a zone's own downstream cluster (not a
+// per-gateway Deployment: see that function's own doc for why one
+// standing daemon, self-discovering which Fabric(s) it's actually
+// responsible for, replaced the earlier per-elected-node-and-interface
+// model). Named for that growing scope rather than "nat-gateway": NAT is
+// the only thing it does today, but DHCP and other per-zone network
+// responsibilities are expected to land here as further subcommands/
+// reconcile logic later, not as a second, separately named agent.
 //
 // This repo's own container image is distroless
 // (gcr.io/distroless/static-debian13, no shell, no nft(8) binary — see

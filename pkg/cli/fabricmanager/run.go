@@ -2,92 +2,111 @@ package fabricmanager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
-	"os/signal"
-	"syscall"
 
 	"github.com/spf13/cobra"
+	ctrl "sigs.k8s.io/controller-runtime"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/nicklasfrahm/kontinuum/pkg/logging"
 )
 
-// NewRunCmd builds the "fabricmanager run" command. Only NAT is
-// implemented today (see this package's own doc) — future zone network
-// duties (DHCP, ...) are expected to extend this same command with more
-// flags, not spawn a second, separately named one.
+// nodeNameEnvVar is the Downward API env var (fieldRef: spec.nodeName —
+// see pkg/domain/zone.buildFabricManagerDaemonSet's own Pod spec) this
+// node's own name is read from — the same string Talos sets as this
+// Kubernetes Node's own metadata.name (see Reconciler.NodeName's own
+// doc), so it always matches exactly whatever a gatewayNodeRef electing
+// this node names.
+const nodeNameEnvVar = "NODE_NAME"
+
+// errNodeNameNotSet is NewRunCmd's sentinel for a missing nodeNameEnvVar —
+// only reachable if this process is run outside the DaemonSet this
+// package's own controller expects (see nodeNameEnvVar's own doc), never
+// in normal operation.
+var errNodeNameNotSet = fmt.Errorf("%s must be set (see the Downward API spec.nodeName field)", nodeNameEnvVar)
+
+// NewRunCmd builds the "fabricmanager run" command. No flags: this
+// process discovers everything it needs by watching Fabric objects
+// through this node's own downstream kontinuum-server (see
+// newInClusterConfig's own doc) rather than being told a specific
+// Fabric/interface up front — a gateway node re-elected away, or a
+// second Fabric electing this same node for a different interface, is
+// something this process now notices on its own, live, instead of
+// needing pkg/domain/fabric's own controller to rebuild a Deployment
+// with new --id/--interface args every time. Only NAT is implemented
+// today (see this package's own doc) — future zone network duties
+// (DHCP, ...) are expected to extend this same reconcile loop, not spawn
+// a second, separately named agent.
 func NewRunCmd() *cobra.Command {
-	var fabricID string
-
-	var iface string
-
 	cmd := &cobra.Command{
 		Use:   "run",
-		Short: "Enable ipv4 forwarding and masquerade outbound traffic through --interface",
-		Long: "Enables ipv4 forwarding and installs an nftables masquerade rule so " +
-			"every packet leaving this node through --interface is source-NATed to " +
-			"this node's own address, then blocks until terminated — the process " +
-			"itself is the workload's own liveness signal (see " +
-			"pkg/domain/fabric.ensureFabricManagerWorkload); the rule is removed on a " +
-			"graceful shutdown.",
+		Short: "Watch this zone's own Fabrics and reconcile this node's own NAT gateway state",
+		Long: "Enables ipv4 forwarding, then watches every Fabric visible through this " +
+			"zone's own downstream kontinuum-server and keeps this node's own nftables " +
+			"masquerade rules in sync with whichever Fabric(s) currently elect it as " +
+			"their own gateway (see Reconciler's own doc) — until ctx is canceled or a " +
+			"termination signal is received.",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runFabricManager(cmd.Context(), fabricID, iface)
+			return runFabricManager(cmd.Context())
 		},
-	}
-
-	cmd.Flags().StringVar(&fabricID, "id", "",
-		"Owning Fabric's own metadata.name, scoping this process's nftables table so it "+
-			"never collides with a different Fabric electing the same node/interface")
-	cmd.Flags().StringVar(&iface, "interface", "", "Uplink network interface to masquerade outbound traffic through")
-
-	for _, name := range []string{"id", "interface"} {
-		err := cmd.MarkFlagRequired(name)
-		if err != nil {
-			// Only reachable if a flag name above is misspelled — a defect
-			// in this file itself, not a condition any caller could
-			// meaningfully recover from.
-			panic(fmt.Sprintf("failed to mark --%s required: %v", name, err))
-		}
 	}
 
 	return cmd
 }
 
-// runFabricManager enables ipv4 forwarding, installs the masquerade rule,
-// then blocks until ctx is canceled or a termination signal is received —
-// mirrors pkg/cli.runServe's own signal-handling shape.
-func runFabricManager(ctx context.Context, fabricID, iface string) error {
+// runFabricManager enables ipv4 forwarding, then builds and runs a
+// controller-runtime manager around Reconciler until ctx is canceled or a
+// termination signal is received — controller-runtime's own manager
+// already handles that signal wiring internally (see ctrl.Manager.Start),
+// mirroring pkg/cli.runServe's own use of the identical machinery.
+func runFabricManager(ctx context.Context) error {
 	logger := logging.New(slog.LevelInfo, logging.FormatJSON, os.Stdout)
+
+	nodeName := os.Getenv(nodeNameEnvVar)
+	if nodeName == "" {
+		return errNodeNameNotSet
+	}
 
 	err := enableIPForwarding()
 	if err != nil {
 		return fmt.Errorf("failed to enable ipv4 forwarding: %w", err)
 	}
 
-	err = ensureMasquerade(fabricID, iface)
+	restCfg, err := newInClusterConfig()
 	if err != nil {
-		return fmt.Errorf("failed to configure nftables masquerade rule: %w", err)
+		return err
 	}
 
-	logger.Info("NAT gateway configured", "fabric", fabricID, "interface", iface)
-
-	sigChan := make(chan os.Signal, 1)
-
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(sigChan)
-
-	select {
-	case sig := <-sigChan:
-		logger.Info("Received signal, shutting down", "signal", sig.String())
-	case <-ctx.Done():
-		logger.Info("Context canceled, shutting down")
+	scheme, err := fabricScheme()
+	if err != nil {
+		return err
 	}
 
-	err = deleteMasquerade(fabricID, iface)
+	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
+		Scheme:                 scheme,
+		Metrics:                metricsserver.Options{BindAddress: "0"},
+		HealthProbeBindAddress: "0",
+	})
 	if err != nil {
-		logger.Warn("Failed to remove nftables masquerade rule on shutdown", "error", err)
+		return fmt.Errorf("failed to build controller-runtime manager: %w", err)
+	}
+
+	reconciler := &Reconciler{Client: mgr.GetClient(), NodeName: nodeName, Logger: logger}
+
+	err = reconciler.SetupWithManager(mgr)
+	if err != nil {
+		return err
+	}
+
+	logger.Info("fabricmanager starting", "node", nodeName)
+
+	err = mgr.Start(ctx)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		return fmt.Errorf("controller-runtime manager exited: %w", err)
 	}
 
 	return nil

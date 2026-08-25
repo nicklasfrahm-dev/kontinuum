@@ -11,17 +11,17 @@ import (
 
 // natTablePrefix and postroutingChainName name the ip-family table/chain
 // this package owns exclusively. The table itself is named
-// natTablePrefix+"_"+<sanitized interface name> (see NATTableName), not a
-// single fixed name shared by every interface — a gateway node terminating
-// more than one VLAN (a trunk port with several tagged sub-interfaces,
-// each backing a different zone's own Fabric) runs one fabricmanager
-// process per interface, and each must only ever touch its own table.
-// ensureMasquerade always deletes any stale table by that same
-// interface-scoped name before recreating it (see queueDeleteExistingTable)
-// — it never lists or deletes any *other* table, whether that's a sibling
-// interface's own kontinuum_nat_* table, or an unrelated one entirely (see
-// that function's own doc for why this also keeps the CNI's own nftables
-// state — Cilium, kube-proxy — untouched).
+// natTablePrefix+"_"+<fabric/interface identity> (see NATTableName), not a
+// single fixed name shared by every Fabric — a gateway node elected by more
+// than one Fabric (see Reconciler's own doc) gets one independent table per
+// Fabric, each only ever touching its own. ensureMasquerade always deletes
+// any stale table by that same name before recreating it (see
+// queueDeleteExistingTable); PruneStaleMasqueradeTables does the same for
+// every table this node no longer has any live, NAT-enabled Fabric
+// assignment for at all. Neither ever touches any *other* table, whether
+// that's a sibling Fabric's own kontinuum_nat_* table, or an unrelated one
+// entirely (see queueDeleteExistingTable's own doc for why that also keeps
+// the CNI's own nftables state — Cilium, kube-proxy — untouched).
 const (
 	natTablePrefix       = "kontinuum_nat"
 	postroutingChainName = "postrouting"
@@ -172,22 +172,50 @@ func ensureMasquerade(fabricID, iface string) error {
 	return nil
 }
 
-// deleteMasquerade removes iface's own table (see NATTableName), tolerating
-// it already being gone.
-func deleteMasquerade(fabricID, iface string) error {
+// PruneStaleMasqueradeTables deletes every kontinuum_nat_*-owned table on
+// this node whose name isn't in keep (the full set of table names — see
+// NATTableName — Reconciler currently wants present, across every Fabric
+// that elects this node with NAT enabled). This is what actually tears
+// down a table once nothing justifies it anymore: NAT disabled, this node
+// re-elected away, or the owning Fabric deleted outright — none of which
+// individually enumerate "what to remove" the way ensureMasquerade's own
+// per-Fabric call already knows what to *add*, so this instead reasons
+// from the opposite direction, over the full currently-observed table
+// list. Only ever matches names carrying natTablePrefix's own "_"
+// separator — never a ruleset-wide flush — so the CNI's own tables
+// (Cilium, kube-proxy) stay untouched, the same exact-name-scoped
+// guarantee queueDeleteExistingTable's own doc already gives its single
+// delete.
+func PruneStaleMasqueradeTables(keep map[string]bool) error {
 	conn, err := nftables.New()
 	if err != nil {
 		return fmt.Errorf("failed to open nftables connection: %w", err)
 	}
 
-	err = queueDeleteExistingTable(conn, fabricID, iface)
+	tables, err := conn.ListTablesOfFamily(nftables.TableFamilyIPv4)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to list existing ipv4 tables: %w", err)
+	}
+
+	pruned := false
+
+	for _, table := range tables {
+		if !strings.HasPrefix(table.Name, natTablePrefix+"_") || keep[table.Name] {
+			continue
+		}
+
+		conn.DelTable(table)
+
+		pruned = true
+	}
+
+	if !pruned {
+		return nil
 	}
 
 	err = conn.Flush()
 	if err != nil {
-		return fmt.Errorf("failed to remove existing %q table: %w", NATTableName(fabricID, iface), err)
+		return fmt.Errorf("failed to prune stale nat tables: %w", err)
 	}
 
 	return nil
