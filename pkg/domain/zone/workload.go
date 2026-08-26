@@ -24,6 +24,16 @@ import (
 // this package reuses directly rather than redeclaring the same string.
 const downstreamNamespace = "kontinuum-system"
 
+// secretsResource and rbacVerbGet name the core "secrets" API resource and
+// its "get" verb — shared by every namespaced Role this package grants
+// ResourceNames-scoped read access to a single Secret through (see
+// ensureIdentityRole and ensureFabricManagerSecretRole), so the literal
+// exists exactly once.
+const (
+	secretsResource = "secrets"
+	rbacVerbGet     = "get"
+)
+
 // envSecretName and envConfigMapName are the kontinuum-env Secret/ConfigMap
 // ensureDeployment wires into the kontinuum container via envFrom.
 //
@@ -280,13 +290,13 @@ func ensureIdentityRole(ctx context.Context, downstream client.Client, namespace
 		Rules: []rbacv1.PolicyRule{
 			{
 				APIGroups:     []string{""},
-				Resources:     []string{"secrets"},
+				Resources:     []string{secretsResource},
 				ResourceNames: []string{etcdproxy.IdentitySecretName},
-				Verbs:         []string{"get"},
+				Verbs:         []string{rbacVerbGet},
 			},
 			{
 				APIGroups: []string{""},
-				Resources: []string{"secrets"},
+				Resources: []string{secretsResource},
 				Verbs:     []string{"list", "watch"},
 			},
 		},

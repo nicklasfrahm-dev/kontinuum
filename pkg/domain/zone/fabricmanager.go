@@ -44,10 +44,10 @@ func ensureFabricManagerServiceAccount(ctx context.Context, downstream client.Cl
 // ensureFabricManagerClusterRole upserts the ClusterRole granting
 // fabricManagerServiceAccountName's own ServiceAccount read/watch access
 // to every Fabric, cluster-wide — see that constant's own doc for why this
-// can't be scoped to one namespace. Read-only for now: this doesn't yet
-// grant fabrics/status update, since nothing in this package's own
-// Pod actually writes it back yet — a status write-back path lands this
-// permission alongside it, not ahead of when it's actually used.
+// can't be scoped to one namespace — plus update on fabrics/status, for
+// pkg/cli/fabricmanager's own write-back of NetworkConfigured/NATInstalled/
+// Ready once it actually applies a zone's own desired state (see that
+// package's own Reconciler.applyElectedZone).
 func ensureFabricManagerClusterRole(ctx context.Context, downstream client.Client) error {
 	role := &rbacv1.ClusterRole{
 		ObjectMeta: metav1.ObjectMeta{Name: fabricManagerServiceAccountName},
@@ -55,7 +55,12 @@ func ensureFabricManagerClusterRole(ctx context.Context, downstream client.Clien
 			{
 				APIGroups: []string{"kontinuum.sh"},
 				Resources: []string{"fabrics"},
-				Verbs:     []string{"get", "list", "watch"},
+				Verbs:     []string{rbacVerbGet, "list", "watch"},
+			},
+			{
+				APIGroups: []string{"kontinuum.sh"},
+				Resources: []string{"fabrics/status"},
+				Verbs:     []string{"update"},
 			},
 		},
 	}
@@ -76,6 +81,87 @@ func ensureFabricManagerClusterRole(ctx context.Context, downstream client.Clien
 
 	if err != nil {
 		return fmt.Errorf("failed to ensure %q cluster role: %w", fabricManagerServiceAccountName, err)
+	}
+
+	return nil
+}
+
+// fabricManagerTalosConfigSecretName mirrors pkg/domain/fabric's own
+// exported TalosConfigSecretName exactly (duplicated rather than imported
+// — this package already avoids importing pkg/domain/fabric, which itself
+// imports this package, the same cycle-avoidance nodeNameEnvVar's own doc
+// explains).
+//
+//nolint:gosec // object name, not a credential
+const fabricManagerTalosConfigSecretName = "kontinuum-fabricmanager-talosconfig"
+
+// ensureFabricManagerSecretRole upserts the Role granting
+// fabricManagerServiceAccountName's own ServiceAccount get access to
+// fabricManagerTalosConfigSecretName, in namespace — the Talos admin
+// credential ensureGatewayTalosConfig delivers there for
+// pkg/cli/fabricmanager's own interface-config push (see that function's
+// own doc). Scoped by ResourceNames to exactly that one Secret — see
+// ensureIdentityRole's own doc for why get (unlike list/watch) supports
+// this, and why this Pod has no need for either of those two here in the
+// first place: it always knows the one name it wants, unlike
+// etcdproxy.startIdentityWatch's own watch-and-filter approach.
+func ensureFabricManagerSecretRole(ctx context.Context, downstream client.Client, namespace string) error {
+	role := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: fabricManagerServiceAccountName, Namespace: namespace},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups:     []string{""},
+				Resources:     []string{secretsResource},
+				ResourceNames: []string{fabricManagerTalosConfigSecretName},
+				Verbs:         []string{rbacVerbGet},
+			},
+		},
+	}
+
+	err := downstream.Create(ctx, role)
+	if apierrors.IsAlreadyExists(err) {
+		var existing rbacv1.Role
+
+		err = downstream.Get(ctx, client.ObjectKeyFromObject(role), &existing)
+		if err != nil {
+			return fmt.Errorf("failed to fetch existing %q role: %w", fabricManagerServiceAccountName, err)
+		}
+
+		existing.Rules = role.Rules
+
+		err = downstream.Update(ctx, &existing)
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to ensure %q role: %w", fabricManagerServiceAccountName, err)
+	}
+
+	return nil
+}
+
+// ensureFabricManagerSecretRoleBinding upserts the RoleBinding tying
+// fabricManagerServiceAccountName's own ServiceAccount to the Role
+// ensureFabricManagerSecretRole grants — its own RoleRef/Subjects never
+// change once created, so unlike its sibling ensure funcs this has nothing
+// to update on an already-exists conflict.
+func ensureFabricManagerSecretRoleBinding(ctx context.Context, downstream client.Client, namespace string) error {
+	binding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: fabricManagerServiceAccountName, Namespace: namespace},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "Role",
+			Name:     fabricManagerServiceAccountName,
+		},
+		Subjects: []rbacv1.Subject{{
+			Kind:      rbacv1.ServiceAccountKind,
+			Name:      fabricManagerServiceAccountName,
+			Namespace: namespace,
+		}},
+	}
+
+	err := downstream.Create(ctx, binding)
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("failed to ensure %q role binding: %w", fabricManagerServiceAccountName, err)
 	}
 
 	return nil
@@ -127,7 +213,17 @@ func ensureFabricManagerRBAC(ctx context.Context, downstream client.Client, name
 		return err
 	}
 
-	return ensureFabricManagerClusterRoleBinding(ctx, downstream, namespace)
+	err = ensureFabricManagerClusterRoleBinding(ctx, downstream, namespace)
+	if err != nil {
+		return err
+	}
+
+	err = ensureFabricManagerSecretRole(ctx, downstream, namespace)
+	if err != nil {
+		return err
+	}
+
+	return ensureFabricManagerSecretRoleBinding(ctx, downstream, namespace)
 }
 
 // fabricManagerDaemonSetName names both the DaemonSet

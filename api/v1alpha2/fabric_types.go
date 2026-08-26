@@ -73,6 +73,7 @@ type FabricSpec struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=4094
+	//nolint:tagliatelle // "vlanID" (acronym kept uppercase) matches IssuerURL/ClientID's own established convention
 	VLANID int32 `json:"vlanID,omitempty"`
 }
 

@@ -5,13 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
 
-	"golang.org/x/mod/semver"
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
@@ -39,14 +34,15 @@ var errNoFabricInterface = errors.New("gateway instance has no free interface to
 // node's own pre-existing uplink, both what it's dialed on (see
 // dialAddress) and what NAT masquerades outbound traffic through — and
 // fabricIfaces, every other interface with no address of its own yet, the
-// candidates this zone's own gateway address gets assigned to (see
-// BuildInterfaceAddressPatch). This is the concrete rule behind "advertise
-// the fabric on every interface except the one already linked up to a
-// public IP, or otherwise already carrying an address": an interface
-// Talos discovery already reports holding an address is always treated as
-// this node's own pre-existing uplink, never as a fabric candidate. wan is
-// "" if no interface has one yet; fabricIfaces is empty if every
-// discovered interface already does (e.g. a single-NIC node).
+// candidates this zone's own gateway address gets assigned to (recorded
+// as entry.GatewayInterfaces — see reconcileNATForGatewayNode — for
+// pkg/cli/fabricmanager to actually apply). This is the concrete rule
+// behind "advertise the fabric on every interface except the one already
+// linked up to a public IP, or otherwise already carrying an address": an
+// interface Talos discovery already reports holding an address is always
+// treated as this node's own pre-existing uplink, never as a fabric
+// candidate. wan is "" if no interface has one yet; fabricIfaces is empty
+// if every discovered interface already does (e.g. a single-NIC node).
 func classifyGatewayInterfaces(inst v1alpha2.Instance) (string, []string) {
 	var wan string
 
@@ -145,232 +141,4 @@ func dialAddress(inst v1alpha2.Instance) string {
 	}
 
 	return ""
-}
-
-// fabricManagerNamespace is the namespace ensureFabricManagerWorkload
-// installs the fabric manager workload into on a zone's own downstream
-// cluster — reuses v1alpha2.KontinuumSystemNamespace's own value directly,
-// matching pkg/domain/zone/workload.go's identical downstreamNamespace
-// convention: this is the same namespace that zone's own kontinuum-server
-// Deployment already lives in on this same downstream cluster.
-const fabricManagerNamespace = v1alpha2.KontinuumSystemNamespace
-
-// fabricManagerBaseName is the prefix every Deployment
-// ensureFabricManagerWorkload upserts is named from — see
-// ManagerDeploymentName's own doc for why the full name is scoped
-// per interface, not this bare prefix alone.
-const fabricManagerBaseName = "kontinuum-fabric-manager"
-
-// ManagerDeploymentName derives the Fabric- and interface-scoped
-// Deployment name ensureFabricManagerWorkload upserts. A gateway node
-// terminating more than one VLAN (a trunk port with several tagged
-// sub-interfaces, each backing a different zone's own Fabric) runs one
-// fabricmanager process — and so one Deployment — per interface, matching
-// the identical per-interface scoping pkg/cli/fabricmanager/nftables.go's
-// own NATTableName already uses for the nftables side. Scoping by
-// interface alone isn't enough, though: nothing enforces uniqueness on
-// spec.region, so two different Fabric objects could both elect the same
-// node for the same interface and race to own the identical Deployment
-// name (same static name, same Selector), each silently overwriting the
-// other's and taking down that interface's own NAT gateway. fabricID (the
-// owning Fabric's own metadata.name) closes that gap. The sanitized
-// fabricID segment is length-prefixed so its boundary with the sanitized
-// interface segment is unambiguous — without that, two different
-// (fabricID, interfaceName) pairs could still combine into the identical
-// name (e.g. fabricID "eu" + interface "1-eth0" vs fabricID "eu-1" +
-// interface "eth0").
-func ManagerDeploymentName(fabricID, interfaceName string) string {
-	sanitizedID := SanitizeForK8sName(fabricID)
-
-	return fmt.Sprintf(
-		"%s-%d-%s-%s", fabricManagerBaseName, len(sanitizedID), sanitizedID, SanitizeForK8sName(interfaceName))
-}
-
-// SanitizeForK8sName maps s onto a valid Kubernetes object name segment: a
-// VLAN sub-interface's own kernel name (e.g. "eth0.100") contains a "."
-// and uppercase letters aren't valid in a DNS-1123 label either (case is
-// folded first, since real kernel interface names are lowercase already —
-// no information lost there), so any remaining byte other than a
-// lowercase ASCII letter or digit is escaped as "-" followed by its two
-// lowercase hex digits (e.g. "." becomes "-2e") — including a literal "-"
-// itself (escaped as "-2d"), so every "-" in the output unambiguously
-// starts an escape sequence. Collapsing every disallowed byte to the same
-// literal "-" (as an earlier version of this function did) let two
-// different interfaces collide onto the same name (e.g. "eth0.1" and
-// "eth0-1" both became "eth0-1"); this escaping is injective, so distinct
-// inputs always produce distinct outputs.
-func SanitizeForK8sName(s string) string {
-	var sanitized strings.Builder
-
-	lowered := strings.ToLower(s)
-
-	for i := range len(lowered) {
-		charByte := lowered[i]
-
-		switch {
-		case charByte >= 'a' && charByte <= 'z', charByte >= '0' && charByte <= '9':
-			sanitized.WriteByte(charByte)
-		default:
-			fmt.Fprintf(&sanitized, "-%02x", charByte)
-		}
-	}
-
-	return sanitized.String()
-}
-
-// fabricManagerNodeLabel is the well-known Kubernetes node label
-// ensureFabricManagerWorkload pins the workload's own nodeSelector to —
-// Talos sets a node's own kubectl-visible hostname to its owning
-// Instance's own name (see pkg/domain/taloscluster/config.go's configBytes
-// doc), so this always resolves to exactly the elected gateway Instance.
-const fabricManagerNodeLabel = "kubernetes.io/hostname"
-
-// ensureFabricManagerWorkload upserts the fabric manager Deployment on
-// downstream: a single replica, pinned via nodeSelector to nodeName,
-// running `kontinuum fabricmanager run --interface interfaceName` (see
-// pkg/cli/fabricmanager — named for the node agent's own growing scope,
-// not just NAT: DHCP and other per-zone network duties are expected to
-// land as further fabricmanager subcommands/flags later) — a small,
-// privileged (CAP_NET_ADMIN only, every other Linux capability dropped),
-// host-network Pod, since programming the kernel's nftables ruleset and
-// toggling ipv4 forwarding both require direct access to the node's own
-// real network namespace, not this Pod's isolated one.
-func ensureFabricManagerWorkload(
-	ctx context.Context, downstream client.Client, image, nodeName, fabricID, interfaceName string,
-) error {
-	err := ensureFabricManagerNamespace(ctx, downstream)
-	if err != nil {
-		return err
-	}
-
-	deployment := buildFabricManagerDeployment(image, nodeName, fabricID, interfaceName)
-	name := deployment.Name
-
-	err = downstream.Create(ctx, deployment)
-	if apierrors.IsAlreadyExists(err) {
-		var existing appsv1.Deployment
-
-		err = downstream.Get(ctx, client.ObjectKeyFromObject(deployment), &existing)
-		if err != nil {
-			return fmt.Errorf("failed to fetch existing %q deployment: %w", name, err)
-		}
-
-		existing.Spec = deployment.Spec
-
-		err = downstream.Update(ctx, &existing)
-		if err != nil {
-			return fmt.Errorf("failed to update %q deployment: %w", name, err)
-		}
-
-		return nil
-	}
-
-	if err != nil {
-		return fmt.Errorf("failed to create %q deployment: %w", name, err)
-	}
-
-	return nil
-}
-
-// deleteFabricManagerWorkload deletes interfaceName's own Deployment (see
-// ManagerDeploymentName), tolerating NotFound — used by teardown.go
-// when a Fabric is deleted. Deliberately leaves fabricManagerNamespace
-// itself (and any earlier interface/route config Talos already applied to
-// the node) alone: unlike zone.uninstallWorkload's own last step, this
-// namespace is shared with zone's own kontinuum-server Deployment (and
-// potentially a sibling interface's own fabricmanager Deployment too — see
-// ManagerDeploymentName's own doc), so deleting it here could take
-// those down too.
-func deleteFabricManagerWorkload(ctx context.Context, downstream client.Client, fabricID, interfaceName string) error {
-	name := ManagerDeploymentName(fabricID, interfaceName)
-	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: fabricManagerNamespace}}
-
-	err := client.IgnoreNotFound(downstream.Delete(ctx, deployment))
-	if err != nil {
-		return fmt.Errorf("failed to delete %q deployment: %w", name, err)
-	}
-
-	return nil
-}
-
-// ensureFabricManagerNamespace creates fabricManagerNamespace on downstream
-// if it doesn't already exist — mirrors pkg/domain/zone/workload.go's
-// identical ensureNamespace; tolerated running twice (zone's own
-// installWorkload likely already created this same namespace) since both
-// calls are idempotent.
-func ensureFabricManagerNamespace(ctx context.Context, downstream client.Client) error {
-	err := downstream.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: fabricManagerNamespace}})
-	if err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("failed to ensure %q namespace: %w", fabricManagerNamespace, err)
-	}
-
-	return nil
-}
-
-// imagePullPolicy mirrors pkg/domain/zone/workload.go's identical helper —
-// see its own doc for why a digest-pinned or real-semver image is safe to
-// cache (PullIfNotPresent) while a bare floating tag ("dev"/"latest") is
-// re-pulled every time (PullAlways).
-func imagePullPolicy(image string) corev1.PullPolicy {
-	if strings.Contains(image, "@sha256:") {
-		return corev1.PullIfNotPresent
-	}
-
-	tag := image[strings.LastIndex(image, ":")+1:]
-
-	if semver.IsValid(tag) {
-		return corev1.PullIfNotPresent
-	}
-
-	return corev1.PullAlways
-}
-
-// fabricManagerLabels is name's own Deployment's pod-template labels —
-// name already carries the interface (see ManagerDeploymentName),
-// so two Deployments for different interfaces on the same node never
-// share a Selector (which would otherwise let one Deployment's controller
-// adopt the other's Pods).
-func fabricManagerLabels(name string) map[string]string {
-	return map[string]string{"app.kubernetes.io/name": name}
-}
-
-// buildFabricManagerDeployment returns the desired fabric manager
-// Deployment — see ensureFabricManagerWorkload's own doc for the full
-// rationale behind its shape.
-func buildFabricManagerDeployment(image, nodeName, fabricID, interfaceName string) *appsv1.Deployment {
-	name := ManagerDeploymentName(fabricID, interfaceName)
-	labels := fabricManagerLabels(name)
-	replicas := int32(1)
-	allowPrivilegeEscalation := false
-	readOnlyRootFilesystem := true
-
-	return &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: fabricManagerNamespace},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
-			Selector: &metav1.LabelSelector{MatchLabels: labels},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
-				Spec: corev1.PodSpec{
-					HostNetwork:  true,
-					DNSPolicy:    corev1.DNSClusterFirstWithHostNet,
-					NodeSelector: map[string]string{fabricManagerNodeLabel: nodeName},
-					Containers: []corev1.Container{{
-						Name:            fabricManagerBaseName,
-						Image:           image,
-						ImagePullPolicy: imagePullPolicy(image),
-						Args:            []string{"fabricmanager", "run", "--id", fabricID, "--interface", interfaceName},
-						SecurityContext: &corev1.SecurityContext{
-							AllowPrivilegeEscalation: &allowPrivilegeEscalation,
-							ReadOnlyRootFilesystem:   &readOnlyRootFilesystem,
-							Capabilities: &corev1.Capabilities{
-								Add:  []corev1.Capability{"NET_ADMIN"},
-								Drop: []corev1.Capability{"ALL"},
-							},
-						},
-					}},
-				},
-			},
-		},
-	}
 }

@@ -14,7 +14,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
@@ -46,85 +45,50 @@ const (
 	// matches at least one claimed Instance in that zone — see
 	// resolveGatewayNode.
 	GatewayNodeSelectedConditionType = "GatewayNodeSelected"
-	// NetworkConfiguredConditionType is one zone entry's own condition set
-	// once its elected gateway node's static route has been pushed via
-	// Talos — see NetworkConfigurer.
+	// NetworkConfiguredConditionType is one zone entry's own condition —
+	// set by pkg/cli/fabricmanager itself, not this controller (see
+	// reconcileNATForGatewayNode's own doc): this controller only
+	// publishes desired state and delivers the Talos credential needed to
+	// apply it, never observing whether that application actually
+	// succeeded.
 	NetworkConfiguredConditionType = "NetworkConfigured"
-	// NATInstalledConditionType is one zone entry's own condition set once
-	// its NAT-masquerade workload is running on its elected gateway node —
-	// see ensureFabricManagerWorkload.
+	// NATInstalledConditionType is one zone entry's own condition, set by
+	// pkg/cli/fabricmanager itself once its own NAT-masquerade rule is
+	// actually running — see NetworkConfiguredConditionType's own doc for
+	// why this controller never sets it.
 	NATInstalledConditionType = "NATInstalled"
 	// ZoneReadyConditionType is one zone entry's own aggregate condition —
 	// mirrors ReadyConditionType's identical "kubectl-tree needs a literal
 	// Ready-Typed condition" reasoning, scoped to this one status.zones[]
-	// entry instead of the whole Fabric.
+	// entry instead of the whole Fabric. Set by this controller only for
+	// the paths it fully owns (no gateway candidate, NAT disabled);
+	// otherwise pkg/cli/fabricmanager's own write-back owns it, the same
+	// as NetworkConfiguredConditionType/NATInstalledConditionType.
 	ZoneReadyConditionType = "Ready"
-
-	// TeardownConditionType is set false while a Fabric being deleted is
-	// still waiting on a zone's own NAT gateway workload teardown — see
-	// teardown.go's own doc. Mirrors zone.TeardownConditionType's identical
-	// "never observed true" shape: the finalizer is removed in the same
-	// reconcile pass that would otherwise have set it.
-	TeardownConditionType = "Teardown"
 
 	reasonInvalidSpec         = "InvalidSpec"
 	reasonValidSpec           = "ValidSpec"
 	reasonNoGatewayCandidate  = "NoGatewayCandidate"
 	reasonGatewayNodeSelected = "GatewayNodeSelected"
-	reasonNetworkConfigured   = "NetworkConfigured"
 	reasonNetworkConfigFailed = "NetworkConfigFailed"
-	reasonNATInstalled        = "NATInstalled"
-	reasonNATInstallFailed    = "NATInstallFailed"
 	reasonNATDisabled         = "NATDisabled"
-	reasonZoneReady           = "ZoneReady"
 	reasonZoneNotReady        = "ZoneNotReady"
-	// reasonNATTeardownFailed is teardown.go's own retryable-failure reason
-	// — see reconcileTeardown.
-	reasonNATTeardownFailed = "NATTeardownFailed"
 
 	defaultRetryInterval = 15 * time.Second
-	// defaultTeardownTimeout bounds how long a Fabric's finalizer keeps
-	// retrying downstream NAT gateway teardown before giving up and
-	// removing itself anyway — mirrors zone.defaultTeardownTimeout's
-	// identical "not a finalizer that blocks deletion forever" reasoning.
-	defaultTeardownTimeout = 15 * time.Minute
-
-	// FabricFinalizer is the finalizer teardown.go adds to every Fabric
-	// this package reconciles, and only ever removes once every zone's own
-	// NAT gateway workload is torn down (or teardown has been abandoned
-	// after defaultTeardownTimeout — see reconcileTeardown).
-	FabricFinalizer = "kontinuum.sh/fabric-teardown"
 )
 
 // Config configures a Controller.
 type Config struct {
 	// Logger receives the controller's log output.
 	Logger *slog.Logger
-	// NetworkConfigurer pushes a gateway node's static route via Talos —
-	// see its own doc. Defaults to NewNetworkConfigurer() when nil; tests
-	// inject a fake through, the same role zone.DownstreamClientBuilder
-	// plays below.
-	NetworkConfigurer NetworkConfigurer
 	// DownstreamClientBuilder builds a client.Client against a zone's own
 	// cluster from its stored kubeconfig — reused directly from
 	// pkg/domain/zone rather than a second copy of the identical seam.
 	// Defaults to zone.NewDownstreamClientBuilder() when nil.
 	DownstreamClientBuilder zone.DownstreamClientBuilder
-	// Image is the full kontinuum container image reference (repo:tag) the
-	// NAT gateway workload runs — see pkg/cli/serve.go's fabricOptions.
-	// Deployed verbatim, unlike zone.Reconciler.resolveImage's own
-	// digest-pinning/floating-tag resolution: the NAT gateway workload is
-	// this same process's own image, already known exactly (this process's
-	// own build version), with no separate fleet-wide version to resolve.
-	Image string
 	// RetryInterval is how long Reconcile waits before retrying a step
 	// that hasn't converged yet. Defaults to fifteen seconds when zero.
 	RetryInterval time.Duration
-	// TeardownTimeout bounds how long a Fabric being deleted keeps retrying
-	// downstream NAT gateway teardown before giving up and removing its
-	// finalizer anyway — see teardown.go's own doc. Defaults to fifteen
-	// minutes when zero.
-	TeardownTimeout time.Duration
 	// ZoneLease is this process's own zonelease.Locker identity — see
 	// zonelease.Identity's own doc. Fabric is region-scoped, hub-owned
 	// fleet state (not any one zone's own resource — issue #24's "one
@@ -141,24 +105,15 @@ type Controller struct {
 	Config Config
 }
 
-// NewController builds a Controller from cfg, defaulting NetworkConfigurer,
-// DownstreamClientBuilder, RetryInterval, and TeardownTimeout when left
-// zero.
+// NewController builds a Controller from cfg, defaulting
+// DownstreamClientBuilder and RetryInterval when left zero.
 func NewController(cfg Config) *Controller {
-	if cfg.NetworkConfigurer == nil {
-		cfg.NetworkConfigurer = NewNetworkConfigurer()
-	}
-
 	if cfg.DownstreamClientBuilder == nil {
 		cfg.DownstreamClientBuilder = zone.NewDownstreamClientBuilder()
 	}
 
 	if cfg.RetryInterval == 0 {
 		cfg.RetryInterval = defaultRetryInterval
-	}
-
-	if cfg.TeardownTimeout == 0 {
-		cfg.TeardownTimeout = defaultTeardownTimeout
 	}
 
 	return &Controller{Config: cfg}
@@ -171,11 +126,8 @@ func NewController(cfg Config) *Controller {
 func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 	reconciler := &Reconciler{
 		Client:                  mgr.GetClient(),
-		NetworkConfigurer:       c.Config.NetworkConfigurer,
 		DownstreamClientBuilder: c.Config.DownstreamClientBuilder,
-		Image:                   c.Config.Image,
 		RetryInterval:           c.Config.RetryInterval,
-		TeardownTimeout:         c.Config.TeardownTimeout,
 		Locker: zonelease.NewLocker(
 			mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
 		Logger: c.Config.Logger,
@@ -210,11 +162,8 @@ func requestsFor(fabrics []v1alpha2.Fabric) []ctrl.Request {
 // gateway node — see this package's own doc.
 type Reconciler struct {
 	Client                  client.Client
-	NetworkConfigurer       NetworkConfigurer
 	DownstreamClientBuilder zone.DownstreamClientBuilder
-	Image                   string
 	RetryInterval           time.Duration
-	TeardownTimeout         time.Duration
 	// Locker gates every write below against zonelease — see
 	// Config.ZoneLease's own doc.
 	Locker *zonelease.Locker
@@ -241,17 +190,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	if !acquired {
 		return ctrl.Result{RequeueAfter: zonelease.Jitter(r.RetryInterval)}, nil
-	}
-
-	if !fabricObj.DeletionTimestamp.IsZero() {
-		return r.reconcileTeardown(ctx, &fabricObj)
-	}
-
-	if controllerutil.AddFinalizer(&fabricObj, FabricFinalizer) {
-		err = r.Client.Update(ctx, &fabricObj)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to add finalizer to fabric %q: %w", fabricObj.Name, err)
-		}
 	}
 
 	return r.reconcileFabric(ctx, &fabricObj)
@@ -482,23 +420,27 @@ func (r *Reconciler) reconcileZoneStatuses(
 }
 
 // reconcileZoneEntry resolves entry's own gateway node and, once NAT is
-// enabled and a node is resolved, pushes its static route via Talos and
-// ensures its NAT-masquerade workload is running — mutating entry's own
-// GatewayNodeRef/Conditions in place. A failure at any step is caught and
-// reported as that step's own False condition (logged as a warning), never
-// propagated as a hard Reconcile error: every failure mode here (no
+// enabled and a node is resolved, publishes its desired network config
+// and delivers the Talos credential needed to apply it — mutating entry's
+// own GatewayNodeRef/Conditions in place. A failure at any step is caught
+// and reported as that step's own False condition (logged as a warning),
+// never propagated as a hard Reconcile error: every failure mode here (no
 // candidate yet, the zone's TalosCluster not bootstrapped yet, its gateway
 // node unreachable) is expected, ordinary "not converged yet" state that
 // the next requeue retries — see zone.Reconciler.reconcileInstall's
 // identical tolerance for the same class of "not ready yet" failure.
+//
+// A gateway node re-elected away from a previous one needs no explicit
+// teardown here: pkg/cli/fabricmanager's own reconcile loop already
+// notices, on its own next pass, that it's no longer this zone's own
+// gatewayNodeRef for any live Fabric, and prunes its own stale state
+// accordingly (see that package's own Reconciler and
+// PruneStaleMasqueradeTables) — this controller no longer manages any
+// per-node workload lifecycle to tear down in the first place.
 func (r *Reconciler) reconcileZoneEntry(
 	ctx context.Context, fabricObj *v1alpha2.Fabric, zoneObj v1alpha2.Zone, entry *v1alpha2.FabricZoneStatus,
 ) {
-	previousGatewayNodeRef := entry.GatewayNodeRef
-
 	gatewayNode, resolved := r.recordGatewayNodeSelection(ctx, fabricObj, entry, zoneObj.Spec.Zone)
-
-	r.teardownStaleGatewayNode(ctx, fabricObj, zoneObj, entry.Zone, previousGatewayNodeRef, entry.GatewayNodeRef)
 
 	// Checked before the !resolved return below: NAT is the only thing a
 	// resolved gateway node is used for today, so a zone with NAT disabled
@@ -516,31 +458,6 @@ func (r *Reconciler) reconcileZoneEntry(
 	}
 
 	r.reconcileNATForGatewayNode(ctx, fabricObj, zoneObj, gatewayNode, entry)
-}
-
-// teardownStaleGatewayNode tears down previousRef's own nat gateway
-// workload if this reconcile just replaced it with a different node (or no
-// node at all) — otherwise a re-elected gateway node leaves the old one's
-// nat-masquerade workload running forever, orphaned and still forwarding
-// traffic nobody expects it to. A nil previousRef, or one that still
-// matches the newly resolved node, means nothing changed — the common
-// case, checked first so the (idempotent, but not free) teardown attempt
-// below only runs on an actual re-election.
-func (r *Reconciler) teardownStaleGatewayNode(
-	ctx context.Context, fabricObj *v1alpha2.Fabric, zoneObj v1alpha2.Zone,
-	zoneName string, previousRef, currentRef *v1alpha2.ObjectReference,
-) {
-	if previousRef == nil || (currentRef != nil && currentRef.Name == previousRef.Name) {
-		return
-	}
-
-	staleStatus := v1alpha2.FabricZoneStatus{Zone: zoneName, GatewayNodeRef: previousRef}
-
-	err := r.teardownZoneWorkload(ctx, fabricObj, zoneObj, staleStatus)
-	if err != nil {
-		r.Logger.Warn("failed to tear down stale gateway node's nat workload",
-			"fabric", fabricObj.Name, "zone", zoneName, "node", previousRef.Name, "error", err)
-	}
 }
 
 // recordGatewayNodeSelection resolves entry's own gateway node (see
@@ -585,10 +502,25 @@ func (r *Reconciler) recordGatewayNodeSelection(
 	return gatewayNode, true
 }
 
-// reconcileNATForGatewayNode pushes gatewayNode's own network config and
-// NAT workload — only reached once NAT is enabled and a gateway node is
-// resolved (see reconcileZoneEntry) — split out purely to keep that
-// function's own length in check.
+// reconcileNATForGatewayNode publishes gatewayNode's own desired network
+// config (entry.GatewayInterfaces — see that field's own doc) and
+// delivers the Talos credential pkg/cli/fabricmanager needs to apply it
+// (see ensureGatewayTalosConfig) — only reached once NAT is enabled and a
+// gateway node is resolved (see reconcileZoneEntry). The actual
+// interface-address assignment and NAT-masquerade workload are
+// pkg/cli/fabricmanager's own responsibility now: it runs as a Pod
+// directly on gatewayNode (see pkg/domain/zone.ensureFabricManagerDaemonSet),
+// watches this same Fabric object, and reports NetworkConfigured/
+// NATInstalled/Ready back onto entry itself once it actually applies
+// them. This function still reports its own directly-observable failures
+// (talos cluster not found, interfaces not classifiable, credential
+// delivery itself failing) as NetworkConfiguredConditionType False — that
+// much genuinely blocks pkg/cli/fabricmanager before it can even try —
+// but never sets NetworkConfiguredConditionType/NATInstalledConditionType/
+// ZoneReadyConditionType True, or NATInstalledConditionType at all: this
+// function's own job ends at "desired state published, credential
+// delivered", and it has no way to know whether pkg/cli/fabricmanager's
+// own application of that state actually succeeded.
 func (r *Reconciler) reconcileNATForGatewayNode(
 	ctx context.Context, fabricObj *v1alpha2.Fabric, zoneObj v1alpha2.Zone,
 	gatewayNode *v1alpha2.Instance, entry *v1alpha2.FabricZoneStatus,
@@ -599,11 +531,7 @@ func (r *Reconciler) reconcileNATForGatewayNode(
 	if err != nil {
 		r.Logger.Warn("failed to get talos cluster for gateway workload",
 			"fabric", fabricObj.Name, "zone", entry.Zone, "cluster", zoneObj.Name, "error", err)
-		meta.SetStatusCondition(&entry.Conditions, metav1.Condition{
-			Type: NetworkConfiguredConditionType, Status: metav1.ConditionFalse,
-			Reason: reasonNetworkConfigFailed, Message: err.Error(),
-		})
-		setZoneReadyCondition(entry, false, reasonZoneNotReady, "talos cluster not found yet")
+		failNetworkConfig(entry, "talos cluster not found yet", err)
 
 		return
 	}
@@ -613,30 +541,49 @@ func (r *Reconciler) reconcileNATForGatewayNode(
 		err := interfaceClassificationError(gatewayNode.Name, wan)
 		r.Logger.Warn("gateway node interfaces not usable yet",
 			"fabric", fabricObj.Name, "zone", entry.Zone, "node", gatewayNode.Name, "error", err)
-		meta.SetStatusCondition(&entry.Conditions, metav1.Condition{
-			Type: NetworkConfiguredConditionType, Status: metav1.ConditionFalse,
-			Reason: reasonNetworkConfigFailed, Message: err.Error(),
-		})
-		setZoneReadyCondition(entry, false, reasonZoneNotReady, "gateway node interfaces not usable yet")
+		failNetworkConfig(entry, "gateway node interfaces not usable yet", err)
 
 		return
 	}
 
-	networkOK := r.reconcileNetworkConfig(ctx, &cluster, gatewayNode, fabricIfaces, entry)
+	entry.GatewayInterfaces = fabricIfaces
 
-	natOK := false
-	if networkOK {
-		natOK = r.reconcileNATWorkload(ctx, &cluster, gatewayNode, fabricObj.Name, wan, entry)
+	kubeconfig, err := loadClusterKubeconfig(ctx, r.Client, &cluster)
+	if err != nil {
+		r.Logger.Warn("no downstream kubeconfig available yet, skipping talos credential delivery",
+			"fabric", fabricObj.Name, "zone", entry.Zone, "error", err)
+		failNetworkConfig(entry, "downstream kubeconfig not stored yet", err)
+
+		return
 	}
 
-	switch {
-	case networkOK && natOK:
-		setZoneReadyCondition(entry, true, reasonZoneReady, "gateway node network and nat workload configured")
-	case networkOK:
-		setZoneReadyCondition(entry, false, reasonZoneNotReady, "nat gateway workload not installed yet")
-	default:
-		setZoneReadyCondition(entry, false, reasonZoneNotReady, "gateway node network not configured yet")
+	downstream, err := r.DownstreamClientBuilder.Build(kubeconfig)
+	if err != nil {
+		r.Logger.Warn("failed to build downstream client for talos credential delivery",
+			"fabric", fabricObj.Name, "zone", entry.Zone, "cluster", cluster.Name, "error", err)
+		failNetworkConfig(entry, "downstream cluster not reachable yet", err)
+
+		return
 	}
+
+	err = ensureGatewayTalosConfig(ctx, r.Client, downstream, &cluster, gatewayNode)
+	if err != nil {
+		r.Logger.Warn("failed to deliver talos credential for gateway node",
+			"fabric", fabricObj.Name, "zone", entry.Zone, "node", gatewayNode.Name, "error", err)
+		failNetworkConfig(entry, "talos credential not delivered yet", err)
+	}
+}
+
+// failNetworkConfig records err as entry's own NetworkConfiguredConditionType
+// False (reasonNetworkConfigFailed) and ZoneReadyConditionType False
+// (reasonZoneNotReady, notReadyMessage) — the shared shape every one of
+// reconcileNATForGatewayNode's own failure branches reports.
+func failNetworkConfig(entry *v1alpha2.FabricZoneStatus, notReadyMessage string, err error) {
+	meta.SetStatusCondition(&entry.Conditions, metav1.Condition{
+		Type: NetworkConfiguredConditionType, Status: metav1.ConditionFalse,
+		Reason: reasonNetworkConfigFailed, Message: err.Error(),
+	})
+	setZoneReadyCondition(entry, false, reasonZoneNotReady, notReadyMessage)
 }
 
 // interfaceClassificationError builds reconcileNATForGatewayNode's own
@@ -717,130 +664,6 @@ func (r *Reconciler) resolveGatewayNode(
 	chosen := eligible[names[0]]
 
 	return &chosen, true, nil
-}
-
-// reconcileNetworkConfig assigns entry's own GatewayIP as a real address
-// on fabricIfaces (see NetworkConfigurer/BuildGatewayAddressPatch),
-// reporting the outcome as entry's own NetworkConfiguredConditionType and
-// returning whether it succeeded — every failure here (secrets bundle not
-// stored yet, the node itself unreachable) is caught and logged, never
-// propagated as a hard Reconcile error, mirroring reconcileZoneEntry's own
-// doc. Records entry.GatewayInterfaces on success — see that field's own
-// doc.
-func (r *Reconciler) reconcileNetworkConfig(
-	ctx context.Context, cluster *v1alpha2.TalosCluster, gatewayNode *v1alpha2.Instance,
-	fabricIfaces []string, entry *v1alpha2.FabricZoneStatus,
-) bool {
-	err := r.pushNetworkConfig(ctx, cluster, *entry, gatewayNode, fabricIfaces)
-	if err != nil {
-		r.Logger.Warn("failed to push gateway node network config",
-			"cluster", cluster.Name, "zone", entry.Zone, "node", gatewayNode.Name, "error", err)
-		meta.SetStatusCondition(&entry.Conditions, metav1.Condition{
-			Type: NetworkConfiguredConditionType, Status: metav1.ConditionFalse,
-			Reason: reasonNetworkConfigFailed, Message: err.Error(),
-		})
-
-		return false
-	}
-
-	entry.GatewayInterfaces = fabricIfaces
-
-	meta.SetStatusCondition(&entry.Conditions, metav1.Condition{
-		Type: NetworkConfiguredConditionType, Status: metav1.ConditionTrue, Reason: reasonNetworkConfigured,
-		Message: fmt.Sprintf("assigned gateway address %s on instance %q, interfaces %v",
-			entry.GatewayIP, gatewayNode.Name, fabricIfaces),
-	})
-
-	return true
-}
-
-// pushNetworkConfig does the actual work reconcileNetworkConfig reports the
-// outcome of.
-func (r *Reconciler) pushNetworkConfig(
-	ctx context.Context, cluster *v1alpha2.TalosCluster, entry v1alpha2.FabricZoneStatus,
-	gatewayNode *v1alpha2.Instance, fabricIfaces []string,
-) error {
-	gatewayPrefix, err := GatewayPrefix(entry.CIDR, entry.GatewayIP)
-	if err != nil {
-		return err
-	}
-
-	bundle, err := LoadSecretsBundle(ctx, r.Client, cluster.Status.SecretRef)
-	if err != nil {
-		return err
-	}
-
-	addr := dialAddress(*gatewayNode)
-
-	talosCfg, err := BuildTalosConfig(bundle, cluster.Name, []string{addr})
-	if err != nil {
-		return err
-	}
-
-	patch, err := BuildGatewayAddressPatch(fabricIfaces, gatewayPrefix)
-	if err != nil {
-		return err
-	}
-
-	err = r.NetworkConfigurer.ApplyInterfaceConfig(ctx, addr, talosCfg, patch)
-	if err != nil {
-		return fmt.Errorf("failed to push interface config to gateway node %q: %w", gatewayNode.Name, err)
-	}
-
-	return nil
-}
-
-// reconcileNATWorkload ensures gatewayNode's own NAT-masquerade workload is
-// running on cluster's own downstream cluster, masquerading outbound
-// traffic through wanInterface (see classifyGatewayInterfaces), reporting
-// the outcome as entry's own NATInstalledConditionType and returning
-// whether it succeeded — only reached once reconcileNetworkConfig has
-// already succeeded (see reconcileZoneEntry).
-func (r *Reconciler) reconcileNATWorkload(
-	ctx context.Context, cluster *v1alpha2.TalosCluster, gatewayNode *v1alpha2.Instance,
-	fabricID, wanInterface string, target *v1alpha2.FabricZoneStatus,
-) bool {
-	err := r.installNATWorkload(ctx, cluster, gatewayNode.Name, fabricID, wanInterface)
-	if err != nil {
-		r.Logger.Warn("failed to install nat gateway workload",
-			"cluster", cluster.Name, "zone", target.Zone, "node", gatewayNode.Name, "error", err)
-		meta.SetStatusCondition(&target.Conditions, metav1.Condition{
-			Type: NATInstalledConditionType, Status: metav1.ConditionFalse,
-			Reason: reasonNATInstallFailed, Message: err.Error(),
-		})
-
-		return false
-	}
-
-	meta.SetStatusCondition(&target.Conditions, metav1.Condition{
-		Type: NATInstalledConditionType, Status: metav1.ConditionTrue, Reason: reasonNATInstalled,
-		Message: fmt.Sprintf("nat gateway workload running on instance %q", gatewayNode.Name),
-	})
-
-	return true
-}
-
-// installNATWorkload does the actual work reconcileNATWorkload reports the
-// outcome of.
-func (r *Reconciler) installNATWorkload(
-	ctx context.Context, cluster *v1alpha2.TalosCluster, nodeName, fabricID, interfaceName string,
-) error {
-	kubeconfig, err := loadClusterKubeconfig(ctx, r.Client, cluster)
-	if err != nil {
-		return err
-	}
-
-	downstream, err := r.DownstreamClientBuilder.Build(kubeconfig)
-	if err != nil {
-		return fmt.Errorf("failed to build downstream client for cluster %q: %w", cluster.Name, err)
-	}
-
-	err = ensureFabricManagerWorkload(ctx, downstream, r.Image, nodeName, fabricID, interfaceName)
-	if err != nil {
-		return fmt.Errorf("failed to install nat gateway workload: %w", err)
-	}
-
-	return nil
 }
 
 // updateValidSpecCondition sets ValidSpecConditionType and mirrors it onto

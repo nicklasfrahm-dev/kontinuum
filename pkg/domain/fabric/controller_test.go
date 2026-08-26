@@ -4,14 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	appsv1 "k8s.io/api/apps/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -23,9 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
 	talosconfig "github.com/siderolabs/talos/pkg/machinery/config"
 	talossecrets "github.com/siderolabs/talos/pkg/machinery/config/generate/secrets"
 
@@ -58,6 +54,11 @@ const (
 	// pinned version, mirroring
 	// pkg/domain/taloscluster's own defaultTalosVersion.
 	testTalosContractVersion = "v1.13.0"
+	// testAppliedByFabricManagerMessage is testAlreadyKnownZoneFabricObject's
+	// own condition message, simulating pkg/cli/fabricmanager's own
+	// write-back — shared across its own three conditions purely so
+	// goconst doesn't flag the repeated literal.
+	testAppliedByFabricManagerMessage = "applied by fabricmanager"
 )
 
 func testNamespace() string { return v1alpha2.KontinuumSystemNamespace }
@@ -161,61 +162,6 @@ func testGatewayInstance(name, zone string) *v1alpha2.Instance {
 	}
 }
 
-// testFabricManagerName/testFabricManagerNamespace mirror what
-// pkg/domain/fabric/workload.go's own unexported
-// ManagerDeploymentName(testFabricName, "eth0")/fabricManagerNamespace
-// resolve to for every teardown fixture's own gateway node (see
-// testGatewayInstance, always given interface "eth0") — the teardown tests
-// assert against these local copies rather than a literal repeated at every
-// call site. SanitizeForK8sName(testFabricName) is "eu-2dfabric" (its own
-// "-" escaped to "-2d"), 11 bytes long, hence the "-11-" length prefix (see
-// ManagerDeploymentName's own doc for why that prefix exists).
-const testFabricManagerName = "kontinuum-fabric-manager-11-eu-2dfabric-eth0"
-
-func testFabricManagerNamespace() string { return v1alpha2.KontinuumSystemNamespace }
-
-// fabricManagerDeployment returns a stand-in for the Deployment
-// ensureFabricManagerWorkload installs — a teardown fixture representing
-// "already installed on this zone's downstream cluster," not something the
-// tests exercising the install path themselves create.
-func fabricManagerDeployment() *appsv1.Deployment {
-	labels := map[string]string{"app.kubernetes.io/name": testFabricManagerName}
-
-	return &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: testFabricManagerName, Namespace: testFabricManagerNamespace()},
-		Spec: appsv1.DeploymentSpec{
-			Selector: &metav1.LabelSelector{MatchLabels: labels},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: testFabricManagerName, Image: testImage}},
-				},
-			},
-		},
-	}
-}
-
-// fakeNetworkConfigurer is fabric.NetworkConfigurer's test double.
-type fakeNetworkConfigurer struct {
-	err     error
-	calls   *[]string
-	patches *[][]byte
-}
-
-func (f fakeNetworkConfigurer) ApplyInterfaceConfig(
-	_ context.Context, addr string, _ *clientconfig.Config, patch []byte,
-) error {
-	if f.calls != nil {
-		*f.calls = append(*f.calls, addr)
-	}
-
-	if f.patches != nil {
-		*f.patches = append(*f.patches, patch)
-	}
-
-	return f.err
-}
-
 // fakeDownstreamClientBuilder is zone.DownstreamClientBuilder's test
 // double — it never dials a real kubeconfig, always returning the same
 // pre-built fake client so a test can inspect what got created on it.
@@ -237,10 +183,7 @@ func (f fakeDownstreamClientBuilder) Build(_ []byte) (client.Client, error) {
 	return f.client, nil
 }
 
-var (
-	errTestDownstreamBuild = errors.New("downstream build failed")
-	errTestNodeUnreachable = errors.New("node unreachable")
-)
+var errTestDownstreamBuild = errors.New("downstream build failed")
 
 func newHubFakeClient(t *testing.T, objects ...client.Object) client.Client {
 	t.Helper()
@@ -258,33 +201,21 @@ func newHubFakeClient(t *testing.T, objects ...client.Object) client.Client {
 		Build()
 }
 
-func newDownstreamFakeClient(t *testing.T, objects ...client.Object) client.Client {
+func newDownstreamFakeClient(t *testing.T) client.Client {
 	t.Helper()
 
 	scheme := runtime.NewScheme()
 
 	require.NoError(t, corev1.AddToScheme(scheme))
-	require.NoError(t, appsv1.AddToScheme(scheme))
 
-	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+	return fake.NewClientBuilder().WithScheme(scheme).Build()
 }
 
-// testTeardownTimeout is newReconciler's own default Reconciler.TeardownTimeout
-// — long enough that TestReconcileTeardown* fixtures whose DeletionTimestamp
-// is "now" never spuriously hit it; TestReconcileTeardownGivesUpAfterTimeout
-// overrides it directly on the returned *fabric.Reconciler instead.
-const testTeardownTimeout = 15 * time.Minute
-
-func newReconciler(
-	hubClient client.Client, networkConfigurer fabric.NetworkConfigurer, downstreamBuilder zone.DownstreamClientBuilder,
-) *fabric.Reconciler {
+func newReconciler(hubClient client.Client, downstreamBuilder zone.DownstreamClientBuilder) *fabric.Reconciler {
 	return &fabric.Reconciler{
 		Client:                  hubClient,
-		NetworkConfigurer:       networkConfigurer,
 		DownstreamClientBuilder: downstreamBuilder,
-		Image:                   testImage,
 		RetryInterval:           testRetryInterval,
-		TeardownTimeout:         testTeardownTimeout,
 		Locker:                  zonelease.NewLocker(hubClient, hubClient, "test-hub", "", 0),
 		Logger:                  slog.Default(),
 	}
@@ -298,7 +229,7 @@ func TestReconcileIgnoresMissingFabric(t *testing.T) {
 	t.Parallel()
 
 	hubClient := newHubFakeClient(t)
-	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{}, fakeDownstreamClientBuilder{})
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{})
 
 	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
@@ -319,7 +250,7 @@ func TestReconcileDefaultsZonePrefixLengthOnceFromLiveZoneCount(t *testing.T) {
 	fabricObj.Spec.ZonePrefixLength = 0
 
 	hubClient := newHubFakeClient(t, fabricObj, testZoneObject(testZoneAName, "a"), testZoneObject(testZoneBName, "b"))
-	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{}, fakeDownstreamClientBuilder{})
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{})
 
 	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
@@ -343,7 +274,7 @@ func TestReconcileCarvesSubnetAndSetsValidSpecReady(t *testing.T) {
 	t.Parallel()
 
 	hubClient := newHubFakeClient(t, testFabricObject(), testZoneObject(testZoneAName, "a"))
-	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{}, fakeDownstreamClientBuilder{})
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{})
 
 	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
@@ -400,7 +331,7 @@ func TestReconcileWritesStatusOnceWhenZonesAndConditionBothChange(t *testing.T) 
 		}).
 		Build()
 
-	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{}, fakeDownstreamClientBuilder{})
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{})
 
 	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
@@ -416,7 +347,7 @@ func TestReconcileInvalidSpecBlocksReadyWithNoRequeue(t *testing.T) {
 	fabricObj.Spec.CIDR = "not-a-cidr"
 
 	hubClient := newHubFakeClient(t, fabricObj)
-	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{}, fakeDownstreamClientBuilder{})
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{})
 
 	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
@@ -430,7 +361,15 @@ func TestReconcileInvalidSpecBlocksReadyWithNoRequeue(t *testing.T) {
 	assert.False(t, meta.IsStatusConditionTrue(updated.Status.Conditions, fabric.ReadyConditionType))
 }
 
-func TestReconcileElectsGatewayPushesNetworkConfigAndInstallsNAT(t *testing.T) {
+// TestReconcileElectsGatewayAndDeliversTalosCredential covers what this
+// controller's own responsibility actually is now: elect a gateway node,
+// record its free interfaces (entry.GatewayInterfaces), and deliver the
+// Talos credential pkg/cli/fabricmanager needs to apply that config
+// itself (see ensureGatewayTalosConfig) — this controller no longer
+// pushes interface config or installs any workload directly (see
+// reconcileNATForGatewayNode's own doc), so it never claims
+// NetworkConfigured/NATInstalled/Ready true on its own.
+func TestReconcileElectsGatewayAndDeliversTalosCredential(t *testing.T) {
 	t.Parallel()
 
 	downstream := newDownstreamFakeClient(t)
@@ -441,16 +380,13 @@ func TestReconcileElectsGatewayPushesNetworkConfigAndInstallsNAT(t *testing.T) {
 		testGatewayInstance("node-a1", "a"),
 	)
 
-	var applyCalls []string
-
-	reconciler := newReconciler(hubClient,
-		fakeNetworkConfigurer{calls: &applyCalls}, fakeDownstreamClientBuilder{client: downstream})
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: downstream})
 
 	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result, "everything converged — no requeue")
-
-	assert.Equal(t, []string{"10.0.1.5"}, applyCalls, "pushed exactly once, to the elected node's discovered address")
+	assert.Equal(t, testRetryInterval, result.RequeueAfter,
+		"ZoneReady is pkg/cli/fabricmanager's own condition to set once it actually applies this state, "+
+			"so the hub keeps retrying until a later pass observes it carried forward as true")
 
 	var fabricObj v1alpha2.Fabric
 
@@ -460,21 +396,18 @@ func TestReconcileElectsGatewayPushesNetworkConfigAndInstallsNAT(t *testing.T) {
 	zoneStatus := fabricObj.Status.Zones[0]
 	require.NotNil(t, zoneStatus.GatewayNodeRef)
 	assert.Equal(t, "node-a1", zoneStatus.GatewayNodeRef.Name)
+	assert.Equal(t, []string{testFabricInterface}, zoneStatus.GatewayInterfaces)
 	assert.True(t, meta.IsStatusConditionTrue(zoneStatus.Conditions, fabric.GatewayNodeSelectedConditionType))
-	assert.True(t, meta.IsStatusConditionTrue(zoneStatus.Conditions, fabric.NetworkConfiguredConditionType))
-	assert.True(t, meta.IsStatusConditionTrue(zoneStatus.Conditions, fabric.NATInstalledConditionType))
-	assert.True(t, meta.IsStatusConditionTrue(zoneStatus.Conditions, fabric.ZoneReadyConditionType))
+	assert.False(t, meta.IsStatusConditionPresentAndEqual(
+		zoneStatus.Conditions, fabric.NetworkConfiguredConditionType, metav1.ConditionFalse),
+		"no hub-observable failure occurred, so this must stay unset — pkg/cli/fabricmanager's own to set")
 
-	var deployment appsv1.Deployment
+	var secret corev1.Secret
 
 	err = downstream.Get(t.Context(),
-		client.ObjectKey{Name: testFabricManagerName, Namespace: v1alpha2.KontinuumSystemNamespace}, &deployment)
-	require.NoError(t, err, "nat gateway deployment must be installed on the zone's own downstream cluster")
-
-	assert.Equal(t, "node-a1", deployment.Spec.Template.Spec.NodeSelector["kubernetes.io/hostname"])
-	assert.True(t, deployment.Spec.Template.Spec.HostNetwork)
-	require.Len(t, deployment.Spec.Template.Spec.Containers, 1)
-	assert.Contains(t, deployment.Spec.Template.Spec.Containers[0].Args, "eth0")
+		client.ObjectKey{Name: fabric.TalosConfigSecretName, Namespace: v1alpha2.KontinuumSystemNamespace}, &secret)
+	require.NoError(t, err, "the talos credential fabricmanager needs must be delivered to the downstream cluster")
+	assert.NotEmpty(t, secret.Data[fabric.TalosConfigSecretKey])
 }
 
 func TestReconcileStickyGatewayNodeSelection(t *testing.T) {
@@ -488,7 +421,7 @@ func TestReconcileStickyGatewayNodeSelection(t *testing.T) {
 		testGatewayInstance("node-a1", "a"), testGatewayInstance("node-a2", "a"),
 	)
 
-	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{}, fakeDownstreamClientBuilder{client: downstream})
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: downstream})
 
 	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
@@ -524,18 +457,14 @@ func TestReconcileSkipsNetworkAndNATWhenDisabled(t *testing.T) {
 
 	hubClient := newHubFakeClient(t, fabricObj, testZoneObject(testZoneAName, "a"), testGatewayInstance("node-a1", "a"))
 
-	var applyCalls []string
-
 	downstreamCalls := 0
 	reconciler := newReconciler(hubClient,
-		fakeNetworkConfigurer{calls: &applyCalls},
 		fakeDownstreamClientBuilder{err: errTestDownstreamBuild, calls: &downstreamCalls})
 
 	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
 
-	assert.Empty(t, applyCalls, "nat disabled: talos config must never be pushed")
 	assert.Zero(t, downstreamCalls, "nat disabled: the downstream client must never even be built")
 
 	var updated v1alpha2.Fabric
@@ -563,7 +492,7 @@ func TestReconcileNATDisabledZoneReadyWithNoGatewayCandidate(t *testing.T) {
 
 	hubClient := newHubFakeClient(t, fabricObj, testZoneObject(testZoneAName, "a"))
 
-	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{}, fakeDownstreamClientBuilder{})
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{})
 
 	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
@@ -592,7 +521,7 @@ func TestReconcileNoGatewayCandidateOnlyBlocksThatZone(t *testing.T) {
 		testGatewayInstance("node-b1", "b"),
 	)
 
-	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{}, fakeDownstreamClientBuilder{client: downstream})
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: downstream})
 
 	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
@@ -612,14 +541,29 @@ func TestReconcileNoGatewayCandidateOnlyBlocksThatZone(t *testing.T) {
 	}
 
 	assert.False(t, meta.IsStatusConditionTrue(byZone["a"].Conditions, fabric.GatewayNodeSelectedConditionType))
-	assert.True(t, meta.IsStatusConditionTrue(byZone["b"].Conditions, fabric.ZoneReadyConditionType))
+	assert.True(t, meta.IsStatusConditionTrue(byZone["b"].Conditions, fabric.GatewayNodeSelectedConditionType),
+		"zone a's missing candidate must not block zone b's own election")
+	assert.False(t, meta.IsStatusConditionPresentAndEqual(
+		byZone["b"].Conditions, fabric.NetworkConfiguredConditionType, metav1.ConditionFalse),
+		"zone b hit no hub-observable failure of its own")
 }
 
-func TestReconcileAddsFinalizer(t *testing.T) {
+// TestReconcileDeletionIsUnmanagedNow is a regression test for the
+// architecture change itself: this controller used to add FabricFinalizer
+// and run its own teardown sequence (tearing down each zone's own nat
+// gateway workload before letting deletion proceed). Now that
+// pkg/cli/fabricmanager self-manages its own state by watching Fabric
+// directly (see Reconciler's own doc) — noticing on its own that it's no
+// longer any zone's own gatewayNodeRef, and pruning its own stale
+// nftables state accordingly (see PruneStaleMasqueradeTables) — this
+// controller has no workload left to tear down, and so no finalizer to
+// gate deletion on: a `kubectl delete fabric` must delete the object
+// immediately, with nothing left here to block or delay it.
+func TestReconcileDeletionIsUnmanagedNow(t *testing.T) {
 	t.Parallel()
 
 	hubClient := newHubFakeClient(t, testFabricObject())
-	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{}, fakeDownstreamClientBuilder{})
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{})
 
 	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
@@ -627,73 +571,9 @@ func TestReconcileAddsFinalizer(t *testing.T) {
 	var fabricObj v1alpha2.Fabric
 
 	require.NoError(t, hubClient.Get(t.Context(), fabricObjectKey(), &fabricObj))
-	assert.True(t, controllerutil.ContainsFinalizer(&fabricObj, fabric.FabricFinalizer))
-}
+	assert.Empty(t, fabricObj.Finalizers, "no finalizer left for this controller to add")
 
-// fabricPendingDeletion builds a Fabric already carrying FabricFinalizer
-// and a status.zones entry pointing at an elected gateway node — the
-// fixture every teardown test starts from, standing in for a Fabric whose
-// own reconcileFabric already ran to completion at least once before
-// deletion was requested.
-func fabricPendingDeletion() *v1alpha2.Fabric {
-	fabricObj := testFabricObject()
-	controllerutil.AddFinalizer(fabricObj, fabric.FabricFinalizer)
-	fabricObj.Status.Zones = []v1alpha2.FabricZoneStatus{
-		{
-			Zone: "a", CIDR: blockCIDR0, GatewayIP: testBlockCIDR0GatewayIP,
-			GatewayNodeRef: &v1alpha2.ObjectReference{
-				APIVersion: v1alpha2.GroupVersion().String(), Kind: "Instance", Name: "node-a1",
-			},
-		},
-	}
-
-	return fabricObj
-}
-
-func TestReconcileTeardownDeletesFabricManagerWorkloadAndRemovesFinalizer(t *testing.T) {
-	t.Parallel()
-
-	downstream := newDownstreamFakeClient(t, fabricManagerDeployment())
-
-	fabricObj := fabricPendingDeletion()
-
-	hubClient := newHubFakeClient(t,
-		fabricObj, testZoneObject(testZoneAName, "a"), testTalosCluster(testZoneAName), talosClusterSecret(t, testZoneAName),
-		testGatewayInstance("node-a1", "a"))
-
-	require.NoError(t, hubClient.Delete(t.Context(), fabricObj))
-
-	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{}, fakeDownstreamClientBuilder{client: downstream})
-
-	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	var deployment appsv1.Deployment
-
-	err = downstream.Get(t.Context(),
-		client.ObjectKey{Name: testFabricManagerName, Namespace: testFabricManagerNamespace()}, &deployment)
-	assert.True(t, apierrors.IsNotFound(err), "the zone's own fabric manager workload must be torn down")
-
-	var check v1alpha2.Fabric
-
-	err = hubClient.Get(t.Context(), fabricObjectKey(), &check)
-	assert.True(t, apierrors.IsNotFound(err), "the fabric itself must be gone once its finalizer is removed")
-}
-
-func TestReconcileTeardownToleratesAlreadyGoneZone(t *testing.T) {
-	t.Parallel()
-
-	// No Zone/TalosCluster fixtures at all — the zone this Fabric once
-	// carved a subnet for is already gone by the time teardown runs.
-	fabricObj := fabricPendingDeletion()
-
-	hubClient := newHubFakeClient(t, fabricObj)
-
-	require.NoError(t, hubClient.Delete(t.Context(), fabricObj))
-
-	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{},
-		fakeDownstreamClientBuilder{err: errTestDownstreamBuild})
+	require.NoError(t, hubClient.Delete(t.Context(), &fabricObj))
 
 	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
@@ -702,35 +582,7 @@ func TestReconcileTeardownToleratesAlreadyGoneZone(t *testing.T) {
 	var check v1alpha2.Fabric
 
 	err = hubClient.Get(t.Context(), fabricObjectKey(), &check)
-	assert.True(t, apierrors.IsNotFound(err), "teardown must not get stuck on a zone that's already gone")
-}
-
-func TestReconcileTeardownGivesUpAfterTimeout(t *testing.T) {
-	t.Parallel()
-
-	fabricObj := fabricPendingDeletion()
-
-	hubClient := newHubFakeClient(t,
-		fabricObj, testZoneObject(testZoneAName, "a"), testTalosCluster(testZoneAName), talosClusterSecret(t, testZoneAName))
-
-	require.NoError(t, hubClient.Delete(t.Context(), fabricObj))
-
-	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{},
-		fakeDownstreamClientBuilder{err: errTestDownstreamBuild})
-	// A near-zero timeout guarantees reconcileTeardown sees itself as
-	// already past deadline on this very first attempt, even though the
-	// downstream build below would otherwise fail teardown forever.
-	reconciler.TeardownTimeout = time.Nanosecond
-
-	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	var check v1alpha2.Fabric
-
-	err = hubClient.Get(t.Context(), fabricObjectKey(), &check)
-	assert.True(t, apierrors.IsNotFound(err),
-		"the finalizer must be removed once the teardown timeout is exceeded, even though teardown itself never succeeded")
+	assert.True(t, apierrors.IsNotFound(err), "with no finalizer, deletion must not be gated on anything")
 }
 
 // singleInterfaceInstance returns a candidate Instance with only one
@@ -755,7 +607,7 @@ func TestReconcileSingleInterfaceGatewayNeverConfiguresNetwork(t *testing.T) {
 		testTalosCluster(testZoneAName), talosClusterSecret(t, testZoneAName),
 		singleInterfaceInstance("node-a1", "a"))
 
-	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{}, fakeDownstreamClientBuilder{})
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{})
 
 	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
@@ -790,36 +642,29 @@ func TestReconcileBridgesMultipleFabricInterfaces(t *testing.T) {
 		testFabricObject(), testZoneObject(testZoneAName, "a"),
 		testTalosCluster(testZoneAName), talosClusterSecret(t, testZoneAName), gatewayNode)
 
-	var patches [][]byte
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: downstream})
 
-	reconciler := newReconciler(hubClient,
-		fakeNetworkConfigurer{patches: &patches}, fakeDownstreamClientBuilder{client: downstream})
-
-	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	require.Len(t, patches, 1)
-	patch := string(patches[0])
-	assert.Contains(t, patch, "kind: BridgeConfig",
-		"two free interfaces must be bridged, not each assigned the same address")
-	assert.Contains(t, patch, testFabricInterface)
-	assert.Contains(t, patch, "eth2")
 
 	var fabricObj v1alpha2.Fabric
 
 	require.NoError(t, hubClient.Get(t.Context(), fabricObjectKey(), &fabricObj))
 	require.Len(t, fabricObj.Status.Zones, 1)
-	assert.ElementsMatch(t, []string{testFabricInterface, "eth2"}, fabricObj.Status.Zones[0].GatewayInterfaces)
+	assert.ElementsMatch(t, []string{testFabricInterface, "eth2"}, fabricObj.Status.Zones[0].GatewayInterfaces,
+		"both free interfaces must be published for pkg/cli/fabricmanager to bridge, not just one")
 }
 
 // testAlreadyKnownZoneFabricObject returns testFabricObject() with its
-// status pre-populated as if a previous reconcile had already run: fabric-
-// level ValidSpec/Ready, and zone "a"'s GatewayNodeRef/CIDR/GatewayIP/
-// GatewayInterfaces plus GatewayNodeSelected/NetworkConfigured conditions,
-// all set to exactly what TestReconcilePersistsConditionTransitionOnAlreadyKnownZone's
-// reconcile will recompute anyway — only NATInstalled/ZoneReady are left
-// False, so they're the only conditions that actually change.
+// status pre-populated as if this zone had already fully converged in an
+// earlier pass: fabric-level ValidSpec/Ready, zone "a"'s GatewayNodeRef/
+// CIDR/GatewayIP/GatewayInterfaces set to exactly what a fresh reconcile
+// will recompute anyway, GatewayNodeSelectedConditionType true (still this
+// controller's own condition to set), and NetworkConfigured/NATInstalled/
+// ZoneReady all true — simulating pkg/cli/fabricmanager's own earlier
+// write-back onto this same Fabric object once it actually applied that
+// state (see reconcileNATForGatewayNode's own doc for why this controller
+// itself never sets any of those three true).
 func testAlreadyKnownZoneFabricObject() *v1alpha2.Fabric {
 	fabricObj := testFabricObject()
 	fabricObj.Status.Conditions = []metav1.Condition{
@@ -832,9 +677,6 @@ func testAlreadyKnownZoneFabricObject() *v1alpha2.Fabric {
 			Reason: "ValidSpec", Message: "fabric spec is valid", LastTransitionTime: metav1.Now(),
 		},
 	}
-	networkConfiguredMessage := fmt.Sprintf(
-		"assigned gateway address %s on instance %q, interfaces [%s]",
-		testBlockCIDR0GatewayIP, "node-a1", testFabricInterface)
 
 	fabricObj.Status.Zones = []v1alpha2.FabricZoneStatus{
 		{
@@ -851,15 +693,15 @@ func testAlreadyKnownZoneFabricObject() *v1alpha2.Fabric {
 				},
 				{
 					Type: fabric.NetworkConfiguredConditionType, Status: metav1.ConditionTrue,
-					Reason: "NetworkConfigured", Message: networkConfiguredMessage, LastTransitionTime: metav1.Now(),
+					Reason: "NetworkConfigured", Message: testAppliedByFabricManagerMessage, LastTransitionTime: metav1.Now(),
 				},
 				{
-					Type: fabric.NATInstalledConditionType, Status: metav1.ConditionFalse,
-					Reason: "NATInstallFailed", Message: "downstream unreachable", LastTransitionTime: metav1.Now(),
+					Type: fabric.NATInstalledConditionType, Status: metav1.ConditionTrue,
+					Reason: "NATInstalled", Message: testAppliedByFabricManagerMessage, LastTransitionTime: metav1.Now(),
 				},
 				{
-					Type: fabric.ZoneReadyConditionType, Status: metav1.ConditionFalse,
-					Reason: "ZoneNotReady", Message: "nat gateway workload not installed yet", LastTransitionTime: metav1.Now(),
+					Type: fabric.ZoneReadyConditionType, Status: metav1.ConditionTrue,
+					Reason: "ZoneReady", Message: testAppliedByFabricManagerMessage, LastTransitionTime: metav1.Now(),
 				},
 			},
 		},
@@ -868,17 +710,14 @@ func testAlreadyKnownZoneFabricObject() *v1alpha2.Fabric {
 	return fabricObj
 }
 
-// TestReconcilePersistsConditionTransitionOnAlreadyKnownZone is a
-// regression test for the Conditions-slice-aliasing bug: entry.Conditions
-// used to be assigned directly from the previous status.zones entry
-// (`entry.Conditions = previous.Conditions`), sharing the same backing
-// array as fabricObj.Status.Zones[i].Conditions. meta.SetStatusCondition
-// mutates an existing condition's fields in place through a pointer into
-// that array, which silently rewrote the "before" snapshot
-// equalZoneStatuses compares against to already match "after" — hiding a
-// real transition from change detection and skipping the Status().Update
-// that should have persisted it.
-func TestReconcilePersistsConditionTransitionOnAlreadyKnownZone(t *testing.T) {
+// TestReconcileDoesNotClobberFabricManagerOwnedConditions is a contract
+// test for the ownership split itself: NetworkConfigured/NATInstalled/
+// ZoneReady are pkg/cli/fabricmanager's own conditions to set true (see
+// reconcileNATForGatewayNode's own doc) — a hub reconcile pass that
+// re-confirms the same already-known gateway node and interfaces must
+// leave all three exactly as fabricmanager left them, never resetting them
+// just because this controller itself never sets them true on its own.
+func TestReconcileDoesNotClobberFabricManagerOwnedConditions(t *testing.T) {
 	t.Parallel()
 
 	downstream := newDownstreamFakeClient(t)
@@ -888,44 +727,102 @@ func TestReconcilePersistsConditionTransitionOnAlreadyKnownZone(t *testing.T) {
 		fabricObj, testZoneObject(testZoneAName, "a"), testTalosCluster(testZoneAName), talosClusterSecret(t, testZoneAName),
 		testGatewayInstance("node-a1", "a"))
 
-	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{}, fakeDownstreamClientBuilder{client: downstream})
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: downstream})
 
 	result, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result, "the zone actually converges this pass, so no more retries are needed")
+	assert.Equal(t, ctrl.Result{}, result, "every zone was already reported ready by fabricmanager, so this pass settles")
 
 	var persisted v1alpha2.Fabric
 
 	require.NoError(t, hubClient.Get(t.Context(), fabricObjectKey(), &persisted))
 	require.Len(t, persisted.Status.Zones, 1)
+	assert.True(t, meta.IsStatusConditionTrue(persisted.Status.Zones[0].Conditions, fabric.NetworkConfiguredConditionType),
+		"fabricmanager's own NetworkConfigured=true must survive an unrelated hub reconcile pass")
 	assert.True(t, meta.IsStatusConditionTrue(persisted.Status.Zones[0].Conditions, fabric.NATInstalledConditionType),
-		"the False->True transition must actually be written to the API server, not just computed in memory")
+		"fabricmanager's own NATInstalled=true must survive an unrelated hub reconcile pass")
 	assert.True(t, meta.IsStatusConditionTrue(persisted.Status.Zones[0].Conditions, fabric.ZoneReadyConditionType),
-		"the False->True transition must actually be written to the API server, not just computed in memory")
+		"fabricmanager's own ZoneReady=true must survive an unrelated hub reconcile pass")
 }
 
-// TestReconcileKeepsPreviousGatewayInterfacesWhenNetworkConfigPushFails is a
-// regression test: reconcileZoneStatuses used to start each zone's own
-// GatewayInterfaces from zero every reconcile, relying entirely on
-// reconcileNetworkConfig to repopulate it on success. When a later reconcile's
-// own network config push transiently fails (node unreachable, secrets bundle
-// missing), that left status.zones[].gatewayInterfaces empty even though the
-// gateway address is still actually assigned to those interfaces from a prior,
-// successful push — an incorrect status regression, not a reflection of
-// reality. GatewayInterfaces must be carried forward from the previous status
-// by default, the same way GatewayNodeRef already is.
-func TestReconcileKeepsPreviousGatewayInterfacesWhenNetworkConfigPushFails(t *testing.T) {
+// TestReconcilePersistsGatewayNodeSelectionTransitionOnAlreadyKnownZone is a
+// regression test for the Conditions-slice-aliasing bug: entry.Conditions
+// used to be assigned directly from the previous status.zones entry
+// (`entry.Conditions = previous.Conditions`), sharing the same backing
+// array as fabricObj.Status.Zones[i].Conditions — the "before" snapshot
+// equalZoneStatuses compares against. meta.SetStatusCondition mutates an
+// existing condition's fields in place through a pointer into that array,
+// which silently rewrote the "before" snapshot to already match "after"
+// before the comparison ever ran, hiding a real transition from change
+// detection and skipping the Status().Update that should have persisted
+// it. GatewayNodeSelectedConditionType is still this controller's own
+// condition to flip (unlike NetworkConfigured/NATInstalled/ZoneReady,
+// which are pkg/cli/fabricmanager's now — see reconcileNATForGatewayNode's
+// own doc), so a previously-candidate-less zone gaining one is the
+// remaining scenario that still exercises this exact code path end to end.
+func TestReconcilePersistsGatewayNodeSelectionTransitionOnAlreadyKnownZone(t *testing.T) {
 	t.Parallel()
 
 	downstream := newDownstreamFakeClient(t)
-	fabricObj := testAlreadyKnownZoneFabricObject()
+
+	fabricObj := testFabricObject()
+	fabricObj.Status.Zones = []v1alpha2.FabricZoneStatus{
+		{
+			Zone: "a", CIDR: blockCIDR0, GatewayIP: testBlockCIDR0GatewayIP,
+			Conditions: []metav1.Condition{
+				{
+					Type: fabric.GatewayNodeSelectedConditionType, Status: metav1.ConditionFalse,
+					Reason: "NoGatewayCandidate", Message: `no instance in zone "a" matches spec.gatewaySelector`,
+					LastTransitionTime: metav1.Now(),
+				},
+			},
+		},
+	}
 
 	hubClient := newHubFakeClient(t,
 		fabricObj, testZoneObject(testZoneAName, "a"), testTalosCluster(testZoneAName), talosClusterSecret(t, testZoneAName),
 		testGatewayInstance("node-a1", "a"))
 
-	failingConfigurer := fakeNetworkConfigurer{err: errTestNodeUnreachable}
-	reconciler := newReconciler(hubClient, failingConfigurer, fakeDownstreamClientBuilder{client: downstream})
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: downstream})
+
+	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	var persisted v1alpha2.Fabric
+
+	require.NoError(t, hubClient.Get(t.Context(), fabricObjectKey(), &persisted))
+	require.Len(t, persisted.Status.Zones, 1)
+	assert.True(t, meta.IsStatusConditionTrue(
+		persisted.Status.Zones[0].Conditions, fabric.GatewayNodeSelectedConditionType),
+		"the False->True transition must actually be written to the API server, not just computed in memory")
+}
+
+// TestReconcileKeepsPreviousGatewayInterfacesWhenGatewayNodeBrieflyUnresolvable
+// is a regression test: reconcileZoneStatuses used to start each zone's own
+// GatewayInterfaces from zero every reconcile, relying entirely on
+// reconcileNATForGatewayNode to repopulate it on success. When a later
+// reconcile's own gateway node briefly stops being an eligible candidate
+// (e.g. its claimed-by label flaps), reconcileNATForGatewayNode never runs
+// at all that pass, which used to leave status.zones[].gatewayInterfaces
+// empty even though the gateway address is still actually assigned to
+// those interfaces from a prior, successful apply — an incorrect status
+// regression, not a reflection of reality. GatewayInterfaces must be
+// carried forward from the previous status by default, the same way
+// GatewayNodeRef already is.
+func TestReconcileKeepsPreviousGatewayInterfacesWhenGatewayNodeBrieflyUnresolvable(t *testing.T) {
+	t.Parallel()
+
+	downstream := newDownstreamFakeClient(t)
+	fabricObj := testAlreadyKnownZoneFabricObject()
+
+	flappingNode := testGatewayInstance("node-a1", "a")
+	delete(flappingNode.Labels, v1alpha2.LabelClaimedBy)
+
+	hubClient := newHubFakeClient(t,
+		fabricObj, testZoneObject(testZoneAName, "a"), testTalosCluster(testZoneAName), talosClusterSecret(t, testZoneAName),
+		flappingNode)
+
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: downstream})
 
 	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
 	require.NoError(t, err)
@@ -935,49 +832,5 @@ func TestReconcileKeepsPreviousGatewayInterfacesWhenNetworkConfigPushFails(t *te
 	require.NoError(t, hubClient.Get(t.Context(), fabricObjectKey(), &persisted))
 	require.Len(t, persisted.Status.Zones, 1)
 	assert.Equal(t, []string{testFabricInterface}, persisted.Status.Zones[0].GatewayInterfaces,
-		"a transient network config push failure must not wipe out the previously recorded gateway interfaces")
-}
-
-// TestReconcileTearsDownStaleGatewayNodeOnReElection is a regression test:
-// re-electing a zone's own gateway node (its previous pick stopped matching
-// spec.gatewaySelector — see resolveGatewayNode) used to leave the old
-// node's own nat gateway Deployment running forever on its downstream
-// cluster, orphaned and still masquerading traffic nobody expects it to.
-// NAT is disabled here so the newly elected node never gets its own
-// Deployment installed (which would otherwise collide by name with the
-// stale one, both testGatewayInstance fixtures sharing the same "eth0"
-// WAN interface) — isolating the assertion to the stale teardown alone.
-func TestReconcileTearsDownStaleGatewayNodeOnReElection(t *testing.T) {
-	t.Parallel()
-
-	fabricObj := testAlreadyKnownZoneFabricObject()
-	fabricObj.Spec.NAT.Disabled = true
-
-	staleNode := testGatewayInstance("node-a1", "a")
-	delete(staleNode.Labels, testGatewayLabel)
-
-	downstream := newDownstreamFakeClient(t, fabricManagerDeployment())
-	hubClient := newHubFakeClient(t,
-		fabricObj, testZoneObject(testZoneAName, "a"), testTalosCluster(testZoneAName), talosClusterSecret(t, testZoneAName),
-		staleNode, testGatewayInstance("node-a2", "a"))
-
-	reconciler := newReconciler(hubClient, fakeNetworkConfigurer{}, fakeDownstreamClientBuilder{client: downstream})
-
-	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
-	require.NoError(t, err)
-
-	var persisted v1alpha2.Fabric
-
-	require.NoError(t, hubClient.Get(t.Context(), fabricObjectKey(), &persisted))
-	require.Len(t, persisted.Status.Zones, 1)
-	require.NotNil(t, persisted.Status.Zones[0].GatewayNodeRef)
-	assert.Equal(t, "node-a2", persisted.Status.Zones[0].GatewayNodeRef.Name,
-		"node-a1 no longer matches the gateway selector, so node-a2 must be elected instead")
-
-	var deployment appsv1.Deployment
-
-	deploymentKey := client.ObjectKey{Name: testFabricManagerName, Namespace: testFabricManagerNamespace()}
-	err = downstream.Get(t.Context(), deploymentKey, &deployment)
-	assert.True(t, apierrors.IsNotFound(err),
-		"the stale gateway node's own nat workload must be torn down once it's no longer elected")
+		"a transient gateway-resolution failure must not wipe out the previously recorded gateway interfaces")
 }

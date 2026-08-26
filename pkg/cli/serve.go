@@ -743,15 +743,14 @@ func zoneOptions(cfg *config.Config, logger *slog.Logger, zoneLease zonelease.Id
 // fabricOptions builds the libkapi options that wire the Fabric IPAM/
 // gateway reconciler (see pkg/domain/fabric) onto the Server. No
 // WithPostStartHook is needed — fabrics.kontinuum.sh's CRD is already
-// ensured by instanceOptions' own ensureCRDs call. The NAT gateway
-// workload's own image is this exact running process's own image:tag
-// (zoneImageRepo, this build's own version — see pkg/cli/version.go),
-// unlike zoneOptions' ImageRepo, which zone.Reconciler.resolveImage
-// re-resolves per zone against the fleet's own registered version instead.
+// ensured by instanceOptions' own ensureCRDs call. The gateway node
+// agent's own image is zoneOptions' own concern now (see
+// pkg/domain/zone.ensureFabricManagerDaemonSet), installed once per zone
+// alongside kontinuum-server itself, not something this controller
+// resolves or deploys on its own anymore.
 func fabricOptions(logger *slog.Logger, zoneLease zonelease.Identity) []libkapi.Option {
 	controller := fabric.NewController(fabric.Config{
 		Logger:    logger.With("component", "fabric"),
-		Image:     zoneImageRepo + ":" + version,
 		ZoneLease: zoneLease,
 	})
 

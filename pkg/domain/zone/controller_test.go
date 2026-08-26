@@ -881,6 +881,11 @@ func assertIdentityRBACInstalled(t *testing.T, downstream client.Client) {
 // this is duplicated rather than exported.
 const fabricManagerResourceName = "kontinuum-fabricmanager"
 
+// testVerbGet mirrors the zone package's own unexported rbacVerbGet —
+// shared across this file's own RBAC assertions purely so goconst doesn't
+// flag the repeated literal.
+const testVerbGet = "get"
+
 func assertFabricManagerInstalled(t *testing.T, downstream client.Client) {
 	t.Helper()
 
@@ -888,12 +893,22 @@ func assertFabricManagerInstalled(t *testing.T, downstream client.Client) {
 	require.NoError(t, downstream.Get(t.Context(),
 		client.ObjectKey{Name: fabricManagerResourceName, Namespace: testDownstreamNamespace}, &sa))
 
+	assertFabricManagerRBAC(t, downstream)
+	assertFabricManagerDaemonSet(t, downstream)
+}
+
+func assertFabricManagerRBAC(t *testing.T, downstream client.Client) {
+	t.Helper()
+
 	var role rbacv1.ClusterRole
 	require.NoError(t, downstream.Get(t.Context(), client.ObjectKey{Name: fabricManagerResourceName}, &role))
-	require.Len(t, role.Rules, 1)
+	require.Len(t, role.Rules, 2)
 	assert.Equal(t, []string{"kontinuum.sh"}, role.Rules[0].APIGroups)
 	assert.Equal(t, []string{"fabrics"}, role.Rules[0].Resources)
-	assert.ElementsMatch(t, []string{"get", "list", "watch"}, role.Rules[0].Verbs)
+	assert.ElementsMatch(t, []string{testVerbGet, "list", "watch"}, role.Rules[0].Verbs)
+	assert.Equal(t, []string{"kontinuum.sh"}, role.Rules[1].APIGroups)
+	assert.Equal(t, []string{"fabrics/status"}, role.Rules[1].Resources)
+	assert.Equal(t, []string{"update"}, role.Rules[1].Verbs)
 
 	var binding rbacv1.ClusterRoleBinding
 	require.NoError(t, downstream.Get(t.Context(), client.ObjectKey{Name: fabricManagerResourceName}, &binding))
@@ -902,6 +917,26 @@ func assertFabricManagerInstalled(t *testing.T, downstream client.Client) {
 	assert.Equal(t, testDownstreamNamespace, binding.Subjects[0].Namespace)
 	assert.Equal(t, fabricManagerResourceName, binding.RoleRef.Name)
 	assert.Equal(t, "ClusterRole", binding.RoleRef.Kind)
+
+	var secretRole rbacv1.Role
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: fabricManagerResourceName, Namespace: testDownstreamNamespace}, &secretRole))
+	require.Len(t, secretRole.Rules, 1)
+	assert.Equal(t, []string{"kontinuum-fabricmanager-talosconfig"}, secretRole.Rules[0].ResourceNames,
+		"scoped to exactly the one talosconfig secret pkg/cli/fabricmanager reads, nothing broader")
+	assert.Equal(t, []string{testVerbGet}, secretRole.Rules[0].Verbs)
+
+	var secretBinding rbacv1.RoleBinding
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: fabricManagerResourceName, Namespace: testDownstreamNamespace}, &secretBinding))
+	require.Len(t, secretBinding.Subjects, 1)
+	assert.Equal(t, fabricManagerResourceName, secretBinding.Subjects[0].Name)
+	assert.Equal(t, fabricManagerResourceName, secretBinding.RoleRef.Name)
+	assert.Equal(t, "Role", secretBinding.RoleRef.Kind)
+}
+
+func assertFabricManagerDaemonSet(t *testing.T, downstream client.Client) {
+	t.Helper()
 
 	var daemonSet appsv1.DaemonSet
 	require.NoError(t, downstream.Get(t.Context(),
