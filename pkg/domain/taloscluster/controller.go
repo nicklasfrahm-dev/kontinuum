@@ -597,7 +597,7 @@ func (r *Reconciler) recheckWorkerLiveness(
 
 			status, reason, message := metav1.ConditionTrue, reasonMemberLive, messageMemberAnsweredVersion
 
-			_, versionErr := r.Bootstrapper.Version(ctx, controlPlaneAddr, dialAddress(*member), talosCfg)
+			_, _, versionErr := r.Bootstrapper.Version(ctx, controlPlaneAddr, dialAddress(*member), talosCfg)
 			if versionErr != nil {
 				status, reason = metav1.ConditionFalse, reasonMemberUnreachable
 				message = "periodic liveness recheck failed: " + versionErr.Error()
@@ -754,20 +754,29 @@ func (r *Reconciler) reconcileWorkerPool(
 }
 
 // recordTalosVersions best-effort fetches and persists each of members' real
-// Talos version and MemberJoinedConditionType, skipping any already marked
-// Joined — checked via that condition rather than Status.Talos.Version
-// directly so a member upgraded from before this condition existed
-// self-heals (re-fetches once, cheaply) instead of staying Joined-less
-// forever. Once a maintenance-mode member has had its config applied, its
-// own maintenance-mode Version RPC becomes permanently unreachable — its
-// apid has moved on to the real, non-maintenance-mode server — so dialAddr
-// (any already-configured, reachable cluster member) and talosCfg's admin
-// identity are used instead, targeting each member individually via
-// client.WithNode (see ClusterBootstrapper.Version's own doc). Failures are
-// logged, not fatal or returned: a member that hasn't finished rebooting
-// into its new config yet just tries again on the next reconcile. markReady
-// additionally sets MemberReadyConditionType — see its own doc for why only
-// callers that just health-checked this exact batch of members pass true.
+// Talos version and architecture, plus MemberJoinedConditionType, skipping
+// any already marked Joined — checked via that condition rather than
+// Status.Talos.Version directly so a member upgraded from before this
+// condition existed self-heals (re-fetches once, cheaply) instead of
+// staying Joined-less forever. Once a maintenance-mode member has had its
+// config applied, its own maintenance-mode Version RPC becomes permanently
+// unreachable — its apid has moved on to the real, non-maintenance-mode
+// server — so dialAddr (any already-configured, reachable cluster member)
+// and talosCfg's admin identity are used instead, targeting each member
+// individually via client.WithNode (see ClusterBootstrapper.Version's own
+// doc). Failures are logged, not fatal or returned: a member that hasn't
+// finished rebooting into its new config yet just tries again on the next
+// reconcile. markReady additionally sets MemberReadyConditionType — see its
+// own doc for why only callers that just health-checked this exact batch of
+// members pass true.
+//
+// arch is stamped onto every entry already in member.Status.CPUs (set once,
+// pre-claim, by pkg/domain/instance's own maintenance-mode discovery — see
+// v1alpha2.InstanceCPUStatus.Architecture's own doc) rather than through
+// that same maintenance-mode path, since it hits the identical
+// permanently-unreachable-post-config-apply problem Version itself does:
+// this RPC succeeding here is architecture's only realistic source once a
+// member has moved past maintenance mode.
 func (r *Reconciler) recordTalosVersions(
 	ctx context.Context, cluster *v1alpha2.TalosCluster, members []v1alpha2.Instance, dialAddr string,
 	talosCfg *clientconfig.Config, markReady bool,
@@ -779,7 +788,7 @@ func (r *Reconciler) recordTalosVersions(
 			continue
 		}
 
-		version, err := r.Bootstrapper.Version(ctx, dialAddr, dialAddress(*member), talosCfg)
+		version, arch, err := r.Bootstrapper.Version(ctx, dialAddr, dialAddress(*member), talosCfg)
 		if err != nil {
 			r.Logger.Warn("failed to fetch talos version for member, may still be rebooting into its new configuration",
 				"cluster", cluster.Name, "instance", member.Name, "error", err)
@@ -789,6 +798,8 @@ func (r *Reconciler) recordTalosVersions(
 
 		member.Status.Talos.Version = version
 		member.Status.LastProbeTime = metav1.Now()
+
+		r.fillMemberCPUData(ctx, cluster, member, dialAddr, talosCfg, arch)
 
 		meta.SetStatusCondition(&member.Status.Conditions, metav1.Condition{
 			Type: MemberJoinedConditionType, Status: metav1.ConditionTrue, Reason: reasonMemberJoined,
@@ -836,6 +847,65 @@ func (r *Reconciler) recordTalosVersions(
 				"cluster", cluster.Name, "instance", member.Name, "error", err)
 		}
 	}
+}
+
+// fillMemberCPUData stamps arch onto every one of member's already-
+// discovered CPUs, then — TODO(nicklasfrahm-dev/kontinuum#130): drop this
+// sysfs-read workaround once siderolabs/talos#14171 lands and kontinuum's
+// own Talos version requirement reaches whatever release ships it; Talos's
+// own hardware.Processor should report CoreCount/ThreadCount/MaxSpeedMHz
+// itself instead of kontinuum reading sysfs a second time — best-effort
+// fills those in too via ClusterBootstrapper.CPUTopology, for any CPU
+// entry Talos's own SMBIOS-derived data left incomplete (see
+// cpuCoreDataMissing's own doc). Factored out of recordTalosVersions purely
+// to keep that function under this repo's own cyclop limit.
+func (r *Reconciler) fillMemberCPUData(
+	ctx context.Context, cluster *v1alpha2.TalosCluster, member *v1alpha2.Instance, dialAddr string,
+	talosCfg *clientconfig.Config, arch string,
+) {
+	if arch != "" {
+		for i := range member.Status.CPUs {
+			member.Status.CPUs[i].Architecture = arch
+		}
+	}
+
+	if !cpuCoreDataMissing(member.Status.CPUs) {
+		return
+	}
+
+	coreCount, threadCount, maxSpeedMHz, err := r.Bootstrapper.CPUTopology(ctx, dialAddr, dialAddress(*member), talosCfg)
+	if err != nil {
+		r.Logger.Warn("failed to read cpu topology via sysfs workaround",
+			"cluster", cluster.Name, "instance", member.Name, "error", err)
+
+		return
+	}
+
+	for i := range member.Status.CPUs {
+		if member.Status.CPUs[i].CoreCount == 0 {
+			member.Status.CPUs[i].CoreCount = coreCount
+			member.Status.CPUs[i].ThreadCount = threadCount
+			member.Status.CPUs[i].MaxSpeedMHz = maxSpeedMHz
+		}
+	}
+}
+
+// cpuCoreDataMissing reports whether any of cpus has a zero CoreCount —
+// recordTalosVersions' own signal that Talos's SMBIOS-derived
+// hardware.Processor data was incomplete for this member and its sysfs
+// workaround (see ClusterBootstrapper.CPUTopology) is worth the extra
+// round trip. A board with no Processor entries at all (rather than an
+// incomplete one) isn't covered — see CPUTopology's own doc for why this
+// workaround only targets the incomplete-entry case it was written
+// against.
+func cpuCoreDataMissing(cpus []v1alpha2.InstanceCPUStatus) bool {
+	for _, cpu := range cpus {
+		if cpu.CoreCount == 0 {
+			return true
+		}
+	}
+
+	return false
 }
 
 // setControlPlaneCondition sets ControlPlaneReadyConditionType and

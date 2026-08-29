@@ -2859,11 +2859,12 @@ func discoveredInstance(name, talosVersion string) v1alpha2.Instance {
 				{DevPath: "/dev/sda", PrettySize: "512 GB", Model: "Samsung SSD", Transport: "nvme"},
 			},
 			CPUs: []v1alpha2.InstanceCPUStatus{
-				{ProductName: "AMD EPYC 7302P", CoreCount: 16, ThreadCount: 32, MaxSpeedMHz: 3000},
+				{ProductName: "AMD EPYC 7302P", Architecture: "amd64", CoreCount: 16, ThreadCount: 32, MaxSpeedMHz: 3000},
 			},
 			Memory: []v1alpha2.InstanceMemoryStatus{
 				{SizeMiB: 32768, Manufacturer: "Micron", Speed: 3200},
 			},
+			SerialNumber: "SN-1234567890",
 			Conditions: []metav1.Condition{
 				{
 					Type: "Discovered", Status: metav1.ConditionTrue,
@@ -3085,7 +3086,9 @@ func TestHandleMachineDetailRendersInstance(t *testing.T) {
 	assert.Contains(t, string(body), "/dev/sda")
 	assert.Contains(t, string(body), "512 GB")
 	assert.Contains(t, string(body), "AMD EPYC 7302P")
+	assert.Contains(t, string(body), "amd64")
 	assert.Contains(t, string(body), "32768 MiB")
+	assert.Contains(t, string(body), "SN-1234567890")
 }
 
 // TestHandleMachineDetailRendersDeletingForInstanceWithDeletionTimestamp

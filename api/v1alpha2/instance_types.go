@@ -90,6 +90,13 @@ type InstanceCPUStatus struct {
 	// ProductName is the processor's reported model name, when available.
 	// +optional
 	ProductName string `json:"productName"`
+	// Architecture is the node's own instruction-set architecture (e.g.
+	// amd64, arm64) — reported once per node via Talos's Version RPC, not
+	// per-socket, so every discovered CPU carries the same value. Same
+	// best-effort caveat as InstanceTalosStatus.Version: left empty
+	// whenever that RPC is unavailable in maintenance mode.
+	// +optional
+	Architecture string `json:"architecture"`
 	// CoreCount is the processor's physical core count.
 	// +optional
 	CoreCount uint32 `json:"coreCount"`
@@ -133,20 +140,30 @@ type InstanceStatus struct {
 	// +optional
 	Interfaces []InstanceInterfaceStatus `json:"interfaces"`
 	// Disks lists the disks discovered on this Instance — see
-	// InstanceDiskStatus. Populated the same way, and at the same time, as
-	// Interfaces.
+	// InstanceDiskStatus. Populated whenever Interfaces is (re)populated —
+	// see pkg/domain/instance's probeCandidates for exactly when that is:
+	// on first discovery, and again on any later rediscovery (e.g. after a
+	// reboot briefly took this Instance's Discovered condition back to
+	// false), but not on a steady-state recheck of an already-Discovered
+	// Instance, so a disk swap between reboots isn't detected.
 	// +optional
 	Disks []InstanceDiskStatus `json:"disks"`
 	// CPUs lists the processor sockets discovered on this Instance — see
-	// InstanceCPUStatus. Populated the same way, and at the same time, as
-	// Interfaces.
+	// InstanceCPUStatus and Disks' own doc for exactly when this is
+	// (re)populated.
 	// +optional
 	CPUs []InstanceCPUStatus `json:"cpus"`
 	// Memory lists the memory modules discovered on this Instance — see
-	// InstanceMemoryStatus. Populated the same way, and at the same time,
-	// as Interfaces.
+	// InstanceMemoryStatus and Disks' own doc for exactly when this is
+	// (re)populated.
 	// +optional
 	Memory []InstanceMemoryStatus `json:"memory"`
+	// SerialNumber is the machine's own chassis/board serial number, read
+	// from SMBIOS via Talos's COSI hardware.SystemInformation resource —
+	// distinct from InstanceDiskStatus.Serial, which is per-disk. See
+	// Disks' own doc for exactly when this is (re)populated.
+	// +optional
+	SerialNumber string `json:"serialNumber"`
 	// Talos groups every Talos-reported status value — see
 	// InstanceTalosStatus's own doc.
 	// +optional

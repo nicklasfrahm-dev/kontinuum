@@ -32,6 +32,9 @@ const maintenanceModePort = 50000
 // reconcile indefinitely.
 const rpcTimeout = 30 * time.Second
 
+// errNoCPUsReported is CPUTopology's own sentinel — see its own doc.
+var errNoCPUsReported = errors.New("no possible cpus reported")
+
 // ClusterBootstrapper is the Discoverer-style seam this package's
 // controller dials Talos through — see instance.Discoverer's own doc for
 // why this pattern exists. talosBootstrapper is the production
@@ -56,14 +59,24 @@ type ClusterBootstrapper interface {
 	) error
 	// Kubeconfig fetches the cluster's kubeconfig via addr.
 	Kubeconfig(ctx context.Context, addr string, talosCfg *clientconfig.Config) ([]byte, error)
-	// Version fetches the Talos version reported by node, dialing endpoint
-	// with the real (non-maintenance-mode) admin identity in talosCfg and
-	// routing the request to node via client.WithNode — see this
-	// interface's own Version implementation doc for why maintenance-mode
-	// discovery (pkg/domain/instance's own Discoverer) can no longer learn
-	// this on current Talos releases, making endpoint/node's post-config
-	// identity the only place left to fetch it.
-	Version(ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config) (string, error)
+	// Version fetches the Talos version and architecture reported by node,
+	// dialing endpoint with the real (non-maintenance-mode) admin identity
+	// in talosCfg and routing the request to node via client.WithNode —
+	// see this interface's own Version implementation doc for why
+	// maintenance-mode discovery (pkg/domain/instance's own Discoverer)
+	// can no longer learn either of these on current Talos releases,
+	// making endpoint/node's post-config identity the only place left to
+	// fetch them.
+	Version(ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config) (version, arch string, err error)
+	// CPUTopology reads node's own /sys/devices/system/cpu directly via the
+	// Talos API's Read RPC — the same endpoint/node/talosCfg targeting
+	// Version uses, since maintenance mode has no Read access either — as a
+	// workaround for boards whose SMBIOS-derived hardware.Processor data is
+	// incomplete (see this interface's own CPUTopology implementation doc,
+	// and nicklasfrahm-dev/kontinuum#130 / siderolabs/talos#14171).
+	CPUTopology(
+		ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config,
+	) (coreCount, threadCount, maxSpeedMHz uint32, err error)
 	// Reset wipes node back to maintenance mode — talosctl reset's
 	// programmatic equivalent — dialing endpoint with the real
 	// (non-maintenance-mode) admin identity in talosCfg and routing the
@@ -221,10 +234,10 @@ func (t talosBootstrapper) Kubeconfig(ctx context.Context, addr string, talosCfg
 // cluster member.
 func (t talosBootstrapper) Version(
 	ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config,
-) (string, error) {
+) (string, string, error) {
 	talosClient, err := t.dial(ctx, endpoint, talosCfg)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer talosClient.Close() //nolint:errcheck // best-effort close of a short-lived version-fetch connection
 
@@ -233,14 +246,157 @@ func (t talosBootstrapper) Version(
 
 	versionResp, err := talosClient.Version(talosclient.WithNode(rpcCtx, node))
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch talos version for %s via %s: %w", node, endpoint, err)
+		return "", "", fmt.Errorf("failed to fetch talos version for %s via %s: %w", node, endpoint, err)
 	}
 
 	if messages := versionResp.GetMessages(); len(messages) > 0 {
-		return messages[0].GetVersion().GetTag(), nil
+		return messages[0].GetVersion().GetTag(), messages[0].GetVersion().GetArch(), nil
 	}
 
-	return "", nil
+	return "", "", nil
+}
+
+// cpuPossiblePath, cpuCoreIDPathf, and cpuMaxFreqPathf are the sysfs paths
+// CPUTopology reads — see its own doc.
+const (
+	cpuPossiblePath = "/sys/devices/system/cpu/possible"
+	cpuCoreIDPathf  = "/sys/devices/system/cpu/cpu%d/topology/core_id"
+	cpuMaxFreqPathf = "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq"
+)
+
+// khzPerMHz converts cpuinfo_max_freq's kHz reading to the MHz
+// v1alpha2.InstanceCPUStatus.MaxSpeedMHz itself uses.
+const khzPerMHz = 1000
+
+// CPUTopology implements ClusterBootstrapper. It's a workaround, not a
+// long-term fix — see nicklasfrahm-dev/kontinuum#130, which links
+// siderolabs/talos#14171: on boards with thin/incomplete SMBIOS data (e.g.
+// Raspberry Pi CM4), Talos's own hardware.Processor resource comes back
+// with CoreCount/ThreadCount/MaxSpeed all zero, because it's built purely
+// from SMBIOS with no fallback. The Linux kernel knows all three
+// regardless of firmware, so this reads them straight from node's own
+// sysfs via the Talos API's Read RPC — dialed the same way, and gated by
+// the same maintenance-mode limitation, as Version above (maintenance mode
+// has no Read access either).
+//
+// CoreCount is the number of distinct topology/core_id values across every
+// possible CPU — deliberately not cross-referenced with
+// physical_package_id to also split multi-socket systems apart, since
+// every board this workaround actually targets is a single-SoC ARM
+// board with no such thing; see this repo's own tracking issue for why
+// that's an acceptable simplification for a workaround, not the real fix.
+// MaxSpeedMHz comes from CPU 0's own cpufreq driver and is left zero, not
+// an error, when that driver doesn't exist.
+func (t talosBootstrapper) CPUTopology(
+	ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config,
+) (uint32, uint32, uint32, error) {
+	talosClient, err := t.dial(ctx, endpoint, talosCfg)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	defer talosClient.Close() //nolint:errcheck // best-effort close of a short-lived sysfs-read connection
+
+	rpcCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+
+	rpcCtx = talosclient.WithNode(rpcCtx, node)
+
+	possible, err := readSysfsFile(rpcCtx, talosClient, cpuPossiblePath)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("failed to read cpu list for %s via %s: %w", node, endpoint, err)
+	}
+
+	cpus, err := parseCPUList(possible)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("failed to parse cpu list for %s: %w", node, err)
+	}
+
+	if len(cpus) == 0 {
+		return 0, 0, 0, fmt.Errorf("%w: %s", errNoCPUsReported, node)
+	}
+
+	threadCount := countCPUs(cpus)
+
+	coreCount := countDistinctCores(rpcCtx, talosClient, cpus)
+	if coreCount == 0 {
+		// topology/core_id was unreadable for every cpu — assume no SMT
+		// rather than reporting zero cores for a machine we just proved has
+		// at least threadCount of them.
+		coreCount = threadCount
+	}
+
+	maxSpeedMHz := readMaxSpeedMHz(rpcCtx, talosClient, cpus[0])
+
+	return coreCount, threadCount, maxSpeedMHz, nil
+}
+
+// countCPUs is len(cpus) as a uint32 — cpus comes from parseCPUList, whose
+// own bitSize-32 parsing already keeps every individual value in range, and
+// no real machine has anywhere near 1<<32 CPUs, so len() itself can't
+// overflow here either.
+func countCPUs(cpus []uint32) uint32 {
+	return uint32(len(cpus)) //nolint:gosec // see doc above
+}
+
+// countDistinctCores reads topology/core_id for every entry in cpus and
+// returns how many distinct values came back — see CPUTopology's own doc
+// for why physical_package_id isn't also factored in. A cpu whose core_id
+// can't be read or parsed is skipped, not fatal — see CPUTopology's own
+// best-effort framing.
+func countDistinctCores(rpcCtx context.Context, talosClient *talosclient.Client, cpus []uint32) uint32 {
+	coreIDs := make(map[uint32]struct{}, len(cpus))
+
+	for _, cpu := range cpus {
+		coreIDRaw, err := readSysfsFile(rpcCtx, talosClient, fmt.Sprintf(cpuCoreIDPathf, cpu))
+		if err != nil {
+			continue
+		}
+
+		coreID, err := parseSysfsUint(coreIDRaw)
+		if err != nil {
+			continue
+		}
+
+		coreIDs[coreID] = struct{}{}
+	}
+
+	return uint32(len(coreIDs)) //nolint:gosec // bounded by len(cpus) above, see countCPUs' own doc
+}
+
+// readMaxSpeedMHz reads cpu's own cpufreq-reported max frequency and
+// converts it to MHz, or returns 0 when the cpufreq driver doesn't exist
+// for this platform — genuinely best-effort, not an error CPUTopology's
+// caller needs to see.
+func readMaxSpeedMHz(rpcCtx context.Context, talosClient *talosclient.Client, cpu uint32) uint32 {
+	maxFreqRaw, err := readSysfsFile(rpcCtx, talosClient, fmt.Sprintf(cpuMaxFreqPathf, cpu))
+	if err != nil {
+		return 0
+	}
+
+	maxFreqKHz, err := parseSysfsUint(maxFreqRaw)
+	if err != nil {
+		return 0
+	}
+
+	return maxFreqKHz / khzPerMHz
+}
+
+// readSysfsFile reads path from talosClient's already-node-targeted rpcCtx
+// (see talosclient.WithNode) and returns its trimmed contents — every
+// sysfs file CPUTopology reads is a single short line.
+func readSysfsFile(rpcCtx context.Context, talosClient *talosclient.Client, path string) (string, error) {
+	reader, err := talosClient.Read(rpcCtx, path)
+	if err != nil {
+		return "", fmt.Errorf("failed to read %s: %w", path, err)
+	}
+	defer reader.Close() //nolint:errcheck // best-effort close after a fully-buffered read below
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return "", fmt.Errorf("failed to read %s: %w", path, err)
+	}
+
+	return string(data), nil
 }
 
 // Reset implements ClusterBootstrapper. graceful is passed straight through

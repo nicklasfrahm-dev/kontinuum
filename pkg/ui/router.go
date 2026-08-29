@@ -266,7 +266,8 @@ func NewRouter(
 			"templates/components/icon_chevron_left.html", "templates/components/icon_info.html",
 			"templates/components/icon_ethernet_port.html", "templates/components/icon_list_checks.html",
 			"templates/components/icon_trash.html", "templates/components/icon_loader_circle.html",
-			"templates/components/conditions_table.html"),
+			"templates/components/icon_cpu.html", "templates/components/icon_memory_stick.html",
+			"templates/components/icon_hard_drive.html", "templates/components/conditions_table.html"),
 		pageTalosClusters: mustParsePage("templates/talosclusters_content.html",
 			"templates/components/icon_trash.html"),
 		pageTalosCluster: mustParsePage("templates/taloscluster_content.html",
@@ -1813,6 +1814,7 @@ type instanceDiskRow struct {
 type instanceCPURow struct {
 	Manufacturer string
 	ProductName  string
+	Architecture string
 	CoreCount    uint32
 	ThreadCount  uint32
 	MaxSpeedMHz  uint32
@@ -1888,6 +1890,7 @@ func instanceCPURowsFrom(cpus []v1alpha2.InstanceCPUStatus) []instanceCPURow {
 		rows = append(rows, instanceCPURow{
 			Manufacturer: cpu.Manufacturer,
 			ProductName:  cpu.ProductName,
+			Architecture: cpu.Architecture,
 			CoreCount:    cpu.CoreCount,
 			ThreadCount:  cpu.ThreadCount,
 			MaxSpeedMHz:  cpu.MaxSpeedMHz,
@@ -1985,6 +1988,7 @@ func instanceDetailData(item v1alpha2.Instance, version string, authEnabled bool
 		dataKeyTalosVersion: item.Status.Talos.Version,
 		"DiscoverySource":   discoverySource,
 		"Hostname":          item.Annotations[instancedomain.AnnotationHostname],
+		"SerialNumber":      item.Status.SerialNumber,
 		"ClaimedBy":         item.Labels[v1alpha2.LabelClaimedBy],
 		"Labels":            sortedLabels(item.Labels),
 		"Interfaces":        interfaces,

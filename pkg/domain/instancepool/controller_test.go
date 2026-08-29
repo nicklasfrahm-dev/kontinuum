@@ -40,6 +40,10 @@ const (
 	racePoolBName     = "race-pool-b"
 	poolFinalizerName = "pool-finalizer"
 	poolTeardownName  = "pool-teardown"
+
+	testTierLabel           = "tier"
+	testWorkerTierValue     = "worker"
+	reasonDiscoveredFixture = "Discovered"
 )
 
 // statusUpdateCountingClient wraps a client.Client, counting every
@@ -102,14 +106,21 @@ func newReconciler(fakeClient client.Client) *instancepool.Reconciler {
 	}
 }
 
+// candidateInstance builds a claim-candidate fixture. discovered also
+// implies Live=true — claim's own gate requires both (see its own doc for
+// why Discovered alone, a one-time latch, isn't enough) — so this is the
+// steady-state "ready to claim" fixture every caller actually wants; see
+// TestReconcileDoesNotClaimDiscoveredButNotLiveInstance for the
+// discovered-but-not-live case specifically.
 func candidateInstance(name string, discovered bool) *v1alpha2.Instance {
 	inst := &v1alpha2.Instance{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{"tier": "worker"}},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{testTierLabel: testWorkerTierValue}},
 	}
 
 	if discovered {
 		inst.Status.Conditions = []metav1.Condition{
-			{Type: instance.DiscoveredConditionType, Status: metav1.ConditionTrue, Reason: "Discovered"},
+			{Type: instance.DiscoveredConditionType, Status: metav1.ConditionTrue, Reason: reasonDiscoveredFixture},
+			{Type: instance.LiveConditionType, Status: metav1.ConditionTrue, Reason: reasonDiscoveredFixture},
 		}
 	}
 
@@ -117,7 +128,7 @@ func candidateInstance(name string, discovered bool) *v1alpha2.Instance {
 }
 
 func poolSelector() metav1.LabelSelector {
-	return metav1.LabelSelector{MatchLabels: map[string]string{"tier": "worker"}}
+	return metav1.LabelSelector{MatchLabels: map[string]string{testTierLabel: testWorkerTierValue}}
 }
 
 func TestReconcileClaimsUpToReplicas(t *testing.T) {
@@ -298,7 +309,8 @@ func TestReconcileClaimsOnceDiscovered(t *testing.T) {
 
 	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: nodeAName}, &got))
 	got.Status.Conditions = []metav1.Condition{
-		{Type: instance.DiscoveredConditionType, Status: metav1.ConditionTrue, Reason: "Discovered"},
+		{Type: instance.DiscoveredConditionType, Status: metav1.ConditionTrue, Reason: reasonDiscoveredFixture},
+		{Type: instance.LiveConditionType, Status: metav1.ConditionTrue, Reason: reasonDiscoveredFixture},
 	}
 	require.NoError(t, fakeClient.Update(context.Background(), &got))
 
@@ -309,7 +321,45 @@ func TestReconcileClaimsOnceDiscovered(t *testing.T) {
 
 	require.NoError(t, fakeClient.List(context.Background(), &list,
 		client.MatchingLabels{v1alpha2.LabelClaimedBy: poolIName}))
-	assert.Len(t, list.Items, 1, "claimable once Discovered is true")
+	assert.Len(t, list.Items, 1, "claimable once Discovered and Live are both true")
+}
+
+// TestReconcileDoesNotClaimDiscoveredButNotLiveInstance covers claim's own
+// doc: Discovered is a one-time latch that stays true through an outage
+// (see instance.DiscoveredConditionType's own doc), so Live has to be
+// checked separately or a candidate that's gone offline since it was first
+// discovered could still get claimed.
+func TestReconcileDoesNotClaimDiscoveredButNotLiveInstance(t *testing.T) {
+	t.Parallel()
+
+	pool := &v1alpha2.InstancePool{
+		ObjectMeta: metav1.ObjectMeta{Name: poolIName},
+		Spec:       v1alpha2.InstancePoolSpec{Selector: poolSelector(), Replicas: 1},
+	}
+
+	offline := &v1alpha2.Instance{
+		ObjectMeta: metav1.ObjectMeta{Name: nodeAName, Labels: map[string]string{testTierLabel: testWorkerTierValue}},
+		Status: v1alpha2.InstanceStatus{
+			Conditions: []metav1.Condition{
+				{Type: instance.DiscoveredConditionType, Status: metav1.ConditionTrue, Reason: reasonDiscoveredFixture},
+				{Type: instance.LiveConditionType, Status: metav1.ConditionFalse, Reason: "ProbeFailed"},
+			},
+		},
+	}
+
+	fakeClient := newFakeClient(t, pool, offline)
+	reconciler := newReconciler(fakeClient)
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: poolIName},
+	})
+	require.NoError(t, err)
+
+	var list v1alpha2.InstanceList
+
+	require.NoError(t, fakeClient.List(context.Background(), &list,
+		client.MatchingLabels{v1alpha2.LabelClaimedBy: poolIName}))
+	assert.Empty(t, list.Items, "Discovered alone must not be enough to claim a currently-offline candidate")
 }
 
 func TestReconcileReleasesExcessOnScaleDown(t *testing.T) {

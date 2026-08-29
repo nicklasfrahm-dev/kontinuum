@@ -46,7 +46,8 @@ const wireTestPort = 50000
 type fakeMachineServer struct {
 	machineapi.UnimplementedMachineServiceServer
 
-	tag string
+	tag  string
+	arch string
 }
 
 func (s *fakeMachineServer) Version(
@@ -54,7 +55,7 @@ func (s *fakeMachineServer) Version(
 ) (*machineapi.VersionResponse, error) {
 	return &machineapi.VersionResponse{
 		Messages: []*machineapi.Version{
-			{Version: &machineapi.VersionInfo{Tag: s.tag}},
+			{Version: &machineapi.VersionInfo{Tag: s.tag, Arch: s.arch}},
 		},
 	}, nil
 }
@@ -105,6 +106,10 @@ func seedHardwareState(t *testing.T, coreState state.CoreState) {
 	mem.TypedSpec().Size = 32768
 	mem.TypedSpec().Manufacturer = "Micron"
 	require.NoError(t, coreState.Create(ctx, mem))
+
+	sysInfo := hardware.NewSystemInformation(hardware.SystemInformationID)
+	sysInfo.TypedSpec().SerialNumber = "SN-1234567890"
+	require.NoError(t, coreState.Create(ctx, sysInfo))
 }
 
 // TestTalosDiscovererWireCompat dials a fake Talos maintenance-mode gRPC
@@ -139,7 +144,8 @@ func TestTalosDiscovererWireCompat(t *testing.T) {
 	tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
 	grpcServer := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsConfig)))
 
-	machineapi.RegisterMachineServiceServer(grpcServer, &fakeMachineServer{tag: talosVersionFixture})
+	machineapi.RegisterMachineServiceServer(grpcServer,
+		&fakeMachineServer{tag: talosVersionFixture, arch: talosArchFixture})
 	cosiv1alpha1.RegisterStateServer(grpcServer, cosiserver.NewState(coreState))
 
 	serveErr := make(chan error, 1)
@@ -156,9 +162,20 @@ func TestTalosDiscovererWireCompat(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	result, err := discoverer.Discover(ctx, "127.0.0.1")
+	result, err := discoverer.Discover(ctx, "127.0.0.1", true)
 	require.NoError(t, err)
 	assertWireCompatResult(t, result)
+
+	// includeHardware=false must skip the hardware/serial COSI calls over
+	// the real wire too — Interfaces (needed for liveness) still comes
+	// back, but Disks/CPUs/Memory/SerialNumber don't.
+	noHardwareResult, err := discoverer.Discover(ctx, "127.0.0.1", false)
+	require.NoError(t, err)
+	assert.Len(t, noHardwareResult.Interfaces, 1)
+	assert.Empty(t, noHardwareResult.Disks)
+	assert.Empty(t, noHardwareResult.CPUs)
+	assert.Empty(t, noHardwareResult.Memory)
+	assert.Empty(t, noHardwareResult.SerialNumber)
 }
 
 // assertWireCompatResult asserts TestTalosDiscovererWireCompat's own
@@ -180,10 +197,13 @@ func assertWireCompatResult(t *testing.T, result instance.DiscoveryResult) {
 
 	require.Len(t, result.CPUs, 1)
 	assert.Equal(t, "AMD EPYC 7302P", result.CPUs[0].ProductName)
+	assert.Equal(t, talosArchFixture, result.CPUs[0].Architecture)
 	assert.Equal(t, uint32(16), result.CPUs[0].CoreCount)
 	assert.Equal(t, uint32(32), result.CPUs[0].ThreadCount)
 
 	require.Len(t, result.Memory, 1)
 	assert.Equal(t, uint32(32768), result.Memory[0].SizeMiB)
 	assert.Equal(t, "Micron", result.Memory[0].Manufacturer)
+
+	assert.Equal(t, "SN-1234567890", result.SerialNumber)
 }

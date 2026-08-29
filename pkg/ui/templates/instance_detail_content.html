@@ -58,6 +58,12 @@
                 <dd class="text-sm font-medium text-white break-all text-right">{{.Hostname}}</dd>
             </div>
             {{end}}
+            {{if .SerialNumber}}
+            <div class="px-6 py-3 flex items-center justify-between gap-4">
+                <dt class="text-sm text-neutral-500">Serial number</dt>
+                <dd class="text-sm font-medium text-white break-all text-right">{{.SerialNumber}}</dd>
+            </div>
+            {{end}}
             <div class="px-6 py-3 flex items-center justify-between gap-4">
                 <dt class="text-sm text-neutral-500">Claimed by</dt>
                 <dd class="text-sm font-medium text-white">
@@ -85,6 +91,70 @@
                 </dd>
             </div>
         </dl>
+    </div>
+
+    <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+        <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
+            {{template "icon-cpu"}}
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider">CPUs <span class="text-neutral-500">{{len .CPUs}}</span></h2>
+        </div>
+        {{if .CPUs}}
+        <table class="w-full">
+            <thead>
+                <tr class="border-b border-neutral-800">
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Model</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Architecture</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Cores</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Threads</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Max speed</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .CPUs}}
+                <tr class="border-b border-neutral-800 last:border-b-0">
+                    <td class="px-6 py-2 text-sm font-medium text-white">{{if .ProductName}}{{.ProductName}}{{else}}-{{end}}</td>
+                    <td class="px-6 py-2 text-sm text-neutral-400 font-mono">{{if .Architecture}}{{.Architecture}}{{else}}-{{end}}</td>
+                    <td class="px-6 py-2 text-sm text-neutral-400">{{.CoreCount}}</td>
+                    <td class="px-6 py-2 text-sm text-neutral-400">{{.ThreadCount}}</td>
+                    <td class="px-6 py-2 text-sm text-neutral-400">{{if .MaxSpeedMHz}}{{.MaxSpeedMHz}} MHz{{else}}-{{end}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+        {{else}}
+        <p class="px-6 py-4 text-sm text-neutral-500">No CPUs discovered yet.</p>
+        {{end}}
+    </div>
+
+    <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+        <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
+            {{template "icon-memory-stick"}}
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider">Memory <span class="text-neutral-500">{{len .Memory}}</span></h2>
+        </div>
+        {{if .Memory}}
+        <table class="w-full">
+            <thead>
+                <tr class="border-b border-neutral-800">
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Size</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Speed</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Manufacturer</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Serial</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{range .Memory}}
+                <tr class="border-b border-neutral-800 last:border-b-0">
+                    <td class="px-6 py-2 text-sm font-medium text-white">{{.SizeMiB}} MiB</td>
+                    <td class="px-6 py-2 text-sm text-neutral-400">{{if .Speed}}{{.Speed}} MT/s{{else}}-{{end}}</td>
+                    <td class="px-6 py-2 text-sm text-neutral-400">{{if .Manufacturer}}{{.Manufacturer}}{{else}}-{{end}}</td>
+                    <td class="px-6 py-2 text-sm text-neutral-400 font-mono">{{if .Serial}}{{.Serial}}{{else}}-{{end}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+        {{else}}
+        <p class="px-6 py-4 text-sm text-neutral-500">No memory modules discovered yet.</p>
+        {{end}}
     </div>
 
     <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
@@ -118,7 +188,7 @@
 
     <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
         <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
-            {{template "icon-server"}}
+            {{template "icon-hard-drive"}}
             <h2 class="text-sm font-bold text-white uppercase tracking-wider">Disks <span class="text-neutral-500">{{len .Disks}}</span></h2>
         </div>
         {{if .Disks}}
@@ -146,68 +216,6 @@
         </table>
         {{else}}
         <p class="px-6 py-4 text-sm text-neutral-500">No disks discovered yet.</p>
-        {{end}}
-    </div>
-
-    <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
-        <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
-            {{template "icon-server"}}
-            <h2 class="text-sm font-bold text-white uppercase tracking-wider">CPUs <span class="text-neutral-500">{{len .CPUs}}</span></h2>
-        </div>
-        {{if .CPUs}}
-        <table class="w-full">
-            <thead>
-                <tr class="border-b border-neutral-800">
-                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Model</th>
-                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Cores</th>
-                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Threads</th>
-                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Max speed</th>
-                </tr>
-            </thead>
-            <tbody>
-                {{range .CPUs}}
-                <tr class="border-b border-neutral-800 last:border-b-0">
-                    <td class="px-6 py-2 text-sm font-medium text-white">{{if .ProductName}}{{.ProductName}}{{else}}-{{end}}</td>
-                    <td class="px-6 py-2 text-sm text-neutral-400">{{.CoreCount}}</td>
-                    <td class="px-6 py-2 text-sm text-neutral-400">{{.ThreadCount}}</td>
-                    <td class="px-6 py-2 text-sm text-neutral-400">{{if .MaxSpeedMHz}}{{.MaxSpeedMHz}} MHz{{else}}-{{end}}</td>
-                </tr>
-                {{end}}
-            </tbody>
-        </table>
-        {{else}}
-        <p class="px-6 py-4 text-sm text-neutral-500">No CPUs discovered yet.</p>
-        {{end}}
-    </div>
-
-    <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
-        <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
-            {{template "icon-server"}}
-            <h2 class="text-sm font-bold text-white uppercase tracking-wider">Memory <span class="text-neutral-500">{{len .Memory}}</span></h2>
-        </div>
-        {{if .Memory}}
-        <table class="w-full">
-            <thead>
-                <tr class="border-b border-neutral-800">
-                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Size</th>
-                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Speed</th>
-                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Manufacturer</th>
-                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Serial</th>
-                </tr>
-            </thead>
-            <tbody>
-                {{range .Memory}}
-                <tr class="border-b border-neutral-800 last:border-b-0">
-                    <td class="px-6 py-2 text-sm font-medium text-white">{{.SizeMiB}} MiB</td>
-                    <td class="px-6 py-2 text-sm text-neutral-400">{{if .Speed}}{{.Speed}} MT/s{{else}}-{{end}}</td>
-                    <td class="px-6 py-2 text-sm text-neutral-400">{{if .Manufacturer}}{{.Manufacturer}}{{else}}-{{end}}</td>
-                    <td class="px-6 py-2 text-sm text-neutral-400 font-mono">{{if .Serial}}{{.Serial}}{{else}}-{{end}}</td>
-                </tr>
-                {{end}}
-            </tbody>
-        </table>
-        {{else}}
-        <p class="px-6 py-4 text-sm text-neutral-500">No memory modules discovered yet.</p>
         {{end}}
     </div>
 </div>

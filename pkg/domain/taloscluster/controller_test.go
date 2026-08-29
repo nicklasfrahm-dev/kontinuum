@@ -45,16 +45,20 @@ type fakeBootstrapper struct {
 	// appliedConfigs mirrors applyConfigCalls, capturing the actual bytes
 	// each address's ApplyConfiguration call carried — see
 	// TestReconcileGeneratesInstallableConfigs' own use.
-	appliedConfigs [][]byte
-	bootstrapCalls []string
-	bootstrapErr   error
-	healthCheckErr error
-	kubeconfig     []byte
-	kubeconfigErr  error
-	versionCalls   []string
-	version        string
-	versionErr     error
-	resetCalls     []string
+	appliedConfigs                      [][]byte
+	bootstrapCalls                      []string
+	bootstrapErr                        error
+	healthCheckErr                      error
+	kubeconfig                          []byte
+	kubeconfigErr                       error
+	versionCalls                        []string
+	version                             string
+	arch                                string
+	versionErr                          error
+	cpuTopologyCalls                    []string
+	coreCount, threadCount, maxSpeedMHz uint32
+	cpuTopologyErr                      error
+	resetCalls                          []string
 	// resetGracefulCalls mirrors resetCalls, capturing the graceful bool
 	// each address's Reset call carried — see
 	// TestResetControlPlane*GracefulFlag's own use.
@@ -95,14 +99,26 @@ func (f *fakeBootstrapper) Kubeconfig(_ context.Context, _ string, _ *clientconf
 	return f.kubeconfig, nil
 }
 
-func (f *fakeBootstrapper) Version(_ context.Context, _, node string, _ *clientconfig.Config) (string, error) {
+func (f *fakeBootstrapper) Version(_ context.Context, _, node string, _ *clientconfig.Config) (string, string, error) {
 	f.versionCalls = append(f.versionCalls, node)
 
 	if f.versionErr != nil {
-		return "", f.versionErr
+		return "", "", f.versionErr
 	}
 
-	return f.version, nil
+	return f.version, f.arch, nil
+}
+
+func (f *fakeBootstrapper) CPUTopology(
+	_ context.Context, _, node string, _ *clientconfig.Config,
+) (uint32, uint32, uint32, error) {
+	f.cpuTopologyCalls = append(f.cpuTopologyCalls, node)
+
+	if f.cpuTopologyErr != nil {
+		return 0, 0, 0, f.cpuTopologyErr
+	}
+
+	return f.coreCount, f.threadCount, f.maxSpeedMHz, nil
 }
 
 func (f *fakeBootstrapper) Reset(_ context.Context, _, node string, _ *clientconfig.Config, graceful bool) error {
@@ -195,6 +211,8 @@ const (
 	workerNodeName          = "worker-node-1"
 	workerInstanceAddress   = "10.0.0.2"
 	testTalosVersionFixture = "v1.9.0"
+	testTalosArchFixture    = "arm64"
+	testCPUProductFixture   = "Cortex-A72"
 )
 
 func testCluster() *v1alpha2.TalosCluster {
@@ -678,6 +696,116 @@ func TestReconcileRecordsTalosVersionOnceMembersAreConfigured(t *testing.T) {
 
 	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: workerNodeName}, &afterSecond))
 	assert.Equal(t, testTalosVersionFixture, afterSecond.Status.Talos.Version)
+}
+
+// TestReconcileRecordTalosVersionsStampsArchitectureOntoExistingCPUs covers
+// recordTalosVersions' other job: pkg/domain/instance's own maintenance-mode
+// discovery can no longer learn a node's architecture on current Talos
+// releases either (same root cause as testTalosVersionFixture's own doc
+// above), so a member's pre-claim-discovered CPUs (see
+// v1alpha2.InstanceCPUStatus.Architecture's own doc) start out with that
+// field empty — this is where it actually gets filled in, once, alongside
+// status.talos.version.
+func TestReconcileRecordTalosVersionsStampsArchitectureOntoExistingCPUs(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	cpInstance := claimedDiscoveredInstance(cpNodeName, "cp-pool", controlPlaneInstanceAddress)
+	cpInstance.Status.CPUs = []v1alpha2.InstanceCPUStatus{
+		{ProductName: testCPUProductFixture, CoreCount: 4, ThreadCount: 4},
+	}
+
+	fakeClient := newFakeClient(t, cluster, cpInstance)
+
+	bootstrapper := &fakeBootstrapper{
+		kubeconfig: []byte("fake-kubeconfig"), version: testTalosVersionFixture, arch: testTalosArchFixture,
+	}
+	reconciler := newReconciler(fakeClient, bootstrapper)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName}}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	var got v1alpha2.Instance
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: cpNodeName}, &got))
+	require.Len(t, got.Status.CPUs, 1)
+	assert.Equal(t, testTalosArchFixture, got.Status.CPUs[0].Architecture)
+	assert.Equal(t, testCPUProductFixture, got.Status.CPUs[0].ProductName, "the rest of the CPU entry survives untouched")
+	assert.Empty(t, bootstrapper.cpuTopologyCalls,
+		"CoreCount was already populated, so the sysfs workaround must not be exercised")
+}
+
+// TestReconcileRecordTalosVersionsFillsCPUCoreDataViaSysfsWorkaround covers
+// nicklasfrahm-dev/kontinuum#130: a CoreCount of zero on an already-
+// discovered CPU (Talos's own SMBIOS-derived hardware.Processor came back
+// incomplete — see siderolabs/talos#14171) triggers the sysfs-read
+// workaround, filling in CoreCount/ThreadCount/MaxSpeedMHz while leaving
+// every other field (here, ProductName) untouched.
+func TestReconcileRecordTalosVersionsFillsCPUCoreDataViaSysfsWorkaround(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	cpInstance := claimedDiscoveredInstance(cpNodeName, "cp-pool", controlPlaneInstanceAddress)
+	cpInstance.Status.CPUs = []v1alpha2.InstanceCPUStatus{{ProductName: testCPUProductFixture}}
+
+	fakeClient := newFakeClient(t, cluster, cpInstance)
+
+	bootstrapper := &fakeBootstrapper{
+		kubeconfig: []byte("fake-kubeconfig"), version: testTalosVersionFixture,
+		coreCount: 4, threadCount: 4, maxSpeedMHz: 1500,
+	}
+	reconciler := newReconciler(fakeClient, bootstrapper)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName}}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, []string{controlPlaneInstanceAddress}, bootstrapper.cpuTopologyCalls)
+
+	var got v1alpha2.Instance
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: cpNodeName}, &got))
+	require.Len(t, got.Status.CPUs, 1)
+	assert.Equal(t, uint32(4), got.Status.CPUs[0].CoreCount)
+	assert.Equal(t, uint32(4), got.Status.CPUs[0].ThreadCount)
+	assert.Equal(t, uint32(1500), got.Status.CPUs[0].MaxSpeedMHz)
+	assert.Equal(t, testCPUProductFixture, got.Status.CPUs[0].ProductName, "the rest of the CPU entry survives untouched")
+}
+
+// TestReconcileRecordTalosVersionsToleratesSysfsWorkaroundFailure covers
+// the sysfs workaround's own best-effort handling: a failed CPUTopology
+// call (e.g. Read unsupported on this Talos version) must not fail the
+// reconcile or the rest of recordTalosVersions — just leave CoreCount at
+// zero for another attempt on a future reconcile.
+func TestReconcileRecordTalosVersionsToleratesSysfsWorkaroundFailure(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	cpInstance := claimedDiscoveredInstance(cpNodeName, "cp-pool", controlPlaneInstanceAddress)
+	cpInstance.Status.CPUs = []v1alpha2.InstanceCPUStatus{{ProductName: testCPUProductFixture}}
+
+	fakeClient := newFakeClient(t, cluster, cpInstance)
+
+	bootstrapper := &fakeBootstrapper{
+		kubeconfig: []byte("fake-kubeconfig"), version: testTalosVersionFixture,
+		cpuTopologyErr: assert.AnError,
+	}
+	reconciler := newReconciler(fakeClient, bootstrapper)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName}}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	var got v1alpha2.Instance
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: cpNodeName}, &got))
+	require.Len(t, got.Status.CPUs, 1)
+	assert.Zero(t, got.Status.CPUs[0].CoreCount)
+	assert.Equal(t, testTalosVersionFixture, got.Status.Talos.Version,
+		"the sysfs workaround failing must not block the rest of recordTalosVersions")
 }
 
 // TestReconcileToleratesTalosVersionFetchFailure covers recordTalosVersions'
