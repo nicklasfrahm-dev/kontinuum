@@ -214,6 +214,34 @@ func TestNewGRPCLoggerErrorDepthDowngradesTooManyPings(t *testing.T) {
 	assert.Contains(t, entry["msg"], "too_many_pings")
 }
 
+// TestNewGRPCLoggerInfoDepthAndWarningDepthPassThrough covers InfoDepth and
+// WarningDepth — grpclog.Component's own depth-aware counterparts to Info
+// and Warning (see TestNewGRPCLoggerImplementsDepthLoggerV2's own doc for
+// why grpc-go calls these instead of the plain methods once DepthLoggerV2 is
+// asserted). depth itself carries no meaning here (see InfoDepth's own doc
+// on why), so both are called with an arbitrary value to confirm that.
+func TestNewGRPCLoggerInfoDepthAndWarningDepthPassThrough(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+
+	grpcLogger := logging.NewGRPCLogger(logging.New(slog.LevelDebug, logging.FormatJSON, &buf))
+	depthLogger, ok := grpcLogger.(grpclog.DepthLoggerV2)
+	require.True(t, ok, "grpcLogger must implement grpclog.DepthLoggerV2")
+
+	depthLogger.InfoDepth(2, "subchannel", "ready")
+
+	entry := decodeLastEntry(t, &buf)
+	assert.Equal(t, "INFO", entry["level"])
+	assert.Equal(t, "subchannel ready", entry["msg"])
+
+	depthLogger.WarningDepth(2, "connectivity", "change")
+
+	entry = decodeLastEntry(t, &buf)
+	assert.Equal(t, "WARN", entry["level"])
+	assert.Equal(t, "connectivity change", entry["msg"])
+}
+
 func TestNewGRPCLoggerVDisablesVerboseTracing(t *testing.T) {
 	t.Parallel()
 
