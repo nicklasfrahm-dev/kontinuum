@@ -385,10 +385,12 @@ func (r *Router) RegisterRoutes(
 	mux.HandleFunc("GET /app/kontinuum.sh/v1alpha2/namespaces/{ns}/instances", wrap(r.handleInstances))
 	mux.HandleFunc("POST /app/kontinuum.sh/v1alpha2/namespaces/{ns}/instances/add", wrap(r.handleInstanceAdd))
 	mux.HandleFunc("GET /app/kontinuum.sh/v1alpha2/namespaces/{ns}/instances/{name}", wrap(r.handleInstanceDetail))
-	mux.HandleFunc("DELETE /app/kontinuum.sh/v1alpha2/namespaces/{ns}/instances/{name}", wrap(r.handleDeleteInstanceObject))
+	mux.HandleFunc("DELETE /app/kontinuum.sh/v1alpha2/namespaces/{ns}/instances/{name}",
+		wrap(r.handleDeleteInstanceObject))
 	mux.HandleFunc("GET /app/kontinuum.sh/v1alpha2/namespaces/{ns}/talosclusters", wrap(r.handleTalosClusters))
 	mux.HandleFunc("GET /app/kontinuum.sh/v1alpha2/namespaces/{ns}/talosclusters/{name}", wrap(r.handleTalosClusterDetail))
-	mux.HandleFunc("DELETE /app/kontinuum.sh/v1alpha2/namespaces/{ns}/talosclusters/{name}", wrap(r.handleDeleteTalosCluster))
+	mux.HandleFunc("DELETE /app/kontinuum.sh/v1alpha2/namespaces/{ns}/talosclusters/{name}",
+		wrap(r.handleDeleteTalosCluster))
 	mux.HandleFunc("GET /app/kontinuum.sh/v1alpha2/namespaces/{ns}/talosclusters/{name}/kubeconfig",
 		wrap(r.handleTalosClusterKubeconfigDownload))
 	r.registerIAMRoutes(mux, wrap)

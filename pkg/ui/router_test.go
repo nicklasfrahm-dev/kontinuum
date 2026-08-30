@@ -706,7 +706,8 @@ func TestHandleKontinuumDetailRendersInstanceSettings(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -754,7 +755,8 @@ func TestHandleKontinuumDetailShowsNotConfiguredWhenDNSAndGRPCUnset(t *testing.T
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -791,7 +793,8 @@ func TestHandleKontinuumDetailHidesOIDCDetailsWhenInstanceOIDCDisabled(t *testin
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -828,7 +831,8 @@ func TestHandleKontinuumDetailReturnsServerErrorWhenFactoryFails(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -874,7 +878,8 @@ func TestHandleKontinuumDetailShowsConfigSecretDataReveal(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -924,7 +929,8 @@ func TestHandleKontinuumDetailHidesConfigSecretRevealWhenSecretRefEmpty(t *testi
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -993,7 +999,8 @@ func TestHandleKontinuumDetailShowsGRPCThumbprintForWorker(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-2"))
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-2"))
 
 	resp := recorder.Result()
 
@@ -1071,7 +1078,8 @@ func TestHandleKontinuumDetailHidesConfigSecretRevealWhenSecretNotFound(t *testi
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -1105,7 +1113,8 @@ func TestHandleKontinuumDetailReturnsBadGatewayWhenSecretGetFails(t *testing.T) 
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -1459,7 +1468,10 @@ func TestHandleIAMNamespaceRolesShowsRoles(t *testing.T) {
 			{
 				ObjectMeta: metav1.ObjectMeta{Name: testRoleName, Namespace: testNamespace},
 				Rules: []rbacv1.PolicyRule{
-					{APIGroups: []string{""}, Resources: []string{testRoleRuleResource}, Verbs: []string{roleRuleFormVerbGet, roleRuleFormVerbList}},
+					{
+						APIGroups: []string{""}, Resources: []string{testRoleRuleResource},
+						Verbs: []string{roleRuleFormVerbGet, roleRuleFormVerbList},
+					},
 				},
 			},
 		}}, nil
@@ -2136,7 +2148,8 @@ func TestHandleDeleteClusterRoleBindingReturnsBadGatewayOnFailure(t *testing.T) 
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestDeleteRequest(t, "/app/rbac.authorization.k8s.io/v1/clusterrolebindings/custom-binding"))
+	mux.ServeHTTP(recorder, newTestDeleteRequest(t,
+		"/app/rbac.authorization.k8s.io/v1/clusterrolebindings/custom-binding"))
 
 	resp := recorder.Result()
 
@@ -2496,7 +2509,8 @@ func TestHandleDeleteInstanceRemovesInstanceAndRerendersRegistry(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestDeleteRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/demo"))
+	mux.ServeHTTP(recorder, newTestDeleteRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/demo"))
 
 	resp := recorder.Result()
 
@@ -2527,7 +2541,8 @@ func TestHandleDeleteInstanceReturnsBadGatewayOnFailure(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestDeleteRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/demo"))
+	mux.ServeHTTP(recorder, newTestDeleteRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/demo"))
 
 	resp := recorder.Result()
 
@@ -3051,8 +3066,10 @@ func TestHandleZoneDetailRendersOverviewClusterAndRegistry(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(body), "eu-eu-1a")
 	assert.Contains(t, string(body), "example.com")
-	assert.Contains(t, string(body), `href="/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"`)
-	assert.Contains(t, string(body), `href="/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/eu-1a-worker"`)
+	assert.Contains(t, string(body),
+		`href="/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"`)
+	assert.Contains(t, string(body),
+		`href="/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/eu-1a-worker"`)
 	assert.Contains(t, string(body), "Worker")
 	assert.NotContains(t, string(body), "Not yet joined")
 	assert.NotContains(t, string(body), "Not provisioned yet")
@@ -3988,7 +4005,8 @@ func TestHandleDeleteMachineReturnsBadGatewayOnFailure(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestDeleteRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/instances/node-a"))
+	mux.ServeHTTP(recorder, newTestDeleteRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/instances/node-a"))
 
 	resp := recorder.Result()
 
@@ -4073,7 +4091,8 @@ func TestHandleTalosClustersRendersList(t *testing.T) {
 	assert.Contains(t, string(body), "v1.13.0")
 	assert.Contains(t, string(body), "v1.32.0")
 	assert.Contains(t, string(body), "text-green-300\">Ready<")
-	assert.Contains(t, string(body), `href="/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"`)
+	assert.Contains(t, string(body),
+		`href="/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"`)
 	assert.Contains(t, string(body), `href="/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters"`,
 		"the nav's own Clusters link")
 }
@@ -4244,7 +4263,8 @@ func TestHandleTalosClusterDetailRendersOverviewPoolsAndConditions(t *testing.T)
 	mux := newTalosClusterKubeconfigMux(t)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
 
 	resp := recorder.Result()
 
@@ -4267,7 +4287,8 @@ func TestHandleTalosClusterDetailRendersOverviewPoolsAndConditions(t *testing.T)
 		`href="/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a/kubeconfig"`)
 	assert.NotContains(t, string(body), "apiVersion: v1\nkind: Config",
 		"the kubeconfig's own contents must never be rendered into the page")
-	assert.Contains(t, string(body), `hx-get="/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"`,
+	assert.Contains(t, string(body),
+		`hx-get="/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"`,
 		"hx-get is always the plain URL — hx-vals carries ?reveal on every poll instead, see hx-vals assertion below")
 
 	wantHxVals := `hx-vals="js:{reveal: (new URLSearchParams(location.search).get('reveal') === 'true')}"`
@@ -4356,7 +4377,8 @@ func TestHandleTalosClusterDetailRevealsKubeconfigPanelViaQueryParam(t *testing.
 
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	assert.Contains(t, string(body), `hx-get="/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"`,
+	assert.Contains(t, string(body),
+		`hx-get="/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"`,
 		"hx-get stays the plain URL even when the page itself loaded with ?reveal=true — "+
 			"see hx-vals in the sibling default-state test")
 	assert.Regexp(t, `id="taloscluster-kubeconfig-masked"\s+class="hidden relative`, string(body),
@@ -4388,7 +4410,8 @@ func TestHandleTalosClusterDetailShowsNoKubeconfigMessageWhenNotReady(t *testing
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
 
 	resp := recorder.Result()
 
@@ -4413,7 +4436,8 @@ func TestHandleTalosClusterDetailRendersDeletingForClusterWithDeletionTimestamp(
 	mux := deletingTalosClusterMux(t)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
 
 	resp := recorder.Result()
 
