@@ -346,11 +346,12 @@ func (r *Reconciler) release(
 }
 
 // claim lists candidates matching pool.Spec.Selector, filters out anything
-// already claimed by any pool or not yet Discovered, and attempts to claim
-// each — in name-sorted order, for deterministic behavior — until either
-// spec.replicas is met or candidates are exhausted. A conflict claiming one
-// candidate means another pool won the race for it; that candidate is
-// skipped, not retried, and the next candidate is tried instead.
+// already claimed by any pool, not yet Discovered, or not currently Live,
+// and attempts to claim each — in name-sorted order, for deterministic
+// behavior — until either spec.replicas is met or candidates are
+// exhausted. A conflict claiming one candidate means another pool won the
+// race for it; that candidate is skipped, not retried, and the next
+// candidate is tried instead.
 //
 // The Discovered check is load-bearing, not an optimization: claiming used
 // to be optimistic (claim first, let discovery catch up), but
@@ -360,6 +361,11 @@ func (r *Reconciler) release(
 // gate on Discovered, would then never count it: TalosCluster's
 // control-plane readiness would deadlock forever. Requiring Discovered
 // here, before the claim, is what closes that race.
+//
+// The Live check is separately load-bearing too: Discovered is a one-time
+// latch (see its own doc) that stays true long after a candidate has gone
+// offline, so checking it alone would let this claim a node that isn't
+// actually reachable right now — Live is what still tracks that.
 func (r *Reconciler) claim(
 	ctx context.Context, pool *v1alpha2.InstancePool, claimed []v1alpha2.Instance,
 ) ([]v1alpha2.Instance, error) {
@@ -376,16 +382,7 @@ func (r *Reconciler) claim(
 		return nil, fmt.Errorf("failed to list candidate instances for pool %q: %w", pool.Name, err)
 	}
 
-	unclaimed := make([]v1alpha2.Instance, 0, len(candidates.Items))
-
-	for _, inst := range candidates.Items {
-		_, alreadyClaimed := inst.Labels[v1alpha2.LabelClaimedBy]
-		discovered := meta.IsStatusConditionTrue(inst.Status.Conditions, instance.DiscoveredConditionType)
-
-		if !alreadyClaimed && discovered {
-			unclaimed = append(unclaimed, inst)
-		}
-	}
+	unclaimed := claimableCandidates(candidates.Items)
 
 	sort.Slice(unclaimed, func(i, j int) bool { return unclaimed[i].Name < unclaimed[j].Name })
 
@@ -405,6 +402,27 @@ func (r *Reconciler) claim(
 	}
 
 	return claimed, nil
+}
+
+// claimableCandidates filters candidates down to the ones claim is allowed
+// to claim — not already claimed by any pool, Discovered, and Live. See
+// claim's own doc for why both Discovered and Live are required. Factored
+// out of claim purely to keep that function under this repo's own cyclop
+// limit.
+func claimableCandidates(candidates []v1alpha2.Instance) []v1alpha2.Instance {
+	unclaimed := make([]v1alpha2.Instance, 0, len(candidates))
+
+	for _, inst := range candidates {
+		_, alreadyClaimed := inst.Labels[v1alpha2.LabelClaimedBy]
+		discovered := meta.IsStatusConditionTrue(inst.Status.Conditions, instance.DiscoveredConditionType)
+		live := meta.IsStatusConditionTrue(inst.Status.Conditions, instance.LiveConditionType)
+
+		if !alreadyClaimed && discovered && live {
+			unclaimed = append(unclaimed, inst)
+		}
+	}
+
+	return unclaimed
 }
 
 // tryClaim re-fetches name (a fresh Get, not the possibly-stale copy from

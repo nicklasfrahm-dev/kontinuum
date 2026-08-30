@@ -45,16 +45,20 @@ type fakeBootstrapper struct {
 	// appliedConfigs mirrors applyConfigCalls, capturing the actual bytes
 	// each address's ApplyConfiguration call carried — see
 	// TestReconcileGeneratesInstallableConfigs' own use.
-	appliedConfigs [][]byte
-	bootstrapCalls []string
-	bootstrapErr   error
-	healthCheckErr error
-	kubeconfig     []byte
-	kubeconfigErr  error
-	versionCalls   []string
-	version        string
-	versionErr     error
-	resetCalls     []string
+	appliedConfigs                      [][]byte
+	bootstrapCalls                      []string
+	bootstrapErr                        error
+	healthCheckErr                      error
+	kubeconfig                          []byte
+	kubeconfigErr                       error
+	versionCalls                        []string
+	version                             string
+	arch                                string
+	versionErr                          error
+	cpuTopologyCalls                    []string
+	coreCount, threadCount, maxSpeedMHz uint32
+	cpuTopologyErr                      error
+	resetCalls                          []string
 	// resetGracefulCalls mirrors resetCalls, capturing the graceful bool
 	// each address's Reset call carried — see
 	// TestResetControlPlane*GracefulFlag's own use.
@@ -95,14 +99,26 @@ func (f *fakeBootstrapper) Kubeconfig(_ context.Context, _ string, _ *clientconf
 	return f.kubeconfig, nil
 }
 
-func (f *fakeBootstrapper) Version(_ context.Context, _, node string, _ *clientconfig.Config) (string, error) {
+func (f *fakeBootstrapper) Version(_ context.Context, _, node string, _ *clientconfig.Config) (string, string, error) {
 	f.versionCalls = append(f.versionCalls, node)
 
 	if f.versionErr != nil {
-		return "", f.versionErr
+		return "", "", f.versionErr
 	}
 
-	return f.version, nil
+	return f.version, f.arch, nil
+}
+
+func (f *fakeBootstrapper) CPUTopology(
+	_ context.Context, _, node string, _ *clientconfig.Config,
+) (uint32, uint32, uint32, error) {
+	f.cpuTopologyCalls = append(f.cpuTopologyCalls, node)
+
+	if f.cpuTopologyErr != nil {
+		return 0, 0, 0, f.cpuTopologyErr
+	}
+
+	return f.coreCount, f.threadCount, f.maxSpeedMHz, nil
 }
 
 func (f *fakeBootstrapper) Reset(_ context.Context, _, node string, _ *clientconfig.Config, graceful bool) error {
@@ -192,8 +208,11 @@ const (
 	// fixture name/address reused across every worker-pool test in this
 	// package, mirroring cpNodeName/controlPlaneInstanceAddress's own role
 	// for the control-plane fixtures.
-	workerNodeName        = "worker-node-1"
-	workerInstanceAddress = "10.0.0.2"
+	workerNodeName          = "worker-node-1"
+	workerInstanceAddress   = "10.0.0.2"
+	testTalosVersionFixture = "v1.9.0"
+	testTalosArchFixture    = "arm64"
+	testCPUProductFixture   = "Cortex-A72"
 )
 
 func testCluster() *v1alpha2.TalosCluster {
@@ -652,7 +671,7 @@ func TestReconcileRecordsTalosVersionOnceMembersAreConfigured(t *testing.T) {
 
 	fakeClient := newFakeClient(t, cluster, cpInstance, workerInstance)
 
-	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig"), version: "v1.9.0"}
+	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig"), version: testTalosVersionFixture}
 	reconciler := newReconciler(fakeClient, bootstrapper)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName}}
@@ -665,7 +684,7 @@ func TestReconcileRecordsTalosVersionOnceMembersAreConfigured(t *testing.T) {
 	var afterFirst v1alpha2.Instance
 
 	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: cpNodeName}, &afterFirst))
-	assert.Equal(t, "v1.9.0", afterFirst.Status.Talos.Version)
+	assert.Equal(t, testTalosVersionFixture, afterFirst.Status.Talos.Version)
 
 	_, err = reconciler.Reconcile(context.Background(), req)
 	require.NoError(t, err)
@@ -676,7 +695,117 @@ func TestReconcileRecordsTalosVersionOnceMembersAreConfigured(t *testing.T) {
 	var afterSecond v1alpha2.Instance
 
 	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: workerNodeName}, &afterSecond))
-	assert.Equal(t, "v1.9.0", afterSecond.Status.Talos.Version)
+	assert.Equal(t, testTalosVersionFixture, afterSecond.Status.Talos.Version)
+}
+
+// TestReconcileRecordTalosVersionsStampsArchitectureOntoExistingCPUs covers
+// recordTalosVersions' other job: pkg/domain/instance's own maintenance-mode
+// discovery can no longer learn a node's architecture on current Talos
+// releases either (same root cause as testTalosVersionFixture's own doc
+// above), so a member's pre-claim-discovered CPUs (see
+// v1alpha2.InstanceCPUStatus.Architecture's own doc) start out with that
+// field empty — this is where it actually gets filled in, once, alongside
+// status.talos.version.
+func TestReconcileRecordTalosVersionsStampsArchitectureOntoExistingCPUs(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	cpInstance := claimedDiscoveredInstance(cpNodeName, "cp-pool", controlPlaneInstanceAddress)
+	cpInstance.Status.CPUs = []v1alpha2.InstanceCPUStatus{
+		{ProductName: testCPUProductFixture, CoreCount: 4, ThreadCount: 4},
+	}
+
+	fakeClient := newFakeClient(t, cluster, cpInstance)
+
+	bootstrapper := &fakeBootstrapper{
+		kubeconfig: []byte("fake-kubeconfig"), version: testTalosVersionFixture, arch: testTalosArchFixture,
+	}
+	reconciler := newReconciler(fakeClient, bootstrapper)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName}}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	var got v1alpha2.Instance
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: cpNodeName}, &got))
+	require.Len(t, got.Status.CPUs, 1)
+	assert.Equal(t, testTalosArchFixture, got.Status.CPUs[0].Architecture)
+	assert.Equal(t, testCPUProductFixture, got.Status.CPUs[0].ProductName, "the rest of the CPU entry survives untouched")
+	assert.Empty(t, bootstrapper.cpuTopologyCalls,
+		"CoreCount was already populated, so the sysfs workaround must not be exercised")
+}
+
+// TestReconcileRecordTalosVersionsFillsCPUCoreDataViaSysfsWorkaround covers
+// nicklasfrahm-dev/kontinuum#130: a CoreCount of zero on an already-
+// discovered CPU (Talos's own SMBIOS-derived hardware.Processor came back
+// incomplete — see siderolabs/talos#14171) triggers the sysfs-read
+// workaround, filling in CoreCount/ThreadCount/MaxSpeedMHz while leaving
+// every other field (here, ProductName) untouched.
+func TestReconcileRecordTalosVersionsFillsCPUCoreDataViaSysfsWorkaround(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	cpInstance := claimedDiscoveredInstance(cpNodeName, "cp-pool", controlPlaneInstanceAddress)
+	cpInstance.Status.CPUs = []v1alpha2.InstanceCPUStatus{{ProductName: testCPUProductFixture}}
+
+	fakeClient := newFakeClient(t, cluster, cpInstance)
+
+	bootstrapper := &fakeBootstrapper{
+		kubeconfig: []byte("fake-kubeconfig"), version: testTalosVersionFixture,
+		coreCount: 4, threadCount: 4, maxSpeedMHz: 1500,
+	}
+	reconciler := newReconciler(fakeClient, bootstrapper)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName}}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, []string{controlPlaneInstanceAddress}, bootstrapper.cpuTopologyCalls)
+
+	var got v1alpha2.Instance
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: cpNodeName}, &got))
+	require.Len(t, got.Status.CPUs, 1)
+	assert.Equal(t, uint32(4), got.Status.CPUs[0].CoreCount)
+	assert.Equal(t, uint32(4), got.Status.CPUs[0].ThreadCount)
+	assert.Equal(t, uint32(1500), got.Status.CPUs[0].MaxSpeedMHz)
+	assert.Equal(t, testCPUProductFixture, got.Status.CPUs[0].ProductName, "the rest of the CPU entry survives untouched")
+}
+
+// TestReconcileRecordTalosVersionsToleratesSysfsWorkaroundFailure covers
+// the sysfs workaround's own best-effort handling: a failed CPUTopology
+// call (e.g. Read unsupported on this Talos version) must not fail the
+// reconcile or the rest of recordTalosVersions — just leave CoreCount at
+// zero for another attempt on a future reconcile.
+func TestReconcileRecordTalosVersionsToleratesSysfsWorkaroundFailure(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	cpInstance := claimedDiscoveredInstance(cpNodeName, "cp-pool", controlPlaneInstanceAddress)
+	cpInstance.Status.CPUs = []v1alpha2.InstanceCPUStatus{{ProductName: testCPUProductFixture}}
+
+	fakeClient := newFakeClient(t, cluster, cpInstance)
+
+	bootstrapper := &fakeBootstrapper{
+		kubeconfig: []byte("fake-kubeconfig"), version: testTalosVersionFixture,
+		cpuTopologyErr: assert.AnError,
+	}
+	reconciler := newReconciler(fakeClient, bootstrapper)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName}}
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	var got v1alpha2.Instance
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: cpNodeName}, &got))
+	require.Len(t, got.Status.CPUs, 1)
+	assert.Zero(t, got.Status.CPUs[0].CoreCount)
+	assert.Equal(t, testTalosVersionFixture, got.Status.Talos.Version,
+		"the sysfs workaround failing must not block the rest of recordTalosVersions")
 }
 
 // TestReconcileToleratesTalosVersionFetchFailure covers recordTalosVersions'
@@ -809,7 +938,7 @@ func TestReconcileSetsMemberConditionsThroughBootstrapPipeline(t *testing.T) {
 
 	fakeClient := newFakeClient(t, cluster, cpInstance, workerInstance)
 
-	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig"), version: "v1.9.0"}
+	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig"), version: testTalosVersionFixture}
 	reconciler := newReconciler(fakeClient, bootstrapper)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName}}
@@ -826,6 +955,9 @@ func TestReconcileSetsMemberConditionsThroughBootstrapPipeline(t *testing.T) {
 		"control-plane member answered a Version RPC once HealthCheck passed")
 	assert.True(t, meta.IsStatusConditionTrue(afterFirst.Status.Conditions, taloscluster.MemberReadyConditionType),
 		"control-plane member was part of the batch HealthCheck just verified healthy")
+	assert.True(t, meta.IsStatusConditionTrue(afterFirst.Status.Conditions, taloscluster.MemberLiveConditionType),
+		"a successful Version RPC is itself proof of life")
+	assert.False(t, afterFirst.Status.LastProbeTime.IsZero(), "LastProbeTime is stamped once a member is first probed")
 
 	joined := meta.FindStatusCondition(afterFirst.Status.Conditions, taloscluster.MemberJoinedConditionType)
 	ready := meta.FindStatusCondition(afterFirst.Status.Conditions, taloscluster.MemberReadyConditionType)
@@ -850,6 +982,8 @@ func TestReconcileSetsMemberConditionsThroughBootstrapPipeline(t *testing.T) {
 		"worker member answered a Version RPC once its config was applied")
 	assert.False(t, meta.IsStatusConditionTrue(afterSecond.Status.Conditions, taloscluster.MemberReadyConditionType),
 		"a worker never gets Ready — no per-worker health probe backs it yet")
+	assert.True(t, meta.IsStatusConditionTrue(afterSecond.Status.Conditions, taloscluster.MemberLiveConditionType),
+		"a worker does get Live — recordTalosVersions sets it unconditionally, unlike Ready")
 }
 
 // convergeFullyReadyCluster drives reconciler through three reconciles —
@@ -919,6 +1053,9 @@ func TestReconcileRecheckControlPlaneHealthAfterConvergence(t *testing.T) {
 
 	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: cpNodeName}, &cpAfterConverged))
 	assert.True(t, meta.IsStatusConditionTrue(cpAfterConverged.Status.Conditions, taloscluster.MemberReadyConditionType))
+	assert.True(t, meta.IsStatusConditionTrue(cpAfterConverged.Status.Conditions, taloscluster.MemberLiveConditionType),
+		"the steady-state recheck also keeps Live fresh for control-plane members")
+	firstProbeTime := cpAfterConverged.Status.LastProbeTime
 
 	// Simulate the control plane later failing a health check — no config
 	// changes, no bootstrap needed, just an unhealthy node.
@@ -933,6 +1070,11 @@ func TestReconcileRecheckControlPlaneHealthAfterConvergence(t *testing.T) {
 	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: cpNodeName}, &cpAfterFailure))
 	assert.False(t, meta.IsStatusConditionTrue(cpAfterFailure.Status.Conditions, taloscluster.MemberReadyConditionType),
 		"a previously healthy member must flip to Ready=False once a recheck fails")
+	assert.False(t, meta.IsStatusConditionTrue(cpAfterFailure.Status.Conditions, taloscluster.MemberLiveConditionType),
+		"an unhealthy control-plane recheck also flips Live false — HealthCheck failing means this node "+
+			"wasn't proven reachable this round")
+	assert.False(t, cpAfterFailure.Status.LastProbeTime.Time.Before(firstProbeTime.Time),
+		"LastProbeTime is bumped on every recheck, not just on a status flip")
 
 	var clusterAfterFailure v1alpha2.TalosCluster
 
@@ -941,6 +1083,59 @@ func TestReconcileRecheckControlPlaneHealthAfterConvergence(t *testing.T) {
 	assert.True(t,
 		meta.IsStatusConditionTrue(clusterAfterFailure.Status.Conditions, taloscluster.ControlPlaneReadyConditionType),
 		"a flaky per-node recheck must never flip the cluster-level ControlPlaneReady back to false")
+}
+
+// TestReconcileRecheckWorkerLivenessAfterConvergence covers issue #76's own
+// gap: unlike a control-plane member (see
+// TestReconcileRecheckControlPlaneHealthAfterConvergence), a worker has no
+// cluster-wide health check to recheck — recheckWorkerLiveness's own
+// individual Version RPC dial is the only thing that keeps its Live
+// condition honest once joined.
+func TestReconcileRecheckWorkerLivenessAfterConvergence(t *testing.T) {
+	t.Parallel()
+
+	cluster := testCluster()
+	cpInstance := claimedDiscoveredInstance(cpNodeName, "cp-pool", controlPlaneInstanceAddress)
+	workerInstance := claimedDiscoveredInstance(workerNodeName, "worker-pool", "10.0.0.2")
+
+	fakeClient := newFakeClient(t, cluster, cpInstance, workerInstance)
+
+	bootstrapper := &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig"), version: testTalosVersionFixture}
+	reconciler := newReconciler(fakeClient, bootstrapper)
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName}}
+
+	convergeFullyReadyCluster(t, fakeClient, reconciler, req)
+
+	var workerAfterConverged v1alpha2.Instance
+
+	require.NoError(t,
+		fakeClient.Get(context.Background(), types.NamespacedName{Name: workerNodeName}, &workerAfterConverged))
+	assert.True(t,
+		meta.IsStatusConditionTrue(workerAfterConverged.Status.Conditions, taloscluster.MemberLiveConditionType),
+		"the steady-state recheck confirms the worker still reachable")
+
+	// Simulate the worker going unreachable — no HealthCheck covers it, so
+	// only recheckWorkerLiveness's own per-node dial can catch this.
+	bootstrapper.versionErr = assert.AnError
+
+	_, err := reconciler.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	var workerAfterFailure v1alpha2.Instance
+
+	require.NoError(t,
+		fakeClient.Get(context.Background(), types.NamespacedName{Name: workerNodeName}, &workerAfterFailure))
+	assert.False(t, meta.IsStatusConditionTrue(workerAfterFailure.Status.Conditions, taloscluster.MemberLiveConditionType),
+		"a worker that stops answering its Version RPC must flip Live false")
+
+	var clusterAfterFailure v1alpha2.TalosCluster
+
+	require.NoError(t, fakeClient.Get(context.Background(),
+		types.NamespacedName{Name: testClusterName}, &clusterAfterFailure))
+	assert.True(t,
+		meta.IsStatusConditionTrue(clusterAfterFailure.Status.Conditions, taloscluster.ControlPlaneReadyConditionType),
+		"an unreachable worker must never affect the cluster-level ControlPlaneReady condition")
 }
 
 func TestReconcileIgnoresMissingCluster(t *testing.T) {

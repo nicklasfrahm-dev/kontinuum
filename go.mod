@@ -26,7 +26,7 @@ require (
 	github.com/google/cel-go v0.27.0
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
-	github.com/kommodity-io/kommodity v0.164.2-0.20260822101714-049f9b252a88
+	github.com/kommodity-io/kommodity v0.166.0
 	github.com/lmittmann/tint v1.2.0
 	github.com/moby/moby/api v1.55.0
 	github.com/siderolabs/kms-client v0.2.0
@@ -40,10 +40,10 @@ require (
 	google.golang.org/grpc v1.83.0
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af
 	helm.sh/helm/v3 v3.17.3
-	k8s.io/api v0.32.6
-	k8s.io/apiextensions-apiserver v0.32.6
-	k8s.io/apimachinery v0.32.6
-	k8s.io/client-go v0.32.6
+	k8s.io/api v0.32.7
+	k8s.io/apiextensions-apiserver v0.32.7
+	k8s.io/apimachinery v0.32.7
+	k8s.io/client-go v0.32.7
 	sigs.k8s.io/controller-runtime v0.20.4
 	sigs.k8s.io/gateway-api v1.3.0
 	sigs.k8s.io/yaml v1.6.0
@@ -393,7 +393,7 @@ require (
 	github.com/spf13/viper v1.21.0 // indirect
 	github.com/ssgreg/nlreturn/v2 v2.2.1 // indirect
 	github.com/stbenjam/no-sprintf-host-port v0.3.1 // indirect
-	github.com/stoewer/go-strcase v1.3.0 // indirect
+	github.com/stoewer/go-strcase v1.3.1 // indirect
 	github.com/stretchr/objx v0.5.3 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/tetafro/godot v1.5.6 // indirect
@@ -468,18 +468,18 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	honnef.co/go/tools v0.7.0 // indirect
-	k8s.io/apiserver v0.32.6 // indirect
-	k8s.io/cli-runtime v0.32.3 // indirect
+	k8s.io/apiserver v0.32.7 // indirect
+	k8s.io/cli-runtime v0.32.7 // indirect
 	k8s.io/cloud-provider v0.32.6 // indirect
-	k8s.io/component-base v0.32.6 // indirect
-	k8s.io/component-helpers v0.32.6 // indirect
+	k8s.io/component-base v0.32.7 // indirect
+	k8s.io/component-helpers v0.32.7 // indirect
 	k8s.io/controller-manager v0.32.6 // indirect
 	k8s.io/klog/v2 v2.130.1 // indirect
-	k8s.io/kms v0.32.6 // indirect
+	k8s.io/kms v0.32.7 // indirect
 	k8s.io/kube-aggregator v0.32.3 // indirect
 	k8s.io/kube-controller-manager v0.32.6 // indirect
 	k8s.io/kube-openapi v0.0.0-20250701173324-9bd5c66d9911 // indirect
-	k8s.io/kubectl v0.32.3 // indirect
+	k8s.io/kubectl v0.32.7 // indirect
 	k8s.io/kubelet v0.32.6 // indirect
 	k8s.io/kubernetes v1.32.6 // indirect
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4 // indirect

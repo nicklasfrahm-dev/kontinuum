@@ -76,6 +76,18 @@
                 <dt class="text-sm text-neutral-500">Age</dt>
                 <dd class="text-sm font-medium text-white">{{.Age}}</dd>
             </div>
+            <div class="px-6 py-3 flex items-center justify-between gap-4 flex-wrap">
+                <dt class="text-sm text-neutral-500">Labels</dt>
+                <dd class="flex flex-wrap justify-end gap-1.5">
+                    {{if .Labels}}
+                    {{range .Labels}}
+                    <span class="inline-flex items-center gap-1 bg-neutral-800 border border-neutral-700 rounded-full px-2.5 py-1 text-xs font-medium text-neutral-300">{{.Key}}<span class="text-neutral-500">=</span>{{.Value}}</span>
+                    {{end}}
+                    {{else}}
+                    <span class="text-sm text-neutral-500">-</span>
+                    {{end}}
+                </dd>
+            </div>
         </dl>
     </div>
 

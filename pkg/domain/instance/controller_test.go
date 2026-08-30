@@ -36,12 +36,18 @@ const (
 	nodeCName               = "node-c"
 	nodeFName               = "node-f"
 	nodeGName               = "node-g"
+	nodeHName               = "node-h"
+	nodeIName               = "node-i"
 
 	candidateAddress1  = "10.0.0.1"
 	candidateAddress2  = "10.0.0.2"
 	candidateInterface = "eth0"
 
 	talosVersionFixture = "v1.9.0"
+	talosArchFixture    = "amd64"
+
+	diskDevPathFixture   = "/dev/sda"
+	diskTransportFixture = "nvme"
 )
 
 // errNoResultConfigured, errConnectionRefused, and errIOTimeout are fixed
@@ -57,29 +63,50 @@ var (
 type fakeResult struct {
 	talosVersion string
 	interfaces   []v1alpha2.InstanceInterfaceStatus
+	disks        []v1alpha2.InstanceDiskStatus
+	cpus         []v1alpha2.InstanceCPUStatus
+	memory       []v1alpha2.InstanceMemoryStatus
+	serialNumber string
 	err          error
 }
 
 // fakeDiscoverer is instance.Discoverer's test double — it never dials real
 // gRPC, and records every address it was asked to probe so tests can assert
 // on call order/count (e.g. that an already-Discovered Instance is never
-// probed again).
+// probed again). hardwareCalls separately records just the addresses probed
+// with includeHardware set, for TestReconcileOnlyReprobesHardwareWhenNotAlreadyDiscovered.
 type fakeDiscoverer struct {
-	results map[string]fakeResult
-	calls   []string
+	results       map[string]fakeResult
+	calls         []string
+	hardwareCalls []string
 }
 
 func (f *fakeDiscoverer) Discover(
-	_ context.Context, addr string,
-) (string, []v1alpha2.InstanceInterfaceStatus, error) {
+	_ context.Context, addr string, includeHardware bool,
+) (instance.DiscoveryResult, error) {
 	f.calls = append(f.calls, addr)
+
+	if includeHardware {
+		f.hardwareCalls = append(f.hardwareCalls, addr)
+	}
 
 	res, ok := f.results[addr]
 	if !ok {
-		return "", nil, fmt.Errorf("%w: %s", errNoResultConfigured, addr)
+		return instance.DiscoveryResult{}, fmt.Errorf("%w: %s", errNoResultConfigured, addr)
 	}
 
-	return res.talosVersion, res.interfaces, res.err
+	result := instance.DiscoveryResult{TalosVersion: res.talosVersion, Interfaces: res.interfaces}
+
+	// Mirrors talosDiscoverer's own real behavior: hardware fields are only
+	// populated when includeHardware is set — see Discover's own doc.
+	if includeHardware {
+		result.Disks = res.disks
+		result.CPUs = res.cpus
+		result.Memory = res.memory
+		result.SerialNumber = res.serialNumber
+	}
+
+	return result, res.err
 }
 
 // discoveredResult is the fakeResult a successfully-probed candidate
@@ -185,6 +212,155 @@ func TestReconcileDiscoversOnFirstCandidate(t *testing.T) {
 	assert.Equal(t, talosVersionFixture, got.Status.Talos.Version)
 	assert.Equal(t, []v1alpha2.InstanceInterfaceStatus{{Name: candidateInterface}}, got.Status.Interfaces)
 	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, instance.DiscoveredConditionType))
+	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, instance.LiveConditionType),
+		"Live mirrors Discovered pre-claim — see LiveConditionType's own doc")
+	assert.False(t, got.Status.LastProbeTime.IsZero(), "LastProbeTime is stamped on every probe, successful or not")
+}
+
+// TestReconcileDiscoversHardwareInventory covers issue #76: a successful
+// probe persists Disks/CPUs/Memory/SerialNumber alongside Interfaces,
+// straight through from Discoverer's own DiscoveryResult.
+func TestReconcileDiscoversHardwareInventory(t *testing.T) {
+	t.Parallel()
+
+	obj := &v1alpha2.Instance{
+		ObjectMeta: metav1.ObjectMeta{Name: nodeHName},
+		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{"10.0.0.1"}},
+	}
+
+	disks := []v1alpha2.InstanceDiskStatus{
+		{DevPath: diskDevPathFixture, PrettySize: "512 GB", Transport: diskTransportFixture},
+	}
+	cpus := []v1alpha2.InstanceCPUStatus{{ProductName: "AMD EPYC 7302P", CoreCount: 16, ThreadCount: 32}}
+	memory := []v1alpha2.InstanceMemoryStatus{{SizeMiB: 32768, Manufacturer: "Micron"}}
+
+	const serialNumber = "SN-1234567890"
+
+	fakeClient := newFakeClient(t, obj)
+	discoverer := &fakeDiscoverer{results: map[string]fakeResult{
+		"10.0.0.1": {talosVersion: "v1.9.0", disks: disks, cpus: cpus, memory: memory, serialNumber: serialNumber},
+	}}
+
+	reconciler := newReconciler(fakeClient, discoverer)
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: nodeHName},
+	})
+	require.NoError(t, err)
+
+	var got v1alpha2.Instance
+
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: nodeHName}, &got))
+	assert.Equal(t, disks, got.Status.Disks)
+	assert.Equal(t, cpus, got.Status.CPUs)
+	assert.Equal(t, memory, got.Status.Memory)
+	assert.Equal(t, serialNumber, got.Status.SerialNumber)
+}
+
+// TestReconcileOnlyReprobesHardwareWhenNotAlreadyDiscovered covers the
+// other half of issue #76's hardware-inventory scope note: hardware is
+// enumerated on first discovery, then skipped on a steady-state recheck of
+// an already-Live candidate — see probeCandidates' own doc. The
+// re-enumerate-after-an-outage half is covered separately by
+// TestReconcileReenumeratesHardwareAfterOutage.
+func TestReconcileOnlyReprobesHardwareWhenNotAlreadyDiscovered(t *testing.T) {
+	t.Parallel()
+
+	obj := &v1alpha2.Instance{
+		ObjectMeta: metav1.ObjectMeta{Name: nodeIName},
+		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{candidateAddress1}},
+	}
+
+	disks := []v1alpha2.InstanceDiskStatus{
+		{DevPath: diskDevPathFixture, PrettySize: "512 GB", Transport: diskTransportFixture},
+	}
+	fakeClient := newFakeClient(t, obj)
+	discoverer := &fakeDiscoverer{results: map[string]fakeResult{
+		candidateAddress1: {talosVersion: talosVersionFixture, disks: disks},
+	}}
+
+	reconciler := newReconciler(fakeClient, discoverer)
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: nodeIName}}
+
+	// First reconcile: not yet Discovered, so hardware is enumerated.
+	_, err := reconciler.Reconcile(ctx, req)
+	require.NoError(t, err)
+	assert.Equal(t, []string{candidateAddress1}, discoverer.hardwareCalls,
+		"first discovery must enumerate hardware")
+
+	var got v1alpha2.Instance
+
+	require.NoError(t, fakeClient.Get(ctx, types.NamespacedName{Name: nodeIName}, &got))
+	assert.Equal(t, disks, got.Status.Disks)
+
+	// Second reconcile: already Live=true, so hardware is skipped — Disks
+	// must survive untouched even though the fake returns none this round.
+	_, err = reconciler.Reconcile(ctx, req)
+	require.NoError(t, err)
+	assert.Equal(t, []string{candidateAddress1}, discoverer.hardwareCalls,
+		"a steady-state recheck of an already-Live candidate must not re-enumerate hardware")
+
+	require.NoError(t, fakeClient.Get(ctx, types.NamespacedName{Name: nodeIName}, &got))
+	assert.Equal(t, disks, got.Status.Disks, "Disks must survive a hardware-skipped recheck untouched")
+}
+
+// TestReconcileReenumeratesHardwareAfterOutage covers the rest of issue
+// #76's hardware-inventory scope note: Discovered is a one-time latch (see
+// its own doc) that survives an outage, but Live doesn't, and it's Live —
+// not Discovered — that gates hardware re-enumeration (see probeCandidates'
+// own doc), so a reboot correctly re-enumerates and can pick up a disk
+// swap made while the node was down.
+func TestReconcileReenumeratesHardwareAfterOutage(t *testing.T) {
+	t.Parallel()
+
+	obj := &v1alpha2.Instance{
+		ObjectMeta: metav1.ObjectMeta{Name: nodeIName},
+		Spec:       v1alpha2.InstanceSpec{Interfaces: []string{candidateAddress1}},
+		Status: v1alpha2.InstanceStatus{
+			Conditions: []metav1.Condition{
+				{Type: instance.DiscoveredConditionType, Status: metav1.ConditionTrue, Reason: reasonDiscoveredFixture},
+				{Type: instance.LiveConditionType, Status: metav1.ConditionTrue, Reason: reasonDiscoveredFixture},
+			},
+		},
+	}
+
+	fakeClient := newFakeClient(t, obj)
+	discoverer := &fakeDiscoverer{results: map[string]fakeResult{
+		candidateAddress1: {err: errConnectionRefused},
+	}}
+
+	reconciler := newReconciler(fakeClient, discoverer)
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: nodeIName}}
+
+	// The candidate is unreachable: Live flips false, Discovered stays true.
+	_, err := reconciler.Reconcile(ctx, req)
+	require.NoError(t, err)
+
+	var got v1alpha2.Instance
+
+	require.NoError(t, fakeClient.Get(ctx, types.NamespacedName{Name: nodeIName}, &got))
+	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, instance.DiscoveredConditionType),
+		"Discovered is a one-time latch and must not revert")
+	assert.False(t, meta.IsStatusConditionTrue(got.Status.Conditions, instance.LiveConditionType))
+
+	// The node comes back with a swapped disk: since Live was false on
+	// entry, this reconcile must re-enumerate hardware and pick it up.
+	newDisks := []v1alpha2.InstanceDiskStatus{
+		{DevPath: diskDevPathFixture, PrettySize: "1 TB", Transport: diskTransportFixture},
+	}
+	discoverer.results = map[string]fakeResult{
+		candidateAddress1: {talosVersion: talosVersionFixture, disks: newDisks},
+	}
+
+	_, err = reconciler.Reconcile(ctx, req)
+	require.NoError(t, err)
+	assert.Equal(t, []string{candidateAddress1}, discoverer.hardwareCalls,
+		"rediscovery after an outage must re-enumerate hardware")
+
+	require.NoError(t, fakeClient.Get(ctx, types.NamespacedName{Name: nodeIName}, &got))
+	assert.Equal(t, newDisks, got.Status.Disks, "the swapped disk discovered while down must be picked up")
 }
 
 func TestReconcileFallsBackToNextCandidate(t *testing.T) {
@@ -242,9 +418,10 @@ func TestReconcileAllCandidatesFail(t *testing.T) {
 
 	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: nodeCName}, &got))
 
-	cond := meta.FindStatusCondition(got.Status.Conditions, instance.DiscoveredConditionType)
-	require.NotNil(t, cond)
-	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, instance.DiscoveredConditionType),
+		"a candidate that's never once been successfully probed must not get a Discovered condition at all — "+
+			"it's a one-time latch, only ever set on success")
+	assert.False(t, meta.IsStatusConditionTrue(got.Status.Conditions, instance.LiveConditionType))
 }
 
 func TestReconcileNoInterfacesConfigured(t *testing.T) {
@@ -362,7 +539,12 @@ func TestReconcileSkipsRedundantStatusUpdate(t *testing.T) {
 					Type: instance.DiscoveredConditionType, Status: metav1.ConditionTrue,
 					Reason: reasonDiscoveredFixture, Message: "discovered via " + candidateAddress1,
 				},
+				{
+					Type: instance.LiveConditionType, Status: metav1.ConditionTrue,
+					Reason: reasonDiscoveredFixture, Message: "discovered via " + candidateAddress1,
+				},
 			},
+			LastProbeTime: metav1.Now(),
 		},
 	}
 
@@ -387,7 +569,13 @@ func TestReconcileSkipsRedundantStatusUpdate(t *testing.T) {
 // unclaimed Instance whose candidate no longer answers must flip back to
 // Discovered=False, and retry sooner (RetryInterval) rather than waiting a
 // full RecheckInterval to try again.
-func TestReconcileFlipsDiscoveredFalseWhenUnclaimedNodeGoesOffline(t *testing.T) {
+// TestReconcileFlipsLiveFalseButKeepsDiscoveredWhenUnclaimedNodeGoesOffline
+// covers DiscoveredConditionType's own one-time-latch doc: Discovered
+// stays true once achieved, even through a later outage, while Live —
+// unlike Discovered — tracks current reachability and flips false right
+// away. See instancepool's own claim gate for why Live still has to be
+// checked separately even though Discovered alone doesn't revert.
+func TestReconcileFlipsLiveFalseButKeepsDiscoveredWhenUnclaimedNodeGoesOffline(t *testing.T) {
 	t.Parallel()
 
 	obj := &v1alpha2.Instance{
@@ -397,6 +585,7 @@ func TestReconcileFlipsDiscoveredFalseWhenUnclaimedNodeGoesOffline(t *testing.T)
 			Talos: v1alpha2.InstanceTalosStatus{Version: talosVersionFixture},
 			Conditions: []metav1.Condition{
 				{Type: instance.DiscoveredConditionType, Status: metav1.ConditionTrue, Reason: reasonDiscoveredFixture},
+				{Type: instance.LiveConditionType, Status: metav1.ConditionTrue, Reason: reasonDiscoveredFixture},
 			},
 		},
 	}
@@ -417,8 +606,10 @@ func TestReconcileFlipsDiscoveredFalseWhenUnclaimedNodeGoesOffline(t *testing.T)
 	var got v1alpha2.Instance
 
 	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: nodeGName}, &got))
-	assert.False(t, meta.IsStatusConditionTrue(got.Status.Conditions, instance.DiscoveredConditionType),
-		"a node that stops answering must flip back to Discovered=False while still unclaimed")
+	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, instance.DiscoveredConditionType),
+		"Discovered is a one-time latch — it must not revert just because the node stopped answering")
+	assert.False(t, meta.IsStatusConditionTrue(got.Status.Conditions, instance.LiveConditionType),
+		"Live tracks current reachability, unlike Discovered, so it flips false right away")
 }
 
 func TestReconcileIgnoresMissingInstance(t *testing.T) {
