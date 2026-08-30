@@ -9,7 +9,22 @@
 <div class="px-6 py-4">
     <div class="flex items-center justify-between gap-4 flex-wrap">
         <span class="text-sm font-medium text-white">{{.Name}}</span>
-        <span class="text-xs text-neutral-600 font-mono">{{.Age}}</span>
+        <div class="flex items-center gap-3">
+            <span class="text-xs text-neutral-600 font-mono">{{.Age}}</span>
+            {{/* Managed is the "kontinuum-admin" ClusterRole
+                 pkg/domain/adminrbac's own reconcile loop recreates within
+                 ~30s if deleted (see roleRow.Managed's own doc) — deleting
+                 it here would just have it reappear, so there's nothing
+                 for this button to usefully do for it, same reasoning as
+                 role-binding-row's identical exclusion below. */}}
+            {{if not .Managed}}
+            <button type="button" onclick="openIAMDeleteModal('role', '{{js .Name}}', '{{js .Namespace}}', 'roles')"
+                    class="inline-flex items-center justify-center rounded-lg p-1.5 text-neutral-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                    aria-label="Delete {{.Name}}">
+                {{template "icon-trash"}}
+            </button>
+            {{end}}
+        </div>
     </div>
     {{if .Rules}}
     <div class="mt-2 space-y-1.5">
@@ -48,6 +63,18 @@
         <dd class="flex items-center gap-2 text-sm">
             <span class="text-neutral-500">{{.RoleRefKind}}</span>
             <span class="inline-flex items-center gap-1.5 bg-neutral-800 border border-neutral-700 rounded-full px-2.5 py-1 text-xs font-medium text-neutral-300">{{.RoleRefName}}</span>
+            {{/* Managed bindings are reconciled from OIDC admin-group config
+                 (see iam_cluster_content.html's own read-only section for
+                 them) — deleting one here would just have it recreated on
+                 the next reconcile, so there's nothing for this button to
+                 usefully do for those. */}}
+            {{if not .Managed}}
+            <button type="button" onclick="openIAMDeleteModal('role binding', '{{js .Name}}', '{{js .Namespace}}', 'rolebindings')"
+                    class="inline-flex items-center justify-center rounded-lg p-1.5 text-neutral-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                    aria-label="Delete {{.Name}}">
+                {{template "icon-trash"}}
+            </button>
+            {{end}}
         </dd>
     </div>
     <p class="mt-2 text-xs text-neutral-600 font-mono">{{.Name}} &middot; {{.Age}}</p>

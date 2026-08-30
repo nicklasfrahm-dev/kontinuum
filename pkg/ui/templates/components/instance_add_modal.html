@@ -17,10 +17,7 @@
             <span class="text-accent [&>svg]:h-4 [&>svg]:w-4">{{template "icon-server-plus"}}</span>
             Add instance
         </h2>
-        <button type="button" onclick="this.closest('dialog').close()"
-                class="text-neutral-500 hover:text-white transition-colors text-lg leading-none" aria-label="Close">
-            &times;
-        </button>
+        {{template "modal-close-button"}}
     </div>
     <div id="instance-add-modal-body" class="p-6">
         {{template "instance-add-modal-body" .}}
@@ -48,7 +45,7 @@
     {{.Error}}
 </div>
 {{end}}
-<form hx-post="/app/kontinuum.sh/namespaces/{{.Namespace}}/instances/add" hx-target="#instance-add-modal-body" hx-swap="innerHTML" class="space-y-4">
+<form hx-post="/app/kontinuum.sh/v1alpha2/namespaces/{{.Namespace}}/instances/add" hx-target="#instance-add-modal-body" hx-swap="innerHTML" class="space-y-4">
     <label class="block">
         <span class="text-xs uppercase tracking-wider text-neutral-500">Address</span>
         <input type="text" name="address" value="{{.Address}}" required placeholder="10.0.0.5 or node1.example.com"

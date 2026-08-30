@@ -1,6 +1,6 @@
 {{define "content"}}
-<div id="instance-detail-content" hx-get="/app/kontinuum.sh/namespaces/{{.Namespace}}/instances/{{.Name}}" hx-trigger="every 15s" hx-select="#instance-detail-content" hx-swap="outerHTML" hx-disinherit="hx-select hx-swap">
-    <a href="/app/kontinuum.sh/namespaces/{{.Namespace}}/instances" class="inline-flex items-center gap-1.5 text-sm text-neutral-500 hover:text-white transition-colors mb-4">
+<div id="instance-detail-content" hx-get="/app/kontinuum.sh/v1alpha2/namespaces/{{.Namespace}}/instances/{{.Name}}" hx-trigger="every 15s" hx-select="#instance-detail-content" hx-swap="outerHTML" hx-disinherit="hx-select hx-swap">
+    <a href="/app/kontinuum.sh/v1alpha2/namespaces/{{.Namespace}}/instances" class="inline-flex items-center gap-1.5 text-sm text-neutral-500 hover:text-white transition-colors mb-4">
         {{template "icon-chevron-left"}}
         Back to instances
     </a>
@@ -246,7 +246,7 @@
                 Cancel
             </button>
             <button type="button"
-                    hx-delete="/app/kontinuum.sh/namespaces/{{.Namespace}}/instances/{{.Name}}"
+                    hx-delete="/app/kontinuum.sh/v1alpha2/namespaces/{{.Namespace}}/instances/{{.Name}}"
                     hx-disabled-elt="this"
                     class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20 disabled:opacity-60 disabled:cursor-not-allowed transition-colors">
                 <span class="[.htmx-request_&]:hidden [&>svg]:h-3.5 [&>svg]:w-3.5">{{template "icon-trash"}}</span>

@@ -91,14 +91,14 @@ const (
 	pageRegistry  = "registry"
 	pageKontinuum = "kontinuum"
 	// pageInstances and pageInstanceDetail back
-	// /app/kontinuum.sh/namespaces/{ns}/instances and
+	// /app/kontinuum.sh/v1alpha2/namespaces/{ns}/instances and
 	// .../instances/{name} — the Instance CRD (api/v1alpha2.Instance, a
 	// bare-metal or provider-backed machine InstancePool/TalosCluster claims
 	// from). Not to be confused with pageKontinuum above: a registered
 	// Kontinuum server process, a completely different type despite the
 	// similar-sounding name — see issue #52, which is why the two stay
 	// separate pages under separate routes (/instances vs /kontinuums)
-	// rather than sharing one. The URL's own kontinuum.sh/namespaces/{ns}
+	// rather than sharing one. The URL's own kontinuum.sh/v1alpha2/namespaces/{ns}
 	// shape (rather than a flat /app/instances) is what issue #63's
 	// architecture needs: Instance became a namespaced CRD there, one
 	// tenant's own namespace at a time — see the nav's tenant switcher
@@ -107,7 +107,7 @@ const (
 	pageInstanceDetail = "instance-detail"
 	pageTalosClusters  = "talosclusters"
 	pageTalosCluster   = "taloscluster"
-	// pageZoneDetail backs /app/kontinuum.sh/namespaces/{ns}/zones/{name} —
+	// pageZoneDetail backs /app/kontinuum.sh/v1alpha2/namespaces/{ns}/zones/{name} —
 	// see handleZoneDetail.
 	pageZoneDetail   = "zone-detail"
 	pageIAMNamespace = "iam-namespace"
@@ -143,7 +143,7 @@ const defaultTenantNamespace = v1alpha2.KontinuumSystemNamespace
 // defaultInstancesPath is defaultTenantNamespace's own instances list URL —
 // shared by handleAppRoot/handleHome's redirects and nav.html's own
 // "Instances" link default (see renderTenantSwitcher).
-const defaultInstancesPath = "/app/kontinuum.sh/namespaces/" + defaultTenantNamespace + "/instances"
+const defaultInstancesPath = "/app/kontinuum.sh/v1alpha2/namespaces/" + defaultTenantNamespace + "/instances"
 
 // dictPairSize is the number of arguments (one key, one value) templateDict
 // consumes per resulting map entry.
@@ -203,6 +203,8 @@ func mustParsePage(content ...string) *template.Template {
 		"templates/components/icon_shield.html",
 		"templates/components/icon_unplug.html",
 		"templates/components/icon_key.html",
+		"templates/components/icon_globe_lock.html",
+		"templates/components/icon_door_closed_lock.html",
 		"templates/components/icon_logout.html",
 		"templates/components/icon_book_open_text.html",
 		"templates/components/icon_external_link.html",
@@ -255,10 +257,27 @@ func NewRouter(
 	namespacesFor NamespaceListerFactory, kontinuumsFor KontinuumClientFactory, zonesFor ZoneClientFactory,
 	version string, cfg config.Config, authEnabled bool, invalidateSession SessionInvalidator,
 ) *Router {
-	pages := map[string]*template.Template{
+	return &Router{
+		namespacesFor:     namespacesFor,
+		kontinuumsFor:     kontinuumsFor,
+		zonesFor:          zonesFor,
+		pages:             buildPages(),
+		version:           version,
+		cfg:               cfg,
+		authEnabled:       authEnabled,
+		invalidateSession: invalidateSession,
+	}
+}
+
+// buildPages parses every page's own template tree — split out of NewRouter
+// purely to keep that function's own line count under funlen's limit, not
+// for any functional reason.
+func buildPages() map[string]*template.Template {
+	return map[string]*template.Template{
 		pageRegistry: mustParsePage("templates/registry_content.html",
 			"templates/components/icon_trash.html", "templates/components/icon_globe.html",
-			"templates/components/icon_loader_circle.html",
+			"templates/components/icon_loader_circle.html", "templates/components/icon_x.html",
+			"templates/components/modal_close_button.html",
 			"templates/components/zone_add_modal.html", "templates/components/zone_leave_modal.html"),
 		pageKontinuum: mustParsePage("templates/kontinuum_content.html",
 			"templates/components/icon_chevron_left.html", "templates/components/icon_eye.html",
@@ -268,6 +287,7 @@ func NewRouter(
 			"templates/components/reveal_panel.html", "templates/components/reveal_panel_script.html"),
 		pageInstances: mustParsePage("templates/instances_content.html",
 			"templates/components/icon_server_plus.html", "templates/components/icon_loader_circle.html",
+			"templates/components/icon_x.html", "templates/components/modal_close_button.html",
 			"templates/components/instance_add_modal.html", "templates/components/icon_trash.html"),
 		pageInstanceDetail: mustParsePage("templates/instance_detail_content.html",
 			"templates/components/icon_chevron_left.html", "templates/components/icon_info.html",
@@ -293,10 +313,18 @@ func NewRouter(
 			"templates/components/icon_key.html", "templates/components/icon_loader_circle.html",
 			"templates/components/conditions_table.html"),
 		pageIAMNamespace: mustParsePage("templates/iam_namespace_content.html",
-			"templates/components/icon_info.html", "templates/components/role_rows.html",
+			"templates/components/icon_info.html", "templates/components/icon_shield_user.html",
+			"templates/components/icon_user_shield.html",
+			"templates/components/icon_x.html", "templates/components/modal_close_button.html",
+			"templates/components/icon_loader_circle.html", "templates/components/icon_trash.html",
+			"templates/components/role_rows.html", "templates/components/iam_delete_modal.html",
 			"templates/components/role_add_modal.html", "templates/components/rolebinding_add_modal.html"),
 		pageIAMCluster: mustParsePage("templates/iam_cluster_content.html",
-			"templates/components/icon_info.html", "templates/components/role_rows.html",
+			"templates/components/icon_info.html", "templates/components/icon_shield_user.html",
+			"templates/components/icon_user_shield.html",
+			"templates/components/icon_x.html", "templates/components/modal_close_button.html",
+			"templates/components/icon_loader_circle.html", "templates/components/icon_trash.html",
+			"templates/components/role_rows.html", "templates/components/iam_delete_modal.html",
 			"templates/components/role_add_modal.html", "templates/components/rolebinding_add_modal.html"),
 		pageConnect: mustParsePage("templates/connect_content.html",
 			"templates/components/icon_terminal.html",
@@ -304,17 +332,6 @@ func NewRouter(
 			"templates/components/icon_download.html",
 			"templates/components/icon_eye.html", "templates/components/icon_eye_off.html",
 			"templates/components/reveal_panel.html", "templates/components/reveal_panel_script.html"),
-	}
-
-	return &Router{
-		namespacesFor:     namespacesFor,
-		kontinuumsFor:     kontinuumsFor,
-		zonesFor:          zonesFor,
-		pages:             pages,
-		version:           version,
-		cfg:               cfg,
-		authEnabled:       authEnabled,
-		invalidateSession: invalidateSession,
 	}
 }
 
@@ -357,32 +374,24 @@ func (r *Router) RegisterRoutes(
 	mux.HandleFunc("GET /{$}", handleRoot)
 	mux.HandleFunc("GET /app", appRoot)
 	mux.HandleFunc("GET /app/home", wrap(handleAppHome))
-	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/kontinuums", wrap(r.renderRegistry))
-	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/kontinuums/{name}", wrap(r.handleKontinuumDetail))
-	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/kontinuums/{name}/secret",
+	mux.HandleFunc("GET /app/kontinuum.sh/v1alpha2/namespaces/{ns}/kontinuums", wrap(r.renderRegistry))
+	mux.HandleFunc("GET /app/kontinuum.sh/v1alpha2/namespaces/{ns}/kontinuums/{name}", wrap(r.handleKontinuumDetail))
+	mux.HandleFunc("GET /app/kontinuum.sh/v1alpha2/namespaces/{ns}/kontinuums/{name}/secret",
 		wrap(r.handleKontinuumSecretDownload))
-	mux.HandleFunc("DELETE /app/kontinuum.sh/namespaces/{ns}/kontinuums/{name}", wrap(r.handleDeleteInstance))
+	mux.HandleFunc("DELETE /app/kontinuum.sh/v1alpha2/namespaces/{ns}/kontinuums/{name}", wrap(r.handleDeleteInstance))
 	mux.HandleFunc("POST /app/zones/add", wrap(r.handleZoneAdd))
-	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/zones/{name}", wrap(r.handleZoneDetail))
-	mux.HandleFunc("DELETE /app/kontinuum.sh/namespaces/{ns}/zones/{name}", wrap(r.handleDeleteZone))
-	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/instances", wrap(r.handleInstances))
-	mux.HandleFunc("POST /app/kontinuum.sh/namespaces/{ns}/instances/add", wrap(r.handleInstanceAdd))
-	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/instances/{name}", wrap(r.handleInstanceDetail))
-	mux.HandleFunc("DELETE /app/kontinuum.sh/namespaces/{ns}/instances/{name}", wrap(r.handleDeleteInstanceObject))
-	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/talosclusters", wrap(r.handleTalosClusters))
-	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/talosclusters/{name}", wrap(r.handleTalosClusterDetail))
-	mux.HandleFunc("DELETE /app/kontinuum.sh/namespaces/{ns}/talosclusters/{name}", wrap(r.handleDeleteTalosCluster))
-	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/talosclusters/{name}/kubeconfig",
+	mux.HandleFunc("GET /app/kontinuum.sh/v1alpha2/namespaces/{ns}/zones/{name}", wrap(r.handleZoneDetail))
+	mux.HandleFunc("DELETE /app/kontinuum.sh/v1alpha2/namespaces/{ns}/zones/{name}", wrap(r.handleDeleteZone))
+	mux.HandleFunc("GET /app/kontinuum.sh/v1alpha2/namespaces/{ns}/instances", wrap(r.handleInstances))
+	mux.HandleFunc("POST /app/kontinuum.sh/v1alpha2/namespaces/{ns}/instances/add", wrap(r.handleInstanceAdd))
+	mux.HandleFunc("GET /app/kontinuum.sh/v1alpha2/namespaces/{ns}/instances/{name}", wrap(r.handleInstanceDetail))
+	mux.HandleFunc("DELETE /app/kontinuum.sh/v1alpha2/namespaces/{ns}/instances/{name}", wrap(r.handleDeleteInstanceObject))
+	mux.HandleFunc("GET /app/kontinuum.sh/v1alpha2/namespaces/{ns}/talosclusters", wrap(r.handleTalosClusters))
+	mux.HandleFunc("GET /app/kontinuum.sh/v1alpha2/namespaces/{ns}/talosclusters/{name}", wrap(r.handleTalosClusterDetail))
+	mux.HandleFunc("DELETE /app/kontinuum.sh/v1alpha2/namespaces/{ns}/talosclusters/{name}", wrap(r.handleDeleteTalosCluster))
+	mux.HandleFunc("GET /app/kontinuum.sh/v1alpha2/namespaces/{ns}/talosclusters/{name}/kubeconfig",
 		wrap(r.handleTalosClusterKubeconfigDownload))
-	mux.HandleFunc("GET /app/iam", handleIAMRedirect)
-	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/iam/roles", wrap(r.handleIAMNamespaceRoles))
-	mux.HandleFunc("GET /app/kontinuum.sh/namespaces/{ns}/iam/rolebindings", wrap(r.handleIAMNamespaceRoleBindings))
-	mux.HandleFunc("POST /app/kontinuum.sh/namespaces/{ns}/iam/roles", wrap(r.handleRoleAdd))
-	mux.HandleFunc("POST /app/kontinuum.sh/namespaces/{ns}/iam/rolebindings", wrap(r.handleRoleBindingAdd))
-	mux.HandleFunc("GET /app/iam/cluster/roles", wrap(r.handleIAMClusterRoles))
-	mux.HandleFunc("GET /app/iam/cluster/rolebindings", wrap(r.handleIAMClusterRoleBindings))
-	mux.HandleFunc("POST /app/iam/cluster/roles", wrap(r.handleClusterRoleAdd))
-	mux.HandleFunc("POST /app/iam/cluster/rolebindings", wrap(r.handleClusterRoleBindingAdd))
+	r.registerIAMRoutes(mux, wrap)
 	mux.HandleFunc("GET /app/connect", wrap(r.handleConnect))
 	mux.HandleFunc("GET /app/registry/kubeconfig", wrap(r.handleRegistryKubeconfigDownload))
 
@@ -395,6 +404,28 @@ func (r *Router) RegisterRoutes(
 	mux.HandleFunc("/app/", wrap(func(writer http.ResponseWriter, request *http.Request) {
 		http.NotFound(writer, request)
 	}))
+}
+
+// registerIAMRoutes registers every namespaced Role/RoleBinding and
+// cluster-scoped ClusterRole/ClusterRoleBinding route — split out of
+// RegisterRoutes purely to keep that function under funlen's statement
+// limit, the same reasoning buildPages was split out of NewRouter for.
+func (r *Router) registerIAMRoutes(mux *http.ServeMux, wrap func(http.HandlerFunc) http.HandlerFunc) {
+	mux.HandleFunc("GET /app/rbac.authorization.k8s.io/v1/namespaces/{ns}/roles", wrap(r.handleIAMNamespaceRoles))
+	mux.HandleFunc("GET /app/rbac.authorization.k8s.io/v1/namespaces/{ns}/rolebindings",
+		wrap(r.handleIAMNamespaceRoleBindings))
+	mux.HandleFunc("POST /app/rbac.authorization.k8s.io/v1/namespaces/{ns}/roles", wrap(r.handleRoleAdd))
+	mux.HandleFunc("POST /app/rbac.authorization.k8s.io/v1/namespaces/{ns}/rolebindings", wrap(r.handleRoleBindingAdd))
+	mux.HandleFunc("DELETE /app/rbac.authorization.k8s.io/v1/namespaces/{ns}/roles/{name}", wrap(r.handleDeleteRole))
+	mux.HandleFunc("DELETE /app/rbac.authorization.k8s.io/v1/namespaces/{ns}/rolebindings/{name}",
+		wrap(r.handleDeleteRoleBinding))
+	mux.HandleFunc("GET /app/rbac.authorization.k8s.io/v1/clusterroles", wrap(r.handleIAMClusterRoles))
+	mux.HandleFunc("GET /app/rbac.authorization.k8s.io/v1/clusterrolebindings", wrap(r.handleIAMClusterRoleBindings))
+	mux.HandleFunc("POST /app/rbac.authorization.k8s.io/v1/clusterroles", wrap(r.handleClusterRoleAdd))
+	mux.HandleFunc("POST /app/rbac.authorization.k8s.io/v1/clusterrolebindings", wrap(r.handleClusterRoleBindingAdd))
+	mux.HandleFunc("DELETE /app/rbac.authorization.k8s.io/v1/clusterroles/{name}", wrap(r.handleDeleteClusterRole))
+	mux.HandleFunc("DELETE /app/rbac.authorization.k8s.io/v1/clusterrolebindings/{name}",
+		wrap(r.handleDeleteClusterRoleBinding))
 }
 
 // notFoundInterceptor is a http.ResponseWriter that withholds a 404 from
@@ -528,17 +559,6 @@ func handleAppRoot(writer http.ResponseWriter, request *http.Request) {
 // defaultInstancesPath.
 func handleAppHome(writer http.ResponseWriter, request *http.Request) {
 	http.Redirect(writer, request, defaultInstancesPath, http.StatusFound)
-}
-
-// handleIAMRedirect is GET /app/iam's handler — the old IAM page's own URL,
-// kept as a redirect to /app/iam/cluster/rolebindings (the closest
-// equivalent under the new namespaced/cluster-scoped split — see
-// handleIAMClusterRoleBindings) so old bookmarks/links keep working. Left
-// unprotected/unauthenticated like handleAppRoot/handleAppHome: it's a pure
-// redirect that touches no Kubernetes API, so there's nothing here for
-// `protect` to guard.
-func handleIAMRedirect(writer http.ResponseWriter, request *http.Request) {
-	http.Redirect(writer, request, "/app/iam/cluster/rolebindings", http.StatusFound)
 }
 
 // acceptsHTML reports whether request's Accept header prefers HTML, the
@@ -964,7 +984,7 @@ func (r *Router) fetchZoneCluster(
 	return cluster, true, true
 }
 
-// handleZoneDetail is GET /app/kontinuum.sh/namespaces/{ns}/zones/{name}'s
+// handleZoneDetail is GET /app/kontinuum.sh/v1alpha2/namespaces/{ns}/zones/{name}'s
 // handler — it shows one Zone's own identity (region/zone/domain), its
 // full status.conditions list (ClusterReady, Installed, RegistryJoined,
 // Ready — see pkg/domain/zone's own Reconciler), a link to its owning
@@ -1543,6 +1563,13 @@ type roleRow struct {
 	Namespace string
 	Rules     []roleRuleRow
 	Age       string
+	// Managed is true for the "kontinuum-admin" ClusterRole
+	// pkg/domain/adminrbac's own reconcile loop owns and recreates within
+	// its own interval (default 30s) if deleted — see listClusterRoles'
+	// own doc for why deleting it here is hidden rather than just
+	// pointless. Always false for a namespaced Role, which this
+	// controller never manages.
+	Managed bool
 }
 
 // roleNames extracts every roles' Name, in the same order — used to
@@ -1658,7 +1685,9 @@ func (r *Router) listNamespaceRoleBindings(
 // Unfiltered: kontinuum doesn't bootstrap upstream's default ClusterRoles
 // (see pkg/domain/adminrbac's own doc), so this list stays short even
 // without narrowing it to admin-group-managed ones the way the old IAM page
-// did.
+// did. Managed marks the "kontinuum-admin" ClusterRole that controller
+// owns (see roleRow.Managed's own doc) — the same ManagedBy label
+// listClusterRoleBindings already keys off for its own Managed field.
 func (r *Router) listClusterRoles(
 	writer http.ResponseWriter, request *http.Request, kontinuums KontinuumClient,
 ) ([]roleRow, error) {
@@ -1681,6 +1710,7 @@ func (r *Router) listClusterRoles(
 	for _, item := range list.Items {
 		roles = append(roles, roleRow{
 			Name: item.Name, Rules: roleRuleRowsFrom(item.Rules), Age: formatAge(item.CreationTimestamp.Time),
+			Managed: item.Labels[v1alpha2.LabelManagedBy] == adminrbac.ManagedByValue,
 		})
 	}
 
@@ -1728,12 +1758,14 @@ func (r *Router) listClusterRoleBindings(
 	return bindings, nil
 }
 
-// handleIAMNamespaceRoles is GET .../iam/roles's handler.
+// handleIAMNamespaceRoles is GET
+// /app/rbac.authorization.k8s.io/v1/namespaces/{ns}/roles's handler.
 func (r *Router) handleIAMNamespaceRoles(writer http.ResponseWriter, request *http.Request) {
 	r.renderIAMNamespace(writer, request, "roles")
 }
 
-// handleIAMNamespaceRoleBindings is GET .../iam/rolebindings's handler.
+// handleIAMNamespaceRoleBindings is GET
+// /app/rbac.authorization.k8s.io/v1/namespaces/{ns}/rolebindings's handler.
 func (r *Router) handleIAMNamespaceRoleBindings(writer http.ResponseWriter, request *http.Request) {
 	r.renderIAMNamespace(writer, request, "bindings")
 }
@@ -1748,7 +1780,7 @@ func (r *Router) renderIAMNamespace(writer http.ResponseWriter, request *http.Re
 	namespace := request.PathValue("ns")
 
 	data := map[string]any{
-		"Title": "IAM", "ActiveMenu": "iam-namespace", "Version": r.version,
+		"Title": "Tenant", "ActiveMenu": "iam-namespace", "Version": r.version,
 		"AuthEnabled": r.authEnabled, "Namespace": namespace, "View": view,
 	}
 
@@ -1805,12 +1837,12 @@ func (r *Router) loadIAMNamespace(
 	return roles, true
 }
 
-// handleIAMClusterRoles is GET /app/iam/cluster/roles's handler.
+// handleIAMClusterRoles is GET /app/rbac.authorization.k8s.io/v1/clusterroles's handler.
 func (r *Router) handleIAMClusterRoles(writer http.ResponseWriter, request *http.Request) {
 	r.renderIAMCluster(writer, request, "roles")
 }
 
-// handleIAMClusterRoleBindings is GET /app/iam/cluster/rolebindings's
+// handleIAMClusterRoleBindings is GET /app/rbac.authorization.k8s.io/v1/clusterrolebindings's
 // handler.
 func (r *Router) handleIAMClusterRoleBindings(writer http.ResponseWriter, request *http.Request) {
 	r.renderIAMCluster(writer, request, "bindings")
@@ -1820,7 +1852,7 @@ func (r *Router) handleIAMClusterRoleBindings(writer http.ResponseWriter, reques
 // — see renderIAMNamespace's own doc, which this mirrors at cluster scope.
 func (r *Router) renderIAMCluster(writer http.ResponseWriter, request *http.Request, view string) {
 	data := map[string]any{
-		"Title": "IAM", "ActiveMenu": "iam-cluster", "Version": r.version,
+		"Title": "Global", "ActiveMenu": "iam-cluster", "Version": r.version,
 		"AuthEnabled": r.authEnabled, "View": view,
 	}
 
@@ -2014,7 +2046,7 @@ type roleAddFields struct {
 // cluster-scoped forms.
 func (r *Router) roleAddFormData(namespace string, fields roleAddFields, createdRole, formErr string) map[string]any {
 	return map[string]any{
-		"RoleAddURL": "/app/kontinuum.sh/namespaces/" + namespace + "/iam/roles", "RoleKind": "role",
+		"RoleAddURL": "/app/rbac.authorization.k8s.io/v1/namespaces/" + namespace + "/roles", "RoleKind": "role",
 		"RoleName": fields.name, "Rules": fields.rules,
 		"CreatedRole": createdRole, "RoleError": formErr,
 	}
@@ -2023,7 +2055,7 @@ func (r *Router) roleAddFormData(namespace string, fields roleAddFields, created
 // clusterRoleAddFormData is roleAddFormData's cluster-scoped counterpart.
 func (r *Router) clusterRoleAddFormData(fields roleAddFields, createdRole, formErr string) map[string]any {
 	return map[string]any{
-		"RoleAddURL": "/app/iam/cluster/roles", "RoleKind": "cluster role",
+		"RoleAddURL": "/app/rbac.authorization.k8s.io/v1/clusterroles", "RoleKind": "cluster role",
 		"RoleName": fields.name, "Rules": fields.rules,
 		"CreatedRole": createdRole, "RoleError": formErr,
 	}
@@ -2046,11 +2078,12 @@ func (r *Router) renderRoleAddModalBody(writer http.ResponseWriter, page string,
 	_, _ = buf.WriteTo(writer)
 }
 
-// handleRoleAdd is POST .../iam/roles's handler — it creates the submitted
-// Role in the current tenant namespace. On success it swaps the modal body
-// to a success message; on failure it re-renders the form with the
-// submitted values preserved and an error message — see handleZoneAdd, the
-// precedent this follows.
+// handleRoleAdd is POST
+// /app/rbac.authorization.k8s.io/v1/namespaces/{ns}/roles's handler — it
+// creates the submitted Role in the current tenant namespace. On success it
+// swaps the modal body to a success message; on failure it re-renders the
+// form with the submitted values preserved and an error message — see
+// handleZoneAdd, the precedent this follows.
 func (r *Router) handleRoleAdd(writer http.ResponseWriter, request *http.Request) {
 	request.Body = http.MaxBytesReader(writer, request.Body, maxRoleAddFormBytes)
 
@@ -2094,7 +2127,7 @@ func (r *Router) handleRoleAdd(writer http.ResponseWriter, request *http.Request
 	r.renderRoleAddModalBody(writer, pageIAMNamespace, r.roleAddFormData(namespace, roleAddFields{}, role.Name, ""))
 }
 
-// handleClusterRoleAdd is POST /app/iam/cluster/roles's handler — see
+// handleClusterRoleAdd is POST /app/rbac.authorization.k8s.io/v1/clusterroles's handler — see
 // handleRoleAdd, its namespaced counterpart.
 func (r *Router) handleClusterRoleAdd(writer http.ResponseWriter, request *http.Request) {
 	request.Body = http.MaxBytesReader(writer, request.Body, maxRoleAddFormBytes)
@@ -2194,7 +2227,7 @@ func (r *Router) roleBindingAddFormData(
 	namespace string, roleOptions []string, fields roleBindingAddFields, createdBinding, formErr string,
 ) map[string]any {
 	return map[string]any{
-		"RoleBindingAddURL": "/app/kontinuum.sh/namespaces/" + namespace + "/iam/rolebindings",
+		"RoleBindingAddURL": "/app/rbac.authorization.k8s.io/v1/namespaces/" + namespace + "/rolebindings",
 		"RoleBindingKind":   "role binding", "Namespace": namespace,
 		"RoleOptions": roleOptions,
 		"BindingName": fields.name, "SubjectKind": fields.subjectKind,
@@ -2209,7 +2242,7 @@ func (r *Router) clusterRoleBindingAddFormData(
 	roleOptions []string, fields roleBindingAddFields, createdBinding, formErr string,
 ) map[string]any {
 	return map[string]any{
-		"RoleBindingAddURL": "/app/iam/cluster/rolebindings",
+		"RoleBindingAddURL": "/app/rbac.authorization.k8s.io/v1/clusterrolebindings",
 		"RoleBindingKind":   "cluster role binding",
 		"RoleOptions":       roleOptions,
 		"BindingName":       fields.name, "SubjectKind": fields.subjectKind,
@@ -2234,10 +2267,11 @@ func (r *Router) renderRoleBindingAddModalBody(writer http.ResponseWriter, page 
 	_, _ = buf.WriteTo(writer)
 }
 
-// handleRoleBindingAdd is POST .../iam/rolebindings's handler — it creates
-// the submitted RoleBinding in the current tenant namespace, referencing an
-// existing namespaced Role. See handleRoleAdd for the success/failure
-// response shape this follows.
+// handleRoleBindingAdd is POST
+// /app/rbac.authorization.k8s.io/v1/namespaces/{ns}/rolebindings's handler —
+// it creates the submitted RoleBinding in the current tenant namespace,
+// referencing an existing namespaced Role. See handleRoleAdd for the
+// success/failure response shape this follows.
 func (r *Router) handleRoleBindingAdd(writer http.ResponseWriter, request *http.Request) {
 	request.Body = http.MaxBytesReader(writer, request.Body, maxRoleAddFormBytes)
 
@@ -2296,7 +2330,7 @@ func (r *Router) handleRoleBindingAdd(writer http.ResponseWriter, request *http.
 		r.roleBindingAddFormData(namespace, roleOptions, roleBindingAddFields{}, binding.Name, ""))
 }
 
-// handleClusterRoleBindingAdd is POST /app/iam/cluster/rolebindings's
+// handleClusterRoleBindingAdd is POST /app/rbac.authorization.k8s.io/v1/clusterrolebindings's
 // handler — see handleRoleBindingAdd, its namespaced counterpart.
 func (r *Router) handleClusterRoleBindingAdd(writer http.ResponseWriter, request *http.Request) {
 	request.Body = http.MaxBytesReader(writer, request.Body, maxRoleAddFormBytes)
@@ -2355,8 +2389,88 @@ func (r *Router) handleClusterRoleBindingAdd(writer http.ResponseWriter, request
 		r.clusterRoleBindingAddFormData(roleOptions, roleBindingAddFields{}, binding.Name, ""))
 }
 
+// handleDeleteRole is DELETE
+// /app/rbac.authorization.k8s.io/v1/namespaces/{ns}/roles/{name}'s handler
+// — deletes the named Role, then redirects back to the namespace's own
+// Roles tab, the same delete-then-redirect shape as
+// handleDeleteInstanceObject (see deleteAndRedirect).
+func (r *Router) handleDeleteRole(writer http.ResponseWriter, request *http.Request) {
+	kontinuums, err := r.kontinuumsFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	namespace := request.PathValue("ns")
+	target := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: request.PathValue("name"), Namespace: namespace},
+	}
+
+	r.deleteAndRedirect(writer, request, kontinuums, target,
+		"role", "/app/rbac.authorization.k8s.io/v1/namespaces/"+namespace+"/roles")
+}
+
+// handleDeleteRoleBinding is DELETE
+// /app/rbac.authorization.k8s.io/v1/namespaces/{ns}/rolebindings/{name}'s
+// handler — see handleDeleteRole, its Role counterpart.
+func (r *Router) handleDeleteRoleBinding(writer http.ResponseWriter, request *http.Request) {
+	kontinuums, err := r.kontinuumsFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	namespace := request.PathValue("ns")
+	target := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: request.PathValue("name"), Namespace: namespace},
+	}
+
+	r.deleteAndRedirect(writer, request, kontinuums, target,
+		"role binding", "/app/rbac.authorization.k8s.io/v1/namespaces/"+namespace+"/rolebindings")
+}
+
+// handleDeleteClusterRole is DELETE
+// /app/rbac.authorization.k8s.io/v1/clusterroles/{name}'s handler — see
+// handleDeleteRole, its namespaced counterpart.
+func (r *Router) handleDeleteClusterRole(writer http.ResponseWriter, request *http.Request) {
+	kontinuums, err := r.kontinuumsFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	target := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{Name: request.PathValue("name")},
+	}
+
+	r.deleteAndRedirect(writer, request, kontinuums, target,
+		"cluster role", "/app/rbac.authorization.k8s.io/v1/clusterroles")
+}
+
+// handleDeleteClusterRoleBinding is DELETE
+// /app/rbac.authorization.k8s.io/v1/clusterrolebindings/{name}'s handler —
+// see handleDeleteClusterRole, its RoleBinding counterpart.
+func (r *Router) handleDeleteClusterRoleBinding(writer http.ResponseWriter, request *http.Request) {
+	kontinuums, err := r.kontinuumsFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	target := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: request.PathValue("name")},
+	}
+
+	r.deleteAndRedirect(writer, request, kontinuums, target,
+		"cluster role binding", "/app/rbac.authorization.k8s.io/v1/clusterrolebindings")
+}
+
 // instanceRow is one api/v1alpha2.Instance object rendered as a row on the
-// /app/kontinuum.sh/namespaces/{ns}/instances list — see pageInstances' own
+// /app/kontinuum.sh/v1alpha2/namespaces/{ns}/instances list — see pageInstances' own
 // doc for why this isn't named "instance", which already means something
 // else in this file.
 type instanceRow struct {
@@ -2401,7 +2515,7 @@ func instanceRowFrom(item v1alpha2.Instance) instanceRow {
 	return row
 }
 
-// handleInstances is GET /app/kontinuum.sh/namespaces/{ns}/instances's
+// handleInstances is GET /app/kontinuum.sh/v1alpha2/namespaces/{ns}/instances's
 // handler — it lists Instance CRD objects (api/v1alpha2.Instance:
 // bare-metal or provider-backed machines InstancePool/TalosCluster claim
 // from — see issue #24's architecture) in the {ns} tenant's own namespace,
@@ -2504,7 +2618,7 @@ func (r *Router) renderInstanceAddModalBody(writer http.ResponseWriter, data map
 }
 
 // handleInstanceAdd is POST
-// /app/kontinuum.sh/namespaces/{ns}/instances/add's handler — it registers
+// /app/kontinuum.sh/v1alpha2/namespaces/{ns}/instances/add's handler — it registers
 // a standalone Instance in the {ns} tenant's own namespace via the shared
 // pkg/domain/instance.Add, left unclaimed until something claims it (see
 // issue #81 and zone.AddOptions.ExistingInstanceName's own doc for one such
@@ -2697,7 +2811,7 @@ func instanceMemoryRowsFrom(modules []v1alpha2.InstanceMemoryStatus) []instanceM
 }
 
 // handleInstanceDetail is GET
-// /app/kontinuum.sh/namespaces/{ns}/instances/{name}'s handler — it shows
+// /app/kontinuum.sh/v1alpha2/namespaces/{ns}/instances/{name}'s handler — it shows
 // one Instance CRD object's discovery result: Talos version, discovered
 // network interfaces, and status.conditions, plus which InstancePool (if
 // any) has claimed it (see api/v1alpha2.LabelClaimedBy — claiming isn't
@@ -2793,7 +2907,7 @@ func instanceDetailData(item v1alpha2.Instance, version string, authEnabled bool
 }
 
 // handleDeleteInstanceObject is DELETE
-// /app/kontinuum.sh/namespaces/{ns}/instances/{name}'s handler — it deletes
+// /app/kontinuum.sh/v1alpha2/namespaces/{ns}/instances/{name}'s handler — it deletes
 // the Instance CRD object named by the {name} path value and sends the
 // browser back to the instances list via HX-Redirect. Not to be confused
 // with handleDeleteInstance above, which deletes a Kontinuum — see
@@ -2823,7 +2937,7 @@ func (r *Router) handleDeleteInstanceObject(writer http.ResponseWriter, request 
 	}
 
 	r.deleteAndRedirect(writer, request, kontinuums, target,
-		"instance", "/app/kontinuum.sh/namespaces/"+namespace+"/instances")
+		"instance", "/app/kontinuum.sh/v1alpha2/namespaces/"+namespace+"/instances")
 }
 
 // deleteAndRedirect deletes target through kontinuums and, on success (or if
@@ -3276,7 +3390,7 @@ func (r *Router) handleTalosClusterKubeconfigDownload(writer http.ResponseWriter
 }
 
 // handleDeleteTalosCluster is DELETE
-// /app/kontinuum.sh/namespaces/{ns}/talosclusters/{name}'s handler — it
+// /app/kontinuum.sh/v1alpha2/namespaces/{ns}/talosclusters/{name}'s handler — it
 // deletes the TalosCluster object named by the {name} path value and sends
 // the browser back to the clusters list via HX-Redirect.
 //
@@ -3302,7 +3416,7 @@ func (r *Router) handleDeleteTalosCluster(writer http.ResponseWriter, request *h
 	}
 
 	r.deleteAndRedirect(writer, request, kontinuums, target,
-		"taloscluster", "/app/kontinuum.sh/namespaces/"+namespace+"/talosclusters")
+		"taloscluster", "/app/kontinuum.sh/v1alpha2/namespaces/"+namespace+"/talosclusters")
 }
 
 // handleRegistryKubeconfigDownload is GET /app/registry/kubeconfig's
