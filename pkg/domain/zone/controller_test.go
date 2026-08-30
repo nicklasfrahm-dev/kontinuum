@@ -874,6 +874,95 @@ func assertIdentityRBACInstalled(t *testing.T, downstream client.Client) {
 	assert.Equal(t, etcdIdentityServiceAccountName, binding.RoleRef.Name)
 }
 
+// fabricManagerResourceName mirrors the zone package's own unexported
+// fabricManagerServiceAccountName/fabricManagerDaemonSetName — both share
+// this same value, so one local constant here covers every resource kind
+// asserted below — see etcdIdentityServiceAccountName's own doc for why
+// this is duplicated rather than exported.
+const fabricManagerResourceName = "kontinuum-fabricmanager"
+
+// testVerbGet mirrors the zone package's own unexported rbacVerbGet —
+// shared across this file's own RBAC assertions purely so goconst doesn't
+// flag the repeated literal.
+const testVerbGet = "get"
+
+func assertFabricManagerInstalled(t *testing.T, downstream client.Client) {
+	t.Helper()
+
+	var sa corev1.ServiceAccount
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: fabricManagerResourceName, Namespace: testDownstreamNamespace}, &sa))
+
+	assertFabricManagerRBAC(t, downstream)
+	assertFabricManagerDaemonSet(t, downstream)
+}
+
+func assertFabricManagerRBAC(t *testing.T, downstream client.Client) {
+	t.Helper()
+
+	var role rbacv1.ClusterRole
+	require.NoError(t, downstream.Get(t.Context(), client.ObjectKey{Name: fabricManagerResourceName}, &role))
+	require.Len(t, role.Rules, 2)
+	assert.Equal(t, []string{"kontinuum.sh"}, role.Rules[0].APIGroups)
+	assert.Equal(t, []string{"fabrics"}, role.Rules[0].Resources)
+	assert.ElementsMatch(t, []string{testVerbGet, "list", "watch"}, role.Rules[0].Verbs)
+	assert.Equal(t, []string{"kontinuum.sh"}, role.Rules[1].APIGroups)
+	assert.Equal(t, []string{"fabrics/status"}, role.Rules[1].Resources)
+	assert.Equal(t, []string{"update"}, role.Rules[1].Verbs)
+
+	var binding rbacv1.ClusterRoleBinding
+	require.NoError(t, downstream.Get(t.Context(), client.ObjectKey{Name: fabricManagerResourceName}, &binding))
+	require.Len(t, binding.Subjects, 1)
+	assert.Equal(t, fabricManagerResourceName, binding.Subjects[0].Name)
+	assert.Equal(t, testDownstreamNamespace, binding.Subjects[0].Namespace)
+	assert.Equal(t, fabricManagerResourceName, binding.RoleRef.Name)
+	assert.Equal(t, "ClusterRole", binding.RoleRef.Kind)
+
+	var secretRole rbacv1.Role
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: fabricManagerResourceName, Namespace: testDownstreamNamespace}, &secretRole))
+	require.Len(t, secretRole.Rules, 1)
+	assert.Equal(t, []string{"kontinuum-fabricmanager-talosconfig"}, secretRole.Rules[0].ResourceNames,
+		"scoped to exactly the one talosconfig secret pkg/cli/fabricmanager reads, nothing broader")
+	assert.Equal(t, []string{testVerbGet}, secretRole.Rules[0].Verbs)
+
+	var secretBinding rbacv1.RoleBinding
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: fabricManagerResourceName, Namespace: testDownstreamNamespace}, &secretBinding))
+	require.Len(t, secretBinding.Subjects, 1)
+	assert.Equal(t, fabricManagerResourceName, secretBinding.Subjects[0].Name)
+	assert.Equal(t, fabricManagerResourceName, secretBinding.RoleRef.Name)
+	assert.Equal(t, "Role", secretBinding.RoleRef.Kind)
+}
+
+func assertFabricManagerDaemonSet(t *testing.T, downstream client.Client) {
+	t.Helper()
+
+	var daemonSet appsv1.DaemonSet
+	require.NoError(t, downstream.Get(t.Context(),
+		client.ObjectKey{Name: fabricManagerResourceName, Namespace: testDownstreamNamespace}, &daemonSet))
+
+	podSpec := daemonSet.Spec.Template.Spec
+	assert.Equal(t, fabricManagerResourceName, podSpec.ServiceAccountName)
+	assert.True(t, podSpec.HostNetwork, "nftables/ip_forward both need the node's own real network namespace")
+
+	require.Len(t, podSpec.Containers, 1)
+	container := podSpec.Containers[0]
+	assert.Equal(t, testImage, container.Image)
+	assert.Equal(t, []string{"fabricmanager", "run"}, container.Args)
+
+	require.Len(t, container.Env, 1)
+	assert.Equal(t, "NODE_NAME", container.Env[0].Name)
+	require.NotNil(t, container.Env[0].ValueFrom)
+	require.NotNil(t, container.Env[0].ValueFrom.FieldRef)
+	assert.Equal(t, "spec.nodeName", container.Env[0].ValueFrom.FieldRef.FieldPath)
+
+	require.NotNil(t, container.SecurityContext)
+	require.NotNil(t, container.SecurityContext.Capabilities)
+	assert.Equal(t, []corev1.Capability{"NET_ADMIN"}, container.SecurityContext.Capabilities.Add)
+	assert.Equal(t, []corev1.Capability{"ALL"}, container.SecurityContext.Capabilities.Drop)
+}
+
 func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) {
 	t.Helper()
 
@@ -902,6 +991,7 @@ func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) 
 	assert.NotEmpty(t, identitySecret.Data[corev1.TLSPrivateKeyKey])
 
 	assertIdentityRBACInstalled(t, downstream)
+	assertFabricManagerInstalled(t, downstream)
 
 	var configMap corev1.ConfigMap
 	require.NoError(t, downstream.Get(t.Context(),

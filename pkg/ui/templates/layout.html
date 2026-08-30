@@ -135,30 +135,27 @@
     </style>
 </head>
 <body class="bg-neutral-950 text-neutral-100 min-h-screen font-mono" hx-boost="true">
-    {{template "nav" .}}
-
-    <main class="pt-20 lg:pt-8 lg:ml-64 min-h-screen px-4 pb-6 lg:px-8 lg:pb-8">
-        <div class="max-w-screen-2xl mx-auto w-full">
-            {{block "content" .}}{{end}}
-        </div>
-    </main>
-
-    <div id="toast-container" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 pointer-events-none"></div>
-    <!-- Pre-rendered once, server-side, and cloned per toast by showToast —
-         reuses the same icon-check component the rest of the app already
-         uses for success/copied confirmations, rather than hand-writing SVG
-         path data in JS. -->
-    <template id="toast-check-icon">
-        <span class="text-emerald-400 shrink-0 mt-0.5 [&>svg]:h-4 [&>svg]:w-4">{{template "icon-check"}}</span>
-    </template>
-    <!-- Cloned by buildCopyChip below — the exact same "copy-chip"
-         component zone_leave_modal.html's own name chips render
-         server-side (see that template's own doc for why this exists:
-         two chips built from what looked like identical hand-written
-         classes still rendered at different heights before it did),
-         just instantiated once here, empty, for JS to clone per toast
-         rather than re-declaring the same markup a second time. -->
-    <template id="copy-chip-shell">{{template "copy-chip" (dict)}}</template>
+    <!--
+        wireCopyChip/buildCopyChip/showToast/removeToast must load before
+        the "content" block below, not after it: several content
+        templates (instances_content.html, instance_detail_content.html,
+        talosclusters_content.html, registry_content.html,
+        zone_detail_content.html, taloscluster_content.html) call
+        wireCopyChip synchronously in their own top-level script — at the
+        time that script tag executes, a later script tag (further down
+        the document) simply hasn't run yet, so wireCopyChip would still
+        be undefined, throwing a ReferenceError that aborts the rest of
+        that content script. In instances_content.html specifically, that
+        silently dropped the htmx:afterSwap listener declared right after
+        its own wireCopyChip call — the "Add instance" modal would swap in
+        its hidden success marker (collapsing to empty content) and then
+        just sit there, since nothing was left to close it. This script
+        only ever touches #toast-container/#toast-check-icon/
+        #copy-chip-shell (all declared further below in this same file)
+        from inside function bodies — never at this top level — so it's
+        safe to declare up here and only actually reach into the DOM once
+        called, by which point the whole page has parsed.
+    -->
     <script>
         // wireCopyChip(chip, value) wires up chip's (any "copy-chip"
         // instance — see that template's own doc) click-to-copy/"Copied"
@@ -190,11 +187,12 @@
             });
         }
 
-        // buildCopyChip(value) clones copy-chip-shell above, populates
-        // it, and wires it up via wireCopyChip — used where a chip's own
-        // value isn't known until entirely client-side (showToast's own
-        // message), unlike every other copy-chip usage in the app, which
-        // renders server-side and only needs wireCopyChip directly.
+        // buildCopyChip(value) clones #copy-chip-shell (declared further
+        // down this file), populates it, and wires it up via
+        // wireCopyChip — used where a chip's own value isn't known until
+        // entirely client-side (showToast's own message), unlike every
+        // other copy-chip usage in the app, which renders server-side and
+        // only needs wireCopyChip directly.
         function buildCopyChip(value) {
             var chip = document.getElementById('copy-chip-shell').content.cloneNode(true).firstElementChild;
 
@@ -266,5 +264,30 @@
             window.setTimeout(function () { toast.remove(); }, 200);
         }
     </script>
+
+    {{template "nav" .}}
+
+    <main class="pt-20 lg:pt-8 lg:ml-64 min-h-screen px-4 pb-6 lg:px-8 lg:pb-8">
+        <div class="max-w-screen-2xl mx-auto w-full">
+            {{block "content" .}}{{end}}
+        </div>
+    </main>
+
+    <div id="toast-container" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 pointer-events-none"></div>
+    <!-- Pre-rendered once, server-side, and cloned per toast by showToast —
+         reuses the same icon-check component the rest of the app already
+         uses for success/copied confirmations, rather than hand-writing SVG
+         path data in JS. -->
+    <template id="toast-check-icon">
+        <span class="text-emerald-400 shrink-0 mt-0.5 [&>svg]:h-4 [&>svg]:w-4">{{template "icon-check"}}</span>
+    </template>
+    <!-- Cloned by buildCopyChip above — the exact same "copy-chip"
+         component zone_leave_modal.html's own name chips render
+         server-side (see that template's own doc for why this exists:
+         two chips built from what looked like identical hand-written
+         classes still rendered at different heights before it did),
+         just instantiated once here, empty, for JS to clone per toast
+         rather than re-declaring the same markup a second time. -->
+    <template id="copy-chip-shell">{{template "copy-chip" (dict)}}</template>
 </body>
 </html>

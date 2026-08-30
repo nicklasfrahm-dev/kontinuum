@@ -773,7 +773,21 @@ func (r *Reconciler) installWorkload(
 		return err
 	}
 
-	return ensureService(ctx, downstream, downstreamNamespace)
+	err = ensureService(ctx, downstream, downstreamNamespace)
+	if err != nil {
+		return err
+	}
+
+	// Must run after ensureIdentityRBAC's own ServiceAccount, not before —
+	// no ordering dependency between the two, just kept adjacent to the
+	// other RBAC step above. See ensureFabricManagerRBAC's own doc for why
+	// it, too, must run before ensureFabricManagerDaemonSet.
+	err = ensureFabricManagerRBAC(ctx, downstream, downstreamNamespace)
+	if err != nil {
+		return err
+	}
+
+	return ensureFabricManagerDaemonSet(ctx, downstream, downstreamNamespace, image)
 }
 
 // setClusterReadyCondition sets ClusterReadyConditionType and persists zoneObj's

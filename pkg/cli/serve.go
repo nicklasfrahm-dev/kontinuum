@@ -33,6 +33,7 @@ import (
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/addon"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/adminrbac"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/etcdproxy"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/fabric"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instancepool"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/registry"
@@ -438,7 +439,7 @@ func buildServer(
 		libkapi.WithPostStartHook(ensureCRD),
 	}, authOpts, registryOpts, instanceOptions(logger, zoneLease), instancePoolOptions(logger, zoneLease),
 		talosClusterOptions(logger, zoneLease), addonOptions(logger, zoneLease), zoneOptions(cfg, logger, zoneLease),
-		adminRBACOptions(cfg, logger, zoneLease))
+		fabricOptions(logger, zoneLease), adminRBACOptions(cfg, logger, zoneLease))
 
 	// Storage is resolved against a background context so the backend
 	// is only torn down by Server.Shutdown, not by the signal context
@@ -733,6 +734,23 @@ func zoneOptions(cfg *config.Config, logger *slog.Logger, zoneLease zonelease.Id
 		Logger:    logger.With("component", "zone"),
 		HubConfig: cfg,
 		ImageRepo: zoneImageRepo,
+		ZoneLease: zoneLease,
+	})
+
+	return []libkapi.Option{libkapi.WithController(controller)}
+}
+
+// fabricOptions builds the libkapi options that wire the Fabric IPAM/
+// gateway reconciler (see pkg/domain/fabric) onto the Server. No
+// WithPostStartHook is needed — fabrics.kontinuum.sh's CRD is already
+// ensured by instanceOptions' own ensureCRDs call. The gateway node
+// agent's own image is zoneOptions' own concern now (see
+// pkg/domain/zone.ensureFabricManagerDaemonSet), installed once per zone
+// alongside kontinuum-server itself, not something this controller
+// resolves or deploys on its own anymore.
+func fabricOptions(logger *slog.Logger, zoneLease zonelease.Identity) []libkapi.Option {
+	controller := fabric.NewController(fabric.Config{
+		Logger:    logger.With("component", "fabric"),
 		ZoneLease: zoneLease,
 	})
 

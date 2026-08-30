@@ -38,6 +38,24 @@ linters:
         - runtime\.Object
         - client\.Client
         - authorizer\.Authorizer
+    tagliatelle:
+      case:
+        # AGENTS.md's own Kubernetes-convention rule ("abbreviations
+        # capitalized, e.g. ClusterIP") already requires "IP" to stay
+        # capitalized in a JSON tag (e.g. FabricZoneStatus.GatewayIP's own
+        # "gatewayIP") — this override keeps that convention lint-clean
+        # instead of forcing a "gatewayIp" that AGENTS.md's own rule would
+        # then flag as wrong the other way. Fields with two adjacent
+        # all-caps initialisms and no lowercase letter between them for the
+        # word-splitter to find a boundary on (e.g. FabricSpec.VLANID) get a
+        # //nolint:tagliatelle instead of a config entry here — see that
+        # field's own comment, matching IssuerURL/ClientID's identical
+        # precedent in kontinuum_types.go.
+        extended-rules:
+          json:
+            case: camel
+            initialism-overrides:
+              IP: true
     wrapcheck:
       # grpc-go's own status.Error/Errorf already produce a self-describing
       # error (code + message) that is the correct thing to return directly

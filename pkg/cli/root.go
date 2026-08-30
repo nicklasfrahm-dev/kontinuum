@@ -5,6 +5,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/nicklasfrahm/kontinuum/pkg/cli/config"
+	"github.com/nicklasfrahm/kontinuum/pkg/cli/fabricmanager"
 	"github.com/nicklasfrahm/kontinuum/pkg/cli/zone"
 )
 
@@ -31,6 +32,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(NewVersionCmd())
 	cmd.AddCommand(config.NewCmd())
 	cmd.AddCommand(zone.NewCmd())
+	cmd.AddCommand(fabricmanager.NewCmd())
 
 	return cmd
 }
