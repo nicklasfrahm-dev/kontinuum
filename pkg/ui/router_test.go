@@ -106,6 +106,57 @@ const instanceAddFormAddressKey = "address"
 // own instance-picker tests below.
 const testExistingInstanceAddress = "10.0.0.9"
 
+// testNamespace is the shared tenant-namespace fixture value reused across
+// the namespaced Role/RoleBinding tests below.
+const testNamespace = "demo"
+
+// testRoleName/testRoleBindingName are the shared Role/RoleBinding fixture
+// names reused across the namespaced IAM tests below.
+const (
+	testRoleName        = "pod-reader"
+	testRoleBindingName = "pod-reader-binding"
+)
+
+// testClusterRoleName is the shared ClusterRole fixture name reused across
+// the cluster-scoped IAM tests below.
+const testClusterRoleName = "custom-role"
+
+// testRoleRuleResource is the shared rule-builder "resources" fixture value
+// reused across the role-rule-building tests below.
+const testRoleRuleResource = "pods"
+
+// testSubjectName is the shared RoleBinding/ClusterRoleBinding Group-subject
+// fixture value reused across the IAM tests below.
+const testSubjectName = "sre"
+
+// roleRuleFormVerbGet/roleRuleFormVerbList are two of the fixed verb
+// checkboxes role_add_modal.html renders (see verb-checkbox) — reused
+// across the role-rule-building tests below wherever a rule needs at least
+// one real verb.
+const (
+	roleRuleFormVerbGet  = "get"
+	roleRuleFormVerbList = "list"
+)
+
+// roleAddFormNameKey is the "Add role"/"Add role binding"/"Add cluster
+// role"/"Add cluster role binding" forms' own shared "name" field (see
+// role_add_modal.html/rolebinding_add_modal.html) — kept as one constant
+// since every one of those forms uses the identical field name.
+const roleAddFormNameKey = "name"
+
+// roleAddFormRuleResourcesKey is the rule builder's own "resources" field
+// name (see role_add_modal.html's role-add-rule-row), reused across the
+// role-rule-building tests below.
+const roleAddFormRuleResourcesKey = "rules[0][resources]"
+
+// rolebindingAddFormSubjectKindKey/rolebindingAddFormSubjectNameKey are the
+// "Add role binding" form's own field names (see rolebinding_add_modal.html),
+// reused across every url.Values fixture below that submits that form.
+const (
+	rolebindingAddFormSubjectKindKey = "subject-kind"
+	rolebindingAddFormSubjectNameKey = "subject-name"
+)
+
 // zoneAddForm builds the "Add zone" form's own minimal valid submission
 // (region/zone/talos-address only) — reused by every test below that
 // doesn't need to vary those three fields.
@@ -172,6 +223,22 @@ type stubKontinuumLister struct {
 	// pools backs Get calls for a *v1alpha2.InstancePool — used by
 	// handleTalosClusterDetail's pool breakdown (see fetchPoolRow).
 	pools []v1alpha2.InstancePool
+	// roles/roleBindings/clusterRoles back List calls for the IAM roles
+	// pages (see handleIAMNamespaceRoles/handleIAMNamespaceRoleBindings/
+	// handleIAMClusterRoles). listErr, reused from the
+	// *rbacv1.ClusterRoleBindingList case above, is returned for any of
+	// these list kinds too — no test needs to distinguish between them.
+	roles        []rbacv1.Role
+	roleBindings []rbacv1.RoleBinding
+	clusterRoles []rbacv1.ClusterRole
+	// created, when non-nil, receives a copy of every object passed to
+	// Create — a pointer so appends survive stubKontinuumLister being
+	// copied by value on every kontinuumsFor(ctx) call (see the "add"
+	// handler tests, which pass in a *[]client.Object they inspect after
+	// the request completes). createErr, when set, is returned instead of
+	// recording anything.
+	created   *[]client.Object
+	createErr error
 }
 
 // Get looks up either a Kontinuum by name in items or, for a *corev1.Secret,
@@ -220,12 +287,6 @@ func (s stubKontinuumLister) List(_ context.Context, list client.ObjectList, _ .
 		}
 
 		target.Items = s.items
-	case *rbacv1.ClusterRoleBindingList:
-		if s.listErr != nil {
-			return s.listErr
-		}
-
-		target.Items = s.bindings
 	case *v1alpha2.InstanceList:
 		if s.instanceErr != nil {
 			return s.instanceErr
@@ -238,6 +299,8 @@ func (s stubKontinuumLister) List(_ context.Context, list client.ObjectList, _ .
 		}
 
 		target.Items = s.talosClusters
+	default:
+		return s.listRBAC(list)
 	}
 
 	return nil
@@ -245,6 +308,54 @@ func (s stubKontinuumLister) List(_ context.Context, list client.ObjectList, _ .
 
 func (s stubKontinuumLister) Delete(_ context.Context, _ client.Object, _ ...client.DeleteOption) error {
 	return s.deleteErr
+}
+
+// Create records obj into s.created (see that field's own doc) or returns
+// s.createErr.
+func (s stubKontinuumLister) Create(_ context.Context, obj client.Object, _ ...client.CreateOption) error {
+	if s.createErr != nil {
+		return s.createErr
+	}
+
+	if s.created != nil {
+		*s.created = append(*s.created, obj)
+	}
+
+	return nil
+}
+
+// listRBAC backs List's RBAC-related list kinds (ClusterRoleBindingList,
+// RoleList, RoleBindingList, ClusterRoleList) — split out of List purely to
+// keep that function's cyclomatic complexity down.
+func (s stubKontinuumLister) listRBAC(list client.ObjectList) error {
+	switch target := list.(type) {
+	case *rbacv1.ClusterRoleBindingList:
+		if s.listErr != nil {
+			return s.listErr
+		}
+
+		target.Items = s.bindings
+	case *rbacv1.RoleList:
+		if s.listErr != nil {
+			return s.listErr
+		}
+
+		target.Items = s.roles
+	case *rbacv1.RoleBindingList:
+		if s.listErr != nil {
+			return s.listErr
+		}
+
+		target.Items = s.roleBindings
+	case *rbacv1.ClusterRoleList:
+		if s.listErr != nil {
+			return s.listErr
+		}
+
+		target.Items = s.clusterRoles
+	}
+
+	return nil
 }
 
 // getSecret looks up the fixed s.secret field by name/namespace — factored
@@ -353,6 +464,19 @@ func newTestDeleteRequest(t *testing.T, target string) *http.Request {
 	return httptest.NewRequestWithContext(context.Background(), http.MethodDelete, target, nil)
 }
 
+// newTestFormRequest builds a form-encoded POST request against target —
+// used by the IAM "add" handler tests below, which (unlike
+// newTestZoneAddRequest) need more than one fixed URL.
+func newTestFormRequest(t *testing.T, target string, form url.Values) *http.Request {
+	t.Helper()
+
+	request := httptest.NewRequestWithContext(
+		context.Background(), http.MethodPost, target, strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	return request
+}
+
 // TestHandleHomeRedirectsToDefaultTenantInstances covers GET /app/home
 // specifically — /app/home has no page of its own anymore (see issue #63's
 // UI comment: the tenants list it used to render is gone, replaced by
@@ -375,7 +499,7 @@ func TestHandleHomeRedirectsToDefaultTenantInstances(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	require.Equal(t, http.StatusFound, resp.StatusCode)
-	assert.Equal(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances", resp.Header.Get("Location"))
+	assert.Equal(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/instances", resp.Header.Get("Location"))
 }
 
 // newRedirectTestMux builds a fully-wired *http.ServeMux for the two
@@ -485,8 +609,8 @@ func TestRegisterRoutesRedirectsUnmatchedAppPathToParent(t *testing.T) {
 	t.Parallel()
 
 	assertGetRedirectsTo(t,
-		"/app/kontinuum.sh/namespaces/kontinuum-system/bogus/path",
-		"/app/kontinuum.sh/namespaces/kontinuum-system/bogus")
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/bogus/path",
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/bogus")
 }
 
 // TestRegisterRoutesRedirectsBareAppSlashUpToAppRoot covers the catch-all
@@ -521,7 +645,7 @@ func TestHandleMachinesShowsLogoutLinkOnlyWhenAuthEnabled(t *testing.T) {
 		router.RegisterRoutes(mux, nil, nil)
 
 		recorder := httptest.NewRecorder()
-		mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances"))
+		mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/instances"))
 
 		resp := recorder.Result()
 
@@ -582,7 +706,8 @@ func TestHandleKontinuumDetailRendersInstanceSettings(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -630,7 +755,8 @@ func TestHandleKontinuumDetailShowsNotConfiguredWhenDNSAndGRPCUnset(t *testing.T
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -667,7 +793,8 @@ func TestHandleKontinuumDetailHidesOIDCDetailsWhenInstanceOIDCDisabled(t *testin
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -682,8 +809,8 @@ func TestHandleKontinuumDetailRedirectsToRegistryForUnknownInstance(t *testing.T
 	t.Parallel()
 
 	assertGetRedirectsTo(t,
-		"/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/missing",
-		"/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums")
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/missing",
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums")
 }
 
 func TestHandleKontinuumDetailReturnsServerErrorWhenFactoryFails(t *testing.T) {
@@ -704,7 +831,8 @@ func TestHandleKontinuumDetailReturnsServerErrorWhenFactoryFails(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -723,7 +851,7 @@ func TestHandleKontinuumDetailInvalidatesSessionOnForbidden(t *testing.T) {
 	}
 
 	assertForbiddenInvalidatesSession(t,
-		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-1"), kontinuumFactory)
+		newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"), kontinuumFactory)
 }
 
 func TestHandleKontinuumDetailShowsConfigSecretDataReveal(t *testing.T) {
@@ -750,7 +878,8 @@ func TestHandleKontinuumDetailShowsConfigSecretDataReveal(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -767,7 +896,7 @@ func TestHandleKontinuumDetailShowsConfigSecretDataReveal(t *testing.T) {
 
 	secretRecorder := httptest.NewRecorder()
 	mux.ServeHTTP(secretRecorder,
-		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-1/secret"))
+		newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1/secret"))
 
 	secretResp := secretRecorder.Result()
 
@@ -800,7 +929,8 @@ func TestHandleKontinuumDetailHidesConfigSecretRevealWhenSecretRefEmpty(t *testi
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -869,7 +999,8 @@ func TestHandleKontinuumDetailShowsGRPCThumbprintForWorker(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-2"))
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-2"))
 
 	resp := recorder.Result()
 
@@ -910,7 +1041,7 @@ func TestHandleKontinuumDetailHidesGRPCThumbprintForControlPlane(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/hub-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/hub-1"))
 
 	resp := recorder.Result()
 
@@ -947,7 +1078,8 @@ func TestHandleKontinuumDetailHidesConfigSecretRevealWhenSecretNotFound(t *testi
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -981,7 +1113,8 @@ func TestHandleKontinuumDetailReturnsBadGatewayWhenSecretGetFails(t *testing.T) 
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-1"))
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"))
 
 	resp := recorder.Result()
 
@@ -1004,7 +1137,7 @@ func TestHandleKontinuumDetailInvalidatesSessionOnForbiddenSecretGet(t *testing.
 	}
 
 	assertForbiddenInvalidatesSession(t,
-		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/worker-1"), kontinuumFactory)
+		newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/worker-1"), kontinuumFactory)
 }
 
 // registryKubeconfigBody issues GET /app/registry/kubeconfig through mux,
@@ -1170,7 +1303,7 @@ func TestHandleConnectHighlightsConnectNavItem(t *testing.T) {
 
 	registryRecorder := httptest.NewRecorder()
 	mux.ServeHTTP(registryRecorder,
-		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"))
+		newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums"))
 
 	registryResp := registryRecorder.Result()
 
@@ -1304,7 +1437,8 @@ func TestHandleRegistryUsesForwardedProtoForKubeconfigOrigin(t *testing.T) {
 
 // adminGroupBinding builds a fixture rbacv1.ClusterRoleBinding shaped the
 // way pkg/domain/adminrbac's controller creates one — labeled as managed
-// and annotated with the OIDC group it grants — for handleIAM's tests.
+// and annotated with the OIDC group it grants — for the IAM cluster
+// bindings tests.
 func adminGroupBinding(name, group string) rbacv1.ClusterRoleBinding {
 	return rbacv1.ClusterRoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1313,10 +1447,13 @@ func adminGroupBinding(name, group string) rbacv1.ClusterRoleBinding {
 			Annotations: map[string]string{adminrbac.AdminGroupAnnotation: group},
 		},
 		RoleRef: rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: adminrbac.RoleName},
+		Subjects: []rbacv1.Subject{
+			{Kind: rbacv1.GroupKind, APIGroup: rbacv1.GroupName, Name: group},
+		},
 	}
 }
 
-func TestHandleIAMShowsAdminGroupBindings(t *testing.T) {
+func TestHandleIAMNamespaceRolesShowsRoles(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -1327,20 +1464,26 @@ func TestHandleIAMShowsAdminGroupBindings(t *testing.T) {
 	cfg.OIDC.IssuerURL = testOIDCIssuerURL
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
-		return stubKontinuumLister{bindings: []rbacv1.ClusterRoleBinding{
-			adminGroupBinding("kontinuum-admin-aaaaaaaaaaaa", "platform-admins"),
-			adminGroupBinding("kontinuum-admin-bbbbbbbbbbbb", "sre"),
+		return stubKontinuumLister{roles: []rbacv1.Role{
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: testRoleName, Namespace: testNamespace},
+				Rules: []rbacv1.PolicyRule{
+					{
+						APIGroups: []string{""}, Resources: []string{testRoleRuleResource},
+						Verbs: []string{roleRuleFormVerbGet, roleRuleFormVerbList},
+					},
+				},
+			},
 		}}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
-		cfg, true, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", cfg, true, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/iam"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/rbac.authorization.k8s.io/v1/namespaces/demo/roles"))
 
 	resp := recorder.Result()
 
@@ -1349,22 +1492,58 @@ func TestHandleIAMShowsAdminGroupBindings(t *testing.T) {
 	require.NoError(t, resp.Body.Close())
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Contains(t, string(body), "Role bindings")
-	assert.Contains(t, string(body), "platform-admins")
-	assert.Contains(t, string(body), "sre")
-	assert.Contains(t, string(body), adminrbac.RoleName)
-	assert.Contains(t, string(body), "kontinuum-admin-aaaaaaaaaaaa")
-	assert.NotContains(t, string(body), "No admin groups are configured")
+	assert.Contains(t, string(body), testRoleName)
+	assert.Contains(t, string(body), testRoleRuleResource)
 }
 
-func TestHandleIAMInvalidatesSessionOnForbidden(t *testing.T) {
+func TestHandleIAMNamespaceRoleBindingsShowsBindings(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
 		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
 	}
 
-	forbiddenReason := schema.GroupResource{Group: rbacv1.GroupName, Resource: "clusterrolebindings"}
+	cfg := config.Config{}
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{roleBindings: []rbacv1.RoleBinding{
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: testRoleBindingName, Namespace: testNamespace},
+				Subjects:   []rbacv1.Subject{{Kind: rbacv1.GroupKind, Name: testSubjectName}},
+				RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: testRoleName},
+			},
+		}}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", cfg, true, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/rbac.authorization.k8s.io/v1/namespaces/demo/rolebindings"))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), testRoleBindingName)
+	assert.Contains(t, string(body), "Group: sre")
+	assert.Contains(t, string(body), testRoleName)
+}
+
+func TestHandleIAMNamespaceInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	forbiddenReason := schema.GroupResource{Group: rbacv1.GroupName, Resource: "roles"}
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
 		return stubKontinuumLister{listErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
@@ -1381,14 +1560,13 @@ func TestHandleIAMInvalidatesSessionOnForbidden(t *testing.T) {
 	cfg := config.Config{}
 	cfg.OIDC.IssuerURL = testOIDCIssuerURL
 
-	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
-		cfg, true, invalidateSession)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", cfg, true, invalidateSession)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/iam"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/rbac.authorization.k8s.io/v1/namespaces/demo/roles"))
 
 	resp := recorder.Result()
 
@@ -1398,7 +1576,7 @@ func TestHandleIAMInvalidatesSessionOnForbidden(t *testing.T) {
 	assert.NotEmpty(t, invalidatedWith)
 }
 
-func TestHandleIAMShowsNoticeWhenOIDCDisabled(t *testing.T) {
+func TestHandleIAMNamespaceShowsNoticeWhenOIDCDisabled(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -1409,14 +1587,13 @@ func TestHandleIAMShowsNoticeWhenOIDCDisabled(t *testing.T) {
 		return stubKontinuumLister{}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
-		config.Config{}, false, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/iam"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/rbac.authorization.k8s.io/v1/namespaces/demo/roles"))
 
 	resp := recorder.Result()
 
@@ -1426,10 +1603,10 @@ func TestHandleIAMShowsNoticeWhenOIDCDisabled(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, string(body), "OIDC is not configured")
-	assert.NotContains(t, string(body), "Role bindings")
+	assert.NotContains(t, string(body), "No roles found")
 }
 
-func TestHandleIAMShowsNoBindingsMessageWhenNoneExist(t *testing.T) {
+func TestHandleIAMClusterRoleBindingsSeparatesManagedFromOther(t *testing.T) {
 	t.Parallel()
 
 	factory := func(context.Context) (ui.NamespaceLister, error) {
@@ -1440,17 +1617,23 @@ func TestHandleIAMShowsNoBindingsMessageWhenNoneExist(t *testing.T) {
 	cfg.OIDC.IssuerURL = testOIDCIssuerURL
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
-		return stubKontinuumLister{}, nil
+		return stubKontinuumLister{bindings: []rbacv1.ClusterRoleBinding{
+			adminGroupBinding("kontinuum-admin-aaaaaaaaaaaa", "platform-admins"),
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "custom-binding"},
+				Subjects:   []rbacv1.Subject{{Kind: rbacv1.UserKind, APIGroup: rbacv1.GroupName, Name: "jane"}},
+				RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: testClusterRoleName},
+			},
+		}}, nil
 	}
 
-	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
-		cfg, true, nil)
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", cfg, true, nil)
 
 	mux := http.NewServeMux()
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/iam"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/rbac.authorization.k8s.io/v1/clusterrolebindings"))
 
 	resp := recorder.Result()
 
@@ -1459,8 +1642,533 @@ func TestHandleIAMShowsNoBindingsMessageWhenNoneExist(t *testing.T) {
 	require.NoError(t, resp.Body.Close())
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Contains(t, string(body), "Role bindings")
-	assert.Contains(t, string(body), "No admin groups are configured")
+	assert.Contains(t, string(body), "Managed by OIDC admin group config")
+	assert.Contains(t, string(body), "platform-admins")
+	assert.Contains(t, string(body), "custom-binding")
+	assert.Contains(t, string(body), "jane")
+}
+
+// TestHandleIAMClusterRolesHidesDeleteButtonForManagedRole guards against
+// the "kontinuum-admin" ClusterRole being deletable from the UI —
+// pkg/domain/adminrbac's own reconcile loop just recreates it within its
+// own interval (default 30s) if it's gone, so offering a delete button for
+// it would only produce a confusing "it deleted, then came back" result
+// rather than actually removing anything, the same reasoning
+// TestHandleIAMClusterRoleBindingsSeparatesManagedFromOther's own managed
+// binding is exempted from a delete button for.
+func TestHandleIAMClusterRolesHidesDeleteButtonForManagedRole(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	cfg := config.Config{}
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{clusterRoles: []rbacv1.ClusterRole{
+			{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   adminrbac.RoleName,
+					Labels: map[string]string{v1alpha2.LabelManagedBy: adminrbac.ManagedByValue},
+				},
+			},
+			{ObjectMeta: metav1.ObjectMeta{Name: testClusterRoleName}},
+		}}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", cfg, true, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/rbac.authorization.k8s.io/v1/clusterroles"))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), adminrbac.RoleName)
+	assert.NotContains(t, string(body), `aria-label="Delete `+adminrbac.RoleName+`"`)
+	assert.Contains(t, string(body), `aria-label="Delete custom-role"`)
+}
+
+func TestHandleRoleAddCreatesRoleAndReturnsSuccessFragment(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	var created []client.Object
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{created: &created}, nil
+	}
+
+	cfg := config.Config{}
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", cfg, true, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	form := url.Values{
+		roleAddFormNameKey:          {testRoleName},
+		"rules[0][apiGroups]":       {""},
+		roleAddFormRuleResourcesKey: {testRoleRuleResource},
+		"rules[0][verbs]":           {roleRuleFormVerbGet, roleRuleFormVerbList},
+	}
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestFormRequest(t,
+		"/app/rbac.authorization.k8s.io/v1/namespaces/demo/roles", form))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), "Created role")
+	assert.Contains(t, string(body), testRoleName)
+
+	require.Len(t, created, 1)
+
+	role, ok := created[0].(*rbacv1.Role)
+	require.True(t, ok)
+	assert.Equal(t, testRoleName, role.Name)
+	assert.Equal(t, testNamespace, role.Namespace)
+	require.Len(t, role.Rules, 1)
+	assert.Equal(t, []string{""}, role.Rules[0].APIGroups)
+	assert.Equal(t, []string{testRoleRuleResource}, role.Rules[0].Resources)
+	assert.ElementsMatch(t, []string{roleRuleFormVerbGet, roleRuleFormVerbList}, role.Rules[0].Verbs)
+}
+
+func TestHandleRoleAddRequiresName(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	var created []client.Object
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{created: &created}, nil
+	}
+
+	cfg := config.Config{}
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", cfg, true, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	form := url.Values{roleAddFormRuleResourcesKey: {testRoleRuleResource}}
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestFormRequest(t,
+		"/app/rbac.authorization.k8s.io/v1/namespaces/demo/roles", form))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), "Name is required")
+	assert.Empty(t, created)
+}
+
+func TestHandleClusterRoleAddCreatesClusterRole(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	var created []client.Object
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{created: &created}, nil
+	}
+
+	cfg := config.Config{}
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", cfg, true, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	form := url.Values{
+		roleAddFormNameKey:          {testClusterRoleName},
+		roleAddFormRuleResourcesKey: {"nodes"},
+		"rules[0][verbs]":           {"*"},
+	}
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestFormRequest(t, "/app/rbac.authorization.k8s.io/v1/clusterroles", form))
+
+	resp := recorder.Result()
+
+	require.NoError(t, resp.Body.Close())
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	require.Len(t, created, 1)
+
+	clusterRole, ok := created[0].(*rbacv1.ClusterRole)
+	require.True(t, ok)
+	assert.Equal(t, testClusterRoleName, clusterRole.Name)
+	assert.Empty(t, clusterRole.Namespace)
+	require.Len(t, clusterRole.Rules, 1)
+	assert.Equal(t, []string{"nodes"}, clusterRole.Rules[0].Resources)
+}
+
+func TestHandleRoleBindingAddCreatesRoleBinding(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	var created []client.Object
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{
+			created: &created,
+			roles:   []rbacv1.Role{{ObjectMeta: metav1.ObjectMeta{Name: testRoleName, Namespace: testNamespace}}},
+		}, nil
+	}
+
+	cfg := config.Config{}
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", cfg, true, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	form := url.Values{
+		roleAddFormNameKey:               {testRoleBindingName},
+		rolebindingAddFormSubjectKindKey: {"Group"},
+		rolebindingAddFormSubjectNameKey: {testSubjectName},
+		"role-ref":                       {testRoleName},
+	}
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestFormRequest(t,
+		"/app/rbac.authorization.k8s.io/v1/namespaces/demo/rolebindings", form))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), "Created role binding")
+
+	require.Len(t, created, 1)
+
+	binding, ok := created[0].(*rbacv1.RoleBinding)
+	require.True(t, ok)
+	assert.Equal(t, testRoleBindingName, binding.Name)
+	assert.Equal(t, testNamespace, binding.Namespace)
+	require.Len(t, binding.Subjects, 1)
+	assert.Equal(t, rbacv1.GroupKind, binding.Subjects[0].Kind)
+	assert.Equal(t, testSubjectName, binding.Subjects[0].Name)
+	assert.Equal(t, "Role", binding.RoleRef.Kind)
+	assert.Equal(t, testRoleName, binding.RoleRef.Name)
+}
+
+func TestHandleRoleBindingAddRequiresRoleRef(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	var created []client.Object
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{
+			created: &created,
+			roles:   []rbacv1.Role{{ObjectMeta: metav1.ObjectMeta{Name: testRoleName, Namespace: testNamespace}}},
+		}, nil
+	}
+
+	cfg := config.Config{}
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", cfg, true, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	form := url.Values{
+		roleAddFormNameKey:               {testRoleBindingName},
+		rolebindingAddFormSubjectKindKey: {"Group"},
+		rolebindingAddFormSubjectNameKey: {testSubjectName},
+	}
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestFormRequest(t,
+		"/app/rbac.authorization.k8s.io/v1/namespaces/demo/rolebindings", form))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), "A role is required")
+	assert.Empty(t, created)
+}
+
+func TestHandleClusterRoleBindingAddCreatesClusterRoleBinding(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	var created []client.Object
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{
+			created:      &created,
+			clusterRoles: []rbacv1.ClusterRole{{ObjectMeta: metav1.ObjectMeta{Name: testClusterRoleName}}},
+		}, nil
+	}
+
+	cfg := config.Config{}
+	cfg.OIDC.IssuerURL = testOIDCIssuerURL
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", cfg, true, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	form := url.Values{
+		roleAddFormNameKey:               {"custom-binding"},
+		rolebindingAddFormSubjectKindKey: {"User"},
+		rolebindingAddFormSubjectNameKey: {"jane"},
+		"role-ref":                       {testClusterRoleName},
+	}
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestFormRequest(t, "/app/rbac.authorization.k8s.io/v1/clusterrolebindings", form))
+
+	resp := recorder.Result()
+
+	require.NoError(t, resp.Body.Close())
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	require.Len(t, created, 1)
+
+	binding, ok := created[0].(*rbacv1.ClusterRoleBinding)
+	require.True(t, ok)
+	assert.Equal(t, "custom-binding", binding.Name)
+	require.Len(t, binding.Subjects, 1)
+	assert.Equal(t, rbacv1.UserKind, binding.Subjects[0].Kind)
+	assert.Equal(t, "jane", binding.Subjects[0].Name)
+	assert.Equal(t, "ClusterRole", binding.RoleRef.Kind)
+	assert.Equal(t, testClusterRoleName, binding.RoleRef.Name)
+}
+
+func TestHandleDeleteRoleRemovesRoleAndRedirectsToList(t *testing.T) {
+	t.Parallel()
+
+	assertDeleteRedirectsToList(t,
+		"/app/rbac.authorization.k8s.io/v1/namespaces/demo/roles/pod-reader",
+		"/app/rbac.authorization.k8s.io/v1/namespaces/demo/roles")
+}
+
+func TestHandleDeleteRoleReturnsBadGatewayOnFailure(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{deleteErr: errFactory}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestDeleteRequest(t, "/app/rbac.authorization.k8s.io/v1/namespaces/demo/roles/pod-reader"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
+}
+
+func TestHandleDeleteRoleInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	forbiddenReason := schema.GroupResource{Group: rbacv1.GroupName, Resource: "roles"}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{deleteErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
+	}
+
+	assertForbiddenInvalidatesSession(t,
+		newTestDeleteRequest(t, "/app/rbac.authorization.k8s.io/v1/namespaces/demo/roles/pod-reader"), kontinuumFactory)
+}
+
+func TestHandleDeleteRoleBindingRemovesBindingAndRedirectsToList(t *testing.T) {
+	t.Parallel()
+
+	assertDeleteRedirectsToList(t,
+		"/app/rbac.authorization.k8s.io/v1/namespaces/demo/rolebindings/pod-reader-binding",
+		"/app/rbac.authorization.k8s.io/v1/namespaces/demo/rolebindings")
+}
+
+func TestHandleDeleteRoleBindingReturnsBadGatewayOnFailure(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{deleteErr: errFactory}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder,
+		newTestDeleteRequest(t, "/app/rbac.authorization.k8s.io/v1/namespaces/demo/rolebindings/pod-reader-binding"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
+}
+
+func TestHandleDeleteRoleBindingInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	forbiddenReason := schema.GroupResource{Group: rbacv1.GroupName, Resource: "rolebindings"}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{deleteErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
+	}
+
+	assertForbiddenInvalidatesSession(t,
+		newTestDeleteRequest(t, "/app/rbac.authorization.k8s.io/v1/namespaces/demo/rolebindings/pod-reader-binding"),
+		kontinuumFactory)
+}
+
+func TestHandleDeleteClusterRoleRemovesRoleAndRedirectsToList(t *testing.T) {
+	t.Parallel()
+
+	assertDeleteRedirectsToList(t,
+		"/app/rbac.authorization.k8s.io/v1/clusterroles/custom-role",
+		"/app/rbac.authorization.k8s.io/v1/clusterroles")
+}
+
+func TestHandleDeleteClusterRoleReturnsBadGatewayOnFailure(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{deleteErr: errFactory}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestDeleteRequest(t, "/app/rbac.authorization.k8s.io/v1/clusterroles/custom-role"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
+}
+
+func TestHandleDeleteClusterRoleInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	forbiddenReason := schema.GroupResource{Group: rbacv1.GroupName, Resource: "clusterroles"}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{deleteErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
+	}
+
+	assertForbiddenInvalidatesSession(t,
+		newTestDeleteRequest(t, "/app/rbac.authorization.k8s.io/v1/clusterroles/custom-role"), kontinuumFactory)
+}
+
+func TestHandleDeleteClusterRoleBindingRemovesBindingAndRedirectsToList(t *testing.T) {
+	t.Parallel()
+
+	assertDeleteRedirectsToList(t,
+		"/app/rbac.authorization.k8s.io/v1/clusterrolebindings/custom-binding",
+		"/app/rbac.authorization.k8s.io/v1/clusterrolebindings")
+}
+
+func TestHandleDeleteClusterRoleBindingReturnsBadGatewayOnFailure(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{deleteErr: errFactory}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestDeleteRequest(t,
+		"/app/rbac.authorization.k8s.io/v1/clusterrolebindings/custom-binding"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
+}
+
+func TestHandleDeleteClusterRoleBindingInvalidatesSessionOnForbidden(t *testing.T) {
+	t.Parallel()
+
+	forbiddenReason := schema.GroupResource{Group: rbacv1.GroupName, Resource: "clusterrolebindings"}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{deleteErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
+	}
+
+	assertForbiddenInvalidatesSession(t,
+		newTestDeleteRequest(t, "/app/rbac.authorization.k8s.io/v1/clusterrolebindings/custom-binding"), kontinuumFactory)
 }
 
 func TestRegisterRoutesDefaultsToUnconditionalAppRedirect(t *testing.T) {
@@ -1476,7 +2184,7 @@ func TestRegisterRoutesDefaultsToUnconditionalAppRedirect(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusFound, resp.StatusCode)
-	assert.Equal(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances", resp.Header.Get("Location"))
+	assert.Equal(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/instances", resp.Header.Get("Location"))
 }
 
 func TestHandleRegistryRendersInstances(t *testing.T) {
@@ -1499,7 +2207,7 @@ func TestHandleRegistryRendersInstances(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums"))
 
 	resp := recorder.Result()
 
@@ -1557,7 +2265,7 @@ func TestHandleRegistryRendersZones(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums"))
 
 	resp := recorder.Result()
 
@@ -1608,7 +2316,7 @@ func TestHandleRegistryRendersDeletingForZoneWithDeletionTimestamp(t *testing.T)
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums"))
 
 	resp := recorder.Result()
 
@@ -1655,7 +2363,7 @@ func TestHandleRegistryOmitsZonesFromOtherTenants(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/tenant-a/kontinuums"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/tenant-a/kontinuums"))
 
 	resp := recorder.Result()
 
@@ -1685,7 +2393,7 @@ func TestHandleRegistryReturnsBadGatewayWhenZoneListFails(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums"))
 
 	resp := recorder.Result()
 
@@ -1722,7 +2430,7 @@ func TestHandleRegistryReturnsServerErrorWhenFactoryFails(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums"))
 
 	resp := recorder.Result()
 
@@ -1780,7 +2488,7 @@ func TestHandleRegistryInvalidatesSessionOnForbidden(t *testing.T) {
 	}
 
 	assertForbiddenInvalidatesSession(t,
-		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"), kontinuumFactory)
+		newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums"), kontinuumFactory)
 }
 
 func TestHandleDeleteInstanceRemovesInstanceAndRerendersRegistry(t *testing.T) {
@@ -1801,7 +2509,8 @@ func TestHandleDeleteInstanceRemovesInstanceAndRerendersRegistry(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestDeleteRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/demo"))
+	mux.ServeHTTP(recorder, newTestDeleteRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/demo"))
 
 	resp := recorder.Result()
 
@@ -1832,7 +2541,8 @@ func TestHandleDeleteInstanceReturnsBadGatewayOnFailure(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestDeleteRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/demo"))
+	mux.ServeHTTP(recorder, newTestDeleteRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/demo"))
 
 	resp := recorder.Result()
 
@@ -1851,7 +2561,7 @@ func TestHandleDeleteInstanceInvalidatesSessionOnForbidden(t *testing.T) {
 	}
 
 	assertForbiddenInvalidatesSession(t,
-		newTestDeleteRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/demo"), kontinuumFactory)
+		newTestDeleteRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/demo"), kontinuumFactory)
 }
 
 // newTestZoneClient builds a real fake controller-runtime client with
@@ -1963,7 +2673,7 @@ func TestRegistryPageEmbedsAddZoneButtonAndEmptyModal(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums"))
 
 	resp := recorder.Result()
 
@@ -2204,7 +2914,7 @@ func TestHandleZoneAddInvalidatesSessionOnForbidden(t *testing.T) {
 func newTestZoneDeleteRequest(t *testing.T, namespace, name string) *http.Request {
 	t.Helper()
 
-	return newTestDeleteRequest(t, "/app/kontinuum.sh/namespaces/"+namespace+"/zones/"+name)
+	return newTestDeleteRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/"+namespace+"/zones/"+name)
 }
 
 func TestHandleDeleteZoneRemovesZoneAndRerendersRegistry(t *testing.T) {
@@ -2344,7 +3054,7 @@ func TestHandleZoneDetailRendersOverviewClusterAndRegistry(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/zones/eu-eu-1a"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/zones/eu-eu-1a"))
 
 	resp := recorder.Result()
 
@@ -2356,8 +3066,10 @@ func TestHandleZoneDetailRendersOverviewClusterAndRegistry(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(body), "eu-eu-1a")
 	assert.Contains(t, string(body), "example.com")
-	assert.Contains(t, string(body), `href="/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"`)
-	assert.Contains(t, string(body), `href="/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums/eu-1a-worker"`)
+	assert.Contains(t, string(body),
+		`href="/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"`)
+	assert.Contains(t, string(body),
+		`href="/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums/eu-1a-worker"`)
 	assert.Contains(t, string(body), "Worker")
 	assert.NotContains(t, string(body), "Not yet joined")
 	assert.NotContains(t, string(body), "Not provisioned yet")
@@ -2389,7 +3101,7 @@ func TestHandleZoneDetailShowsNotProvisionedAndNotJoinedWhenMissing(t *testing.T
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/zones/eu-eu-1a"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/zones/eu-eu-1a"))
 
 	resp := recorder.Result()
 
@@ -2414,8 +3126,8 @@ func TestHandleZoneDetailRedirectsToParentForUnknownZone(t *testing.T) {
 	t.Parallel()
 
 	assertGetRedirectsTo(t,
-		"/app/kontinuum.sh/namespaces/kontinuum-system/zones/missing",
-		"/app/kontinuum.sh/namespaces/kontinuum-system/zones")
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/zones/missing",
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/zones")
 }
 
 // TestHandleZoneDetailPollSendsHxRedirectForDeletedZone is
@@ -2425,8 +3137,8 @@ func TestHandleZoneDetailPollSendsHxRedirectForDeletedZone(t *testing.T) {
 	t.Parallel()
 
 	assertHTMXGetRedirectsTo(t,
-		"/app/kontinuum.sh/namespaces/kontinuum-system/zones/missing",
-		"/app/kontinuum.sh/namespaces/kontinuum-system/zones")
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/zones/missing",
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/zones")
 }
 
 func TestHandleZoneDetailInvalidatesSessionOnForbidden(t *testing.T) {
@@ -2455,7 +3167,7 @@ func TestHandleZoneDetailInvalidatesSessionOnForbidden(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/zones/eu-eu-1a"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/zones/eu-eu-1a"))
 
 	resp := recorder.Result()
 
@@ -2478,7 +3190,7 @@ func TestHandleZoneDetailReturnsBadGatewayOnFailure(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/zones/eu-eu-1a"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/zones/eu-eu-1a"))
 
 	resp := recorder.Result()
 
@@ -2506,7 +3218,7 @@ func TestRegistryPageLinksZoneRowToDetailPage(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums"))
 
 	resp := recorder.Result()
 
@@ -2517,7 +3229,7 @@ func TestRegistryPageLinksZoneRowToDetailPage(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	assert.Contains(t, string(body),
-		`href="/app/kontinuum.sh/namespaces/kontinuum-system/zones/`+testZoneValue+`"`)
+		`href="/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/zones/`+testZoneValue+`"`)
 }
 
 func TestRegistryPageEmbedsLeaveZoneButtonAndModal(t *testing.T) {
@@ -2538,7 +3250,7 @@ func TestRegistryPageEmbedsLeaveZoneButtonAndModal(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums"))
 
 	resp := recorder.Result()
 
@@ -2585,7 +3297,7 @@ func TestRegistryPageRendersInstanceSuggestionsInDropdown(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/kontinuums"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/kontinuums"))
 
 	resp := recorder.Result()
 
@@ -2659,13 +3371,13 @@ func TestHandleZoneAddAdoptsExistingInstanceInstead(t *testing.T) {
 }
 
 // newTestInstanceAddRequest builds a POST
-// /app/kontinuum.sh/namespaces/{ns}/instances/add request — the "Add
+// /app/kontinuum.sh/v1alpha2/namespaces/{ns}/instances/add request — the "Add
 // instance" form's own submission target (see instance_add_modal.html).
 func newTestInstanceAddRequest(t *testing.T, namespace string, form url.Values) *http.Request {
 	t.Helper()
 
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost,
-		"/app/kontinuum.sh/namespaces/"+namespace+"/instances/add", strings.NewReader(form.Encode()))
+		"/app/kontinuum.sh/v1alpha2/namespaces/"+namespace+"/instances/add", strings.NewReader(form.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	return request
@@ -2684,7 +3396,7 @@ func TestInstancesPageEmbedsAddInstanceButtonAndEmptyModal(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/instances"))
 
 	resp := recorder.Result()
 
@@ -2897,7 +3609,7 @@ func TestHandleMachinesRendersInstances(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/instances"))
 
 	resp := recorder.Result()
 
@@ -2972,7 +3684,7 @@ func TestHandleMachinesRendersDeletingForInstanceWithDeletionTimestamp(t *testin
 	mux := deletingInstanceMux(t)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/instances"))
 
 	resp := recorder.Result()
 
@@ -2999,7 +3711,7 @@ func TestHandleMachinesShowsEmptyState(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/instances"))
 
 	resp := recorder.Result()
 
@@ -3024,7 +3736,7 @@ func TestHandleMachinesReturnsServerErrorWhenFactoryFails(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/instances"))
 
 	resp := recorder.Result()
 
@@ -3042,7 +3754,7 @@ func TestHandleMachinesInvalidatesSessionOnForbidden(t *testing.T) {
 		return stubKontinuumLister{instanceErr: apierrors.NewForbidden(forbiddenReason, "", errTestForbidden)}, nil
 	}
 
-	request := newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances")
+	request := newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/instances")
 	assertForbiddenInvalidatesSession(t, request, kontinuumFactory)
 }
 
@@ -3065,7 +3777,7 @@ func TestHandleMachineDetailRendersInstance(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances/node-a"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/instances/node-a"))
 
 	resp := recorder.Result()
 
@@ -3103,7 +3815,7 @@ func TestHandleMachineDetailRendersDeletingForInstanceWithDeletionTimestamp(t *t
 	mux := deletingInstanceMux(t)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances/node-a"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/instances/node-a"))
 
 	resp := recorder.Result()
 
@@ -3119,8 +3831,8 @@ func TestHandleMachineDetailRedirectsToListForUnknownInstance(t *testing.T) {
 	t.Parallel()
 
 	assertGetRedirectsTo(t,
-		"/app/kontinuum.sh/namespaces/kontinuum-system/instances/does-not-exist",
-		"/app/kontinuum.sh/namespaces/kontinuum-system/instances")
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/instances/does-not-exist",
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/instances")
 }
 
 // TestHandleMachineDetailPollSendsHxRedirectForDeletedInstance covers a bug
@@ -3135,8 +3847,8 @@ func TestHandleMachineDetailPollSendsHxRedirectForDeletedInstance(t *testing.T) 
 	t.Parallel()
 
 	assertHTMXGetRedirectsTo(t,
-		"/app/kontinuum.sh/namespaces/kontinuum-system/instances/does-not-exist",
-		"/app/kontinuum.sh/namespaces/kontinuum-system/instances")
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/instances/does-not-exist",
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/instances")
 }
 
 func TestHandleMachineDetailReturnsServerErrorWhenFactoryFails(t *testing.T) {
@@ -3152,7 +3864,7 @@ func TestHandleMachineDetailReturnsServerErrorWhenFactoryFails(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances/node-a"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/instances/node-a"))
 
 	resp := recorder.Result()
 
@@ -3172,7 +3884,7 @@ func TestHandleMachineDetailInvalidatesSessionOnForbidden(t *testing.T) {
 		}, nil
 	}
 
-	request := newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances/node-a")
+	request := newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/instances/node-a")
 	assertForbiddenInvalidatesSession(t, request, kontinuumFactory)
 }
 
@@ -3274,8 +3986,8 @@ func TestHandleDeleteMachineRemovesInstanceAndRedirectsToList(t *testing.T) {
 	t.Parallel()
 
 	assertDeleteRedirectsToList(t,
-		"/app/kontinuum.sh/namespaces/kontinuum-system/instances/node-a",
-		"/app/kontinuum.sh/namespaces/kontinuum-system/instances")
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/instances/node-a",
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/instances")
 }
 
 func TestHandleDeleteMachineReturnsBadGatewayOnFailure(t *testing.T) {
@@ -3293,7 +4005,8 @@ func TestHandleDeleteMachineReturnsBadGatewayOnFailure(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestDeleteRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances/node-a"))
+	mux.ServeHTTP(recorder, newTestDeleteRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/instances/node-a"))
 
 	resp := recorder.Result()
 
@@ -3312,7 +4025,7 @@ func TestHandleDeleteMachineInvalidatesSessionOnForbidden(t *testing.T) {
 	}
 
 	assertForbiddenInvalidatesSession(t,
-		newTestDeleteRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/instances/node-a"), kontinuumFactory)
+		newTestDeleteRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/instances/node-a"), kontinuumFactory)
 }
 
 // talosClusterFixture builds a TalosCluster fixture named
@@ -3364,7 +4077,7 @@ func TestHandleTalosClustersRendersList(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters"))
 
 	resp := recorder.Result()
 
@@ -3378,8 +4091,9 @@ func TestHandleTalosClustersRendersList(t *testing.T) {
 	assert.Contains(t, string(body), "v1.13.0")
 	assert.Contains(t, string(body), "v1.32.0")
 	assert.Contains(t, string(body), "text-green-300\">Ready<")
-	assert.Contains(t, string(body), `href="/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"`)
-	assert.Contains(t, string(body), `href="/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters"`,
+	assert.Contains(t, string(body),
+		`href="/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"`)
+	assert.Contains(t, string(body), `href="/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters"`,
 		"the nav's own Clusters link")
 }
 
@@ -3423,7 +4137,7 @@ func TestHandleTalosClustersRendersDeletingForClusterWithDeletionTimestamp(t *te
 	mux := deletingTalosClusterMux(t)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters"))
 
 	resp := recorder.Result()
 
@@ -3451,7 +4165,7 @@ func TestHandleTalosClustersShowsEmptyState(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters"))
 
 	resp := recorder.Result()
 
@@ -3476,7 +4190,7 @@ func TestHandleTalosClustersReturnsServerErrorWhenFactoryFails(t *testing.T) {
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters"))
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters"))
 
 	resp := recorder.Result()
 
@@ -3495,7 +4209,7 @@ func TestHandleTalosClustersInvalidatesSessionOnForbidden(t *testing.T) {
 	}
 
 	assertForbiddenInvalidatesSession(t,
-		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters"), kontinuumFactory)
+		newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters"), kontinuumFactory)
 }
 
 // newTalosClusterKubeconfigMux builds a router+mux serving a single ready
@@ -3549,7 +4263,8 @@ func TestHandleTalosClusterDetailRendersOverviewPoolsAndConditions(t *testing.T)
 	mux := newTalosClusterKubeconfigMux(t)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
 
 	resp := recorder.Result()
 
@@ -3569,10 +4284,11 @@ func TestHandleTalosClusterDetailRendersOverviewPoolsAndConditions(t *testing.T)
 	assert.Contains(t, string(body), "kontinuum.sh/region")
 	assert.Contains(t, string(body), "eu")
 	assert.Contains(t, string(body),
-		`href="/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a/kubeconfig"`)
+		`href="/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a/kubeconfig"`)
 	assert.NotContains(t, string(body), "apiVersion: v1\nkind: Config",
 		"the kubeconfig's own contents must never be rendered into the page")
-	assert.Contains(t, string(body), `hx-get="/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"`,
+	assert.Contains(t, string(body),
+		`hx-get="/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"`,
 		"hx-get is always the plain URL — hx-vals carries ?reveal on every poll instead, see hx-vals assertion below")
 
 	wantHxVals := `hx-vals="js:{reveal: (new URLSearchParams(location.search).get('reveal') === 'true')}"`
@@ -3624,7 +4340,7 @@ func TestHandleTalosClusterDetailSortsConditionsNewestFirst(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder,
-		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
+		newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
 
 	resp := recorder.Result()
 
@@ -3651,7 +4367,7 @@ func TestHandleTalosClusterDetailRevealsKubeconfigPanelViaQueryParam(t *testing.
 
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder,
-		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a?reveal=true"))
+		newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a?reveal=true"))
 
 	resp := recorder.Result()
 
@@ -3661,7 +4377,8 @@ func TestHandleTalosClusterDetailRevealsKubeconfigPanelViaQueryParam(t *testing.
 
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	assert.Contains(t, string(body), `hx-get="/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"`,
+	assert.Contains(t, string(body),
+		`hx-get="/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"`,
 		"hx-get stays the plain URL even when the page itself loaded with ?reveal=true — "+
 			"see hx-vals in the sibling default-state test")
 	assert.Regexp(t, `id="taloscluster-kubeconfig-masked"\s+class="hidden relative`, string(body),
@@ -3693,7 +4410,8 @@ func TestHandleTalosClusterDetailShowsNoKubeconfigMessageWhenNotReady(t *testing
 	router.RegisterRoutes(mux, nil, nil)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
 
 	resp := recorder.Result()
 
@@ -3718,7 +4436,8 @@ func TestHandleTalosClusterDetailRendersDeletingForClusterWithDeletionTimestamp(
 	mux := deletingTalosClusterMux(t)
 
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
 
 	resp := recorder.Result()
 
@@ -3738,8 +4457,8 @@ func TestHandleTalosClusterDetailRedirectsToListForUnknownCluster(t *testing.T) 
 	t.Parallel()
 
 	assertGetRedirectsTo(t,
-		"/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/missing",
-		"/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters")
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/missing",
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters")
 }
 
 // TestHandleTalosClusterDetailPollSendsHxRedirectForDeletedCluster is
@@ -3751,8 +4470,8 @@ func TestHandleTalosClusterDetailPollSendsHxRedirectForDeletedCluster(t *testing
 	t.Parallel()
 
 	assertHTMXGetRedirectsTo(t,
-		"/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/missing",
-		"/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters")
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/missing",
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters")
 }
 
 func TestHandleTalosClusterDetailInvalidatesSessionOnForbidden(t *testing.T) {
@@ -3765,7 +4484,7 @@ func TestHandleTalosClusterDetailInvalidatesSessionOnForbidden(t *testing.T) {
 	}
 
 	assertForbiddenInvalidatesSession(t,
-		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"), kontinuumFactory)
+		newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"), kontinuumFactory)
 }
 
 func TestHandleTalosClusterKubeconfigDownloadServesFileWithHeaders(t *testing.T) {
@@ -3792,7 +4511,7 @@ func TestHandleTalosClusterKubeconfigDownloadServesFileWithHeaders(t *testing.T)
 
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder,
-		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a/kubeconfig"))
+		newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a/kubeconfig"))
 
 	resp := recorder.Result()
 
@@ -3827,14 +4546,14 @@ func TestHandleTalosClusterKubeconfigDownloadRedirectsToClusterWhenNotReady(t *t
 
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder,
-		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a/kubeconfig"))
+		newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a/kubeconfig"))
 
 	resp := recorder.Result()
 
 	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusFound, resp.StatusCode)
-	assert.Equal(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a",
+	assert.Equal(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a",
 		resp.Header.Get("Location"), "no kubeconfig yet, but the cluster itself exists — back to its own detail page")
 }
 
@@ -3848,8 +4567,8 @@ func TestHandleTalosClusterKubeconfigDownloadRedirectsOneHopUpForUnknownCluster(
 	t.Parallel()
 
 	assertGetRedirectsTo(t,
-		"/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/missing/kubeconfig",
-		"/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/missing")
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/missing/kubeconfig",
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/missing")
 }
 
 func TestHandleTalosClusterKubeconfigDownloadInvalidatesSessionOnForbidden(t *testing.T) {
@@ -3862,7 +4581,7 @@ func TestHandleTalosClusterKubeconfigDownloadInvalidatesSessionOnForbidden(t *te
 	}
 
 	assertForbiddenInvalidatesSession(t,
-		newTestRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a/kubeconfig"),
+		newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a/kubeconfig"),
 		kontinuumFactory)
 }
 
@@ -3870,8 +4589,8 @@ func TestHandleDeleteTalosClusterRemovesClusterAndRedirectsToList(t *testing.T) 
 	t.Parallel()
 
 	assertDeleteRedirectsToList(t,
-		"/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a",
-		"/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters")
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a",
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters")
 }
 
 func TestHandleDeleteTalosClusterReturnsBadGatewayOnFailure(t *testing.T) {
@@ -3890,7 +4609,7 @@ func TestHandleDeleteTalosClusterReturnsBadGatewayOnFailure(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	mux.ServeHTTP(recorder,
-		newTestDeleteRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
+		newTestDeleteRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
 
 	resp := recorder.Result()
 
@@ -3909,6 +4628,6 @@ func TestHandleDeleteTalosClusterInvalidatesSessionOnForbidden(t *testing.T) {
 	}
 
 	assertForbiddenInvalidatesSession(t,
-		newTestDeleteRequest(t, "/app/kontinuum.sh/namespaces/kontinuum-system/talosclusters/eu-eu-1a"),
+		newTestDeleteRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"),
 		kontinuumFactory)
 }

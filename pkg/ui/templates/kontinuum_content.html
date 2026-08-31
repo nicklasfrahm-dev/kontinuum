@@ -1,6 +1,6 @@
 {{define "content"}}
 <div>
-    <a href="/app/kontinuum.sh/namespaces/{{.Namespace}}/kontinuums" class="inline-flex items-center gap-1.5 text-sm text-neutral-500 hover:text-white transition-colors mb-4">
+    <a href="/app/kontinuum.sh/v1alpha2/namespaces/{{.Namespace}}/kontinuums" class="inline-flex items-center gap-1.5 text-sm text-neutral-500 hover:text-white transition-colors mb-4">
         {{template "icon-chevron-left"}}
         Back to registry
     </a>
@@ -196,6 +196,6 @@
 </div>
 
 {{if .SecretDataReady}}
-{{template "reveal-panel-script" (dict "ID" "secret-data" "URL" (print "/app/kontinuum.sh/namespaces/" .Namespace "/kontinuums/" .Name "/secret"))}}
+{{template "reveal-panel-script" (dict "ID" "secret-data" "URL" (print "/app/kontinuum.sh/v1alpha2/namespaces/" .Namespace "/kontinuums/" .Name "/secret"))}}
 {{end}}
 {{end}}

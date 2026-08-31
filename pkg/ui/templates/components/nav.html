@@ -11,23 +11,31 @@
         {{if .Version}}<span class="text-[10px] text-neutral-500 tracking-wider">{{.Version}}</span>{{end}}
     </span>
     <div class="flex items-center gap-1">
-        <a href="/app/kontinuum.sh/namespaces/{{.CurrentTenant}}/talosclusters"
+        <a href="/app/kontinuum.sh/v1alpha2/namespaces/{{.CurrentTenant}}/talosclusters"
            class="p-2 rounded-lg {{if eq .ActiveMenu "talosclusters"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-kubernetes"}}
         </a>
-        <a href="/app/kontinuum.sh/namespaces/{{.CurrentTenant}}/instances"
+        <a href="/app/kontinuum.sh/v1alpha2/namespaces/{{.CurrentTenant}}/instances"
            class="p-2 rounded-lg {{if eq .ActiveMenu "instances"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-server"}}
         </a>
         {{template "tenant-switcher" dict "ID" "tenant-switcher-mobile" "CurrentTenant" .CurrentTenant "Tenants" .Tenants "Compact" true}}
-        <a href="/app/kontinuum.sh/namespaces/{{.CurrentTenant}}/kontinuums"
+        {{if eq .CurrentTenant "kontinuum-system"}}
+        <a href="/app/kontinuum.sh/v1alpha2/namespaces/{{.CurrentTenant}}/kontinuums"
            class="p-2 rounded-lg {{if eq .ActiveMenu "registry"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-registry"}}
         </a>
-        <a href="/app/iam"
-           class="p-2 rounded-lg {{if eq .ActiveMenu "iam"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
-            {{template "icon-shield"}}
+        {{end}}
+        <a href="/app/rbac.authorization.k8s.io/v1/namespaces/{{.CurrentTenant}}/roles"
+           class="p-2 rounded-lg {{if eq .ActiveMenu "iam-namespace"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
+            {{template "icon-door-closed-lock"}}
         </a>
+        {{if eq .CurrentTenant "kontinuum-system"}}
+        <a href="/app/rbac.authorization.k8s.io/v1/clusterroles"
+           class="p-2 rounded-lg {{if eq .ActiveMenu "iam-cluster"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
+            {{template "icon-globe-lock"}}
+        </a>
+        {{end}}
         <a href="/app/connect"
            class="p-2 rounded-lg {{if eq .ActiveMenu "connect"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-unplug"}}
@@ -57,27 +65,39 @@
         {{template "tenant-switcher" dict "ID" "tenant-switcher-desktop" "CurrentTenant" .CurrentTenant "Tenants" .Tenants "Compact" false}}
     </div>
     <nav class="flex flex-col gap-1 px-3 py-4 flex-1">
-        <a href="/app/kontinuum.sh/namespaces/{{.CurrentTenant}}/talosclusters"
+        <span class="px-2 pt-1 pb-1 text-[10px] font-semibold uppercase tracking-wider text-neutral-600">Compute</span>
+        <a href="/app/kontinuum.sh/v1alpha2/namespaces/{{.CurrentTenant}}/talosclusters"
            class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "talosclusters"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-kubernetes"}}
             Clusters
         </a>
-        <a href="/app/kontinuum.sh/namespaces/{{.CurrentTenant}}/instances"
+        <a href="/app/kontinuum.sh/v1alpha2/namespaces/{{.CurrentTenant}}/instances"
            class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "instances"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-server"}}
             Instances
         </a>
+        <span class="px-2 pt-4 pb-1 text-[10px] font-semibold uppercase tracking-wider text-neutral-600">IAM</span>
+        <a href="/app/rbac.authorization.k8s.io/v1/namespaces/{{.CurrentTenant}}/roles"
+           class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "iam-namespace"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
+            {{template "icon-door-closed-lock"}}
+            Tenant
+        </a>
+        {{if eq .CurrentTenant "kontinuum-system"}}
+        <a href="/app/rbac.authorization.k8s.io/v1/clusterroles"
+           class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "iam-cluster"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
+            {{template "icon-globe-lock"}}
+            Global
+        </a>
+        {{end}}
         <div class="flex-1"></div>
-        <a href="/app/kontinuum.sh/namespaces/{{.CurrentTenant}}/kontinuums"
+        <span class="px-2 pt-1 pb-1 text-[10px] font-semibold uppercase tracking-wider text-neutral-600">General</span>
+        {{if eq .CurrentTenant "kontinuum-system"}}
+        <a href="/app/kontinuum.sh/v1alpha2/namespaces/{{.CurrentTenant}}/kontinuums"
            class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "registry"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-registry"}}
             Registry
         </a>
-        <a href="/app/iam"
-           class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "iam"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
-            {{template "icon-shield"}}
-            IAM
-        </a>
+        {{end}}
         <a href="/app/connect"
            class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "connect"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
             {{template "icon-unplug"}}

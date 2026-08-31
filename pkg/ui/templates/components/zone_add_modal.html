@@ -14,10 +14,7 @@
             <span class="text-accent [&>svg]:h-4 [&>svg]:w-4">{{template "icon-globe"}}</span>
             Add zone
         </h2>
-        <button type="button" onclick="this.closest('dialog').close()"
-                class="text-neutral-500 hover:text-white transition-colors text-lg leading-none" aria-label="Close">
-            &times;
-        </button>
+        {{template "modal-close-button"}}
     </div>
     <div id="zone-add-modal-body" class="p-6">
         {{template "zone-add-modal-body" .}}

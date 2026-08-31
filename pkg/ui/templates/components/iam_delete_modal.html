@@ -1,0 +1,51 @@
+{{/*
+    iam-delete-modal is the shared "Delete role"/"Delete role binding"
+    confirmation dialog for iam_namespace_content.html and
+    iam_cluster_content.html — one dialog retargeted per row via
+    openIAMDeleteModal(kindLabel, name, namespace, resource), the same
+    "one shared dialog, reused per row rather than one dialog per row"
+    shape as instances_content.html's own delete-instance-modal.
+
+    Unlike instance/zone/talos-cluster deletion (all of which go through a
+    real bootstrap/teardown flow, or hardware that might not come back),
+    deleting a Role/RoleBinding is an instant, low-stakes RBAC write with
+    no async cleanup of its own — so this skips the type-to-confirm bar
+    zone_leave_modal.html uses and just asks a plain "are you sure",
+    mirroring delete-instance-modal's own confirmation weight instead.
+*/}}
+{{define "iam-delete-modal"}}
+<dialog id="iam-delete-modal" class="bg-neutral-900 border border-neutral-800 rounded-xl p-0 w-full max-w-md text-neutral-100 backdrop:bg-black/60">
+    <div class="px-6 py-3 border-b border-neutral-800 flex items-center justify-between gap-2">
+        <h2 class="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+            <span class="text-red-400 [&>svg]:h-4 [&>svg]:w-4">{{template "icon-trash"}}</span>
+            <span id="iam-delete-modal-title">Delete role</span>
+        </h2>
+        {{template "modal-close-button"}}
+    </div>
+    <div class="p-6 space-y-4">
+        <p class="text-sm text-neutral-400">
+            Delete <span id="iam-delete-modal-name" class="font-mono text-neutral-200"></span>? This cannot be undone.
+        </p>
+        <div class="flex justify-end gap-2 pt-2">
+            <button type="button" onclick="document.getElementById('iam-delete-modal').close()"
+                    class="inline-flex items-center px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg border border-neutral-700 text-neutral-300 hover:bg-neutral-800 transition-colors">
+                Cancel
+            </button>
+            <!--
+                No hx-target/hx-select/hx-swap here — handleDeleteRole and
+                its three siblings all answer with an Hx-Redirect back to
+                the current list (see deleteAndRedirect), which htmx turns
+                into a full navigation rather than a DOM swap, the same
+                shape delete-instance-modal's own confirm button already
+                relies on.
+            -->
+            <button type="button" id="iam-delete-modal-confirm" hx-disabled-elt="this"
+                    class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20 disabled:opacity-60 disabled:cursor-not-allowed transition-colors">
+                <span class="[.htmx-request_&]:hidden [&>svg]:h-3.5 [&>svg]:w-3.5">{{template "icon-trash"}}</span>
+                <span class="hidden [.htmx-request_&]:inline-flex [&>svg]:h-3.5 [&>svg]:w-3.5 [&>svg]:animate-spin">{{template "icon-loader-circle"}}</span>
+                <span id="iam-delete-modal-confirm-label">Delete role</span>
+            </button>
+        </div>
+    </div>
+</dialog>
+{{end}}

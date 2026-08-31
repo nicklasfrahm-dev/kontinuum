@@ -16,10 +16,7 @@
             <span class="text-red-400 [&>svg]:h-4 [&>svg]:w-4">{{template "icon-trash"}}</span>
             Decommission zone
         </h2>
-        <button type="button" onclick="this.closest('dialog').close()"
-                class="text-neutral-500 hover:text-white transition-colors text-lg leading-none" aria-label="Close">
-            &times;
-        </button>
+        {{template "modal-close-button"}}
     </div>
     <div class="p-6 space-y-4">
         <p class="text-sm text-neutral-400">

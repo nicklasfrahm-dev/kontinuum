@@ -1,0 +1,14 @@
+{{/*
+    modal-close-button is every dialog's own header close control — a
+    plain "&times;" used to be repeated verbatim in every *_add_modal.html/
+    *_leave_modal.html, with a hitbox no bigger than the glyph itself.
+    Centralized here so the bigger hitbox and hover feedback (padding plus
+    a negative margin to cancel it out, so the header's own layout doesn't
+    shift) live in exactly one place instead of N near-identical copies.
+*/}}
+{{define "modal-close-button"}}
+<button type="button" onclick="this.closest('dialog').close()"
+        class="shrink-0 -m-2 p-2 rounded-lg text-neutral-500 hover:text-red-400 hover:bg-red-500/10 transition-colors" aria-label="Close">
+    {{template "icon-x"}}
+</button>
+{{end}}

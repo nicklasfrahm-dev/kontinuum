@@ -1,6 +1,6 @@
 {{define "content"}}
-<div id="zone-detail-content" hx-get="/app/kontinuum.sh/namespaces/{{.Namespace}}/zones/{{.Name}}" hx-trigger="every 15s" hx-select="#zone-detail-content" hx-swap="outerHTML" hx-disinherit="hx-select hx-swap">
-    <a href="/app/kontinuum.sh/namespaces/{{.Namespace}}/kontinuums" class="inline-flex items-center gap-1.5 text-sm text-neutral-500 hover:text-white transition-colors mb-4">
+<div id="zone-detail-content" hx-get="/app/kontinuum.sh/v1alpha2/namespaces/{{.Namespace}}/zones/{{.Name}}" hx-trigger="every 15s" hx-select="#zone-detail-content" hx-swap="outerHTML" hx-disinherit="hx-select hx-swap">
+    <a href="/app/kontinuum.sh/v1alpha2/namespaces/{{.Namespace}}/kontinuums" class="inline-flex items-center gap-1.5 text-sm text-neutral-500 hover:text-white transition-colors mb-4">
         {{template "icon-chevron-left"}}
         Back to registry
     </a>
@@ -69,7 +69,7 @@
                 <dt class="text-sm text-neutral-500">TalosCluster</dt>
                 <dd class="text-sm font-medium text-white">
                     {{if .HasCluster}}
-                    <a href="/app/kontinuum.sh/namespaces/{{.Namespace}}/talosclusters/{{.ClusterName}}" class="hover:text-accent hover:underline">{{.ClusterName}}</a>
+                    <a href="/app/kontinuum.sh/v1alpha2/namespaces/{{.Namespace}}/talosclusters/{{.ClusterName}}" class="hover:text-accent hover:underline">{{.ClusterName}}</a>
                     {{else}}
                     <span class="text-neutral-500">Not provisioned yet</span>
                     {{end}}
@@ -104,7 +104,7 @@
                 <dt class="text-sm text-neutral-500">kontinuum-server</dt>
                 <dd class="text-sm font-medium text-white">
                     {{if .RegistryJoined}}
-                    <a href="/app/kontinuum.sh/namespaces/{{.KontinuumNamespace}}/kontinuums/{{.KontinuumName}}" class="hover:text-accent hover:underline">{{.KontinuumName}}</a>
+                    <a href="/app/kontinuum.sh/v1alpha2/namespaces/{{.KontinuumNamespace}}/kontinuums/{{.KontinuumName}}" class="hover:text-accent hover:underline">{{.KontinuumName}}</a>
                     {{else}}
                     <span class="inline-flex items-center gap-1.5 bg-neutral-800 border border-neutral-700 rounded-full px-2.5 py-1 text-xs font-medium text-neutral-400">Not yet joined</span>
                     {{end}}
@@ -174,7 +174,7 @@
                 Cancel
             </button>
             <button type="button" id="delete-zone-confirm"
-                    hx-delete="/app/kontinuum.sh/namespaces/{{.Namespace}}/zones/{{.Name}}"
+                    hx-delete="/app/kontinuum.sh/v1alpha2/namespaces/{{.Namespace}}/zones/{{.Name}}"
                     hx-swap="none"
                     hx-disabled-elt="this"
                     class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20 disabled:opacity-60 disabled:cursor-not-allowed transition-colors">
@@ -209,7 +209,7 @@
     // registry itself once the delete actually succeeds.
     document.getElementById('delete-zone-confirm').addEventListener('htmx:afterRequest', function (event) {
         if (event.detail.successful) {
-            window.location.href = '/app/kontinuum.sh/namespaces/{{.Namespace}}/kontinuums';
+            window.location.href = '/app/kontinuum.sh/v1alpha2/namespaces/{{.Namespace}}/kontinuums';
         }
     });
 </script>

@@ -1,0 +1,343 @@
+{{/*
+    role-add-modal is the "Add role"/"Add cluster role" dialog shared by
+    iam_namespace_content.html and iam_cluster_content.html — a native
+    <dialog>, opened via each page's own openRoleAddModal() and closed via
+    Escape, a backdrop click, or the header's close button, following
+    zone_add_modal.html's exact pattern. .RoleKind ("role" or "cluster
+    role") and .RoleAddURL (set by roleAddFormData/clusterRoleAddFormData in
+    router.go) are what make this one template work for both scopes.
+*/}}
+{{define "role-add-modal"}}
+<dialog id="role-add-modal" class="bg-neutral-900 border border-neutral-800 rounded-xl p-0 w-full max-w-2xl text-neutral-100 backdrop:bg-black/60">
+    <div class="px-6 py-3 border-b border-neutral-800 flex items-center justify-between gap-2">
+        <h2 class="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+            <span class="text-accent [&>svg]:h-4 [&>svg]:w-4">{{template "icon-shield-user"}}</span>
+            Add {{.RoleKind}}
+        </h2>
+        {{template "modal-close-button"}}
+    </div>
+    <div id="role-add-modal-body" class="p-6 max-h-[75vh] overflow-y-auto">
+        {{template "role-add-modal-body" .}}
+    </div>
+</dialog>
+
+{{/*
+    Rule-row add/remove is wired once here via event delegation on this
+    dialog itself, rather than bound to the rows themselves — the rows
+    (#role-add-rules' children) get replaced wholesale on every htmx swap
+    of #role-add-modal-body (a failed submission redisplays the form) and
+    on every "reopen" reset (see openRoleAddModal in iam_namespace_content/
+    iam_cluster_content.html), so any listener bound directly to a row
+    would be gone with it. Delegating to this dialog element and looking
+    rows up fresh by ID on every click sidesteps needing to re-wire after
+    either.
+
+    Delegating to the dialog rather than document is load-bearing, not
+    just tidier scoping: hx-boost (see layout.html's own <body>) swaps
+    only the boosted page's own content on navigation, so document itself
+    is never replaced/reloaded across visits the way a plain link would —
+    a document-level listener re-added by this same script block on every
+    visit to a role/cluster-role page would pile up one extra copy per
+    visit, and "+ Add rule" would insert that many rows per click. This
+    dialog, in contrast, is a fresh element every time this block re-runs
+    (layout.html's own content swap replaces it wholesale), so whatever
+    listener was on the previous one is discarded right along with it.
+*/}}
+<script>
+(function () {
+    var dialog = document.getElementById('role-add-modal');
+
+    dialog.addEventListener('click', function (event) {
+        var addButton = event.target.closest('[data-add-rule]');
+        if (addButton) {
+            var containerId = addButton.getAttribute('data-add-rule');
+            var container = document.getElementById(containerId);
+            var template = document.getElementById(containerId + '-template');
+            var index = container.children.length;
+            var html = template.innerHTML.split('__INDEX__').join(String(index));
+            var wrapper = document.createElement('div');
+            wrapper.innerHTML = html.trim();
+            container.appendChild(wrapper.firstElementChild);
+
+            return;
+        }
+
+        var removeButton = event.target.closest('[data-remove-rule]');
+        if (removeButton) {
+            removeButton.closest('[data-rule-row]').remove();
+        }
+    });
+
+    // "* (all)" and the named verbs below it (get/list/watch/...) both post
+    // to the same rules[N][verbs] field, so keep them in sync the way a
+    // "select all" checkbox normally behaves: checking/unchecking "*"
+    // checks/unchecks every named verb in that row, checking every named
+    // verb by hand checks "*" too, and unchecking any single named verb
+    // (since the row no longer actually grants *every* verb) unchecks "*".
+    // Delegated on this dialog for the same reason the click listener above
+    // is — rows are cloned or swapped in wholesale after this script runs.
+    dialog.addEventListener('change', function (event) {
+        var checkbox = event.target;
+        if (checkbox.type !== 'checkbox' || !/\[verbs\]$/.test(checkbox.name)) {
+            return;
+        }
+
+        var row = checkbox.closest('[data-rule-row]');
+        var verbCheckboxes = row.querySelectorAll('input[name$="[verbs]"]');
+        var allCheckbox = row.querySelector('input[name$="[verbs]"][value="*"]');
+        var namedCheckboxes = Array.prototype.filter.call(verbCheckboxes, function (cb) {
+            return cb !== allCheckbox;
+        });
+
+        if (checkbox === allCheckbox) {
+            namedCheckboxes.forEach(function (cb) {
+                cb.checked = allCheckbox.checked;
+            });
+            return;
+        }
+
+        if (!checkbox.checked) {
+            allCheckbox.checked = false;
+            return;
+        }
+
+        allCheckbox.checked = namedCheckboxes.every(function (cb) {
+            return cb.checked;
+        });
+    });
+
+    // A checked "* (all)" already implies every named verb, so the change
+    // listener above leaves them checked too purely for display — submitting
+    // both would just send a PolicyRule with a redundant ["*", "get", "list",
+    // ...] Verbs list instead of the equivalent, simpler ["*"]. Disabling the
+    // redundant checkboxes right before submit drops them from the
+    // form-encoded body without touching what the user sees (disabled has no
+    // visual style of its own here, and the row is about to be replaced or
+    // reset regardless). This has to run in the capturing phase: htmx's own
+    // submit handling reads the form during the event's "at target" phase, a
+    // bubble-phase listener on this dialog (an ancestor of the form) would
+    // only observe the event *after* htmx already serialized it.
+    dialog.addEventListener('submit', function (event) {
+        var rows = event.target.querySelectorAll('[data-rule-row]');
+        rows.forEach(function (row) {
+            var allCheckbox = row.querySelector('input[name$="[verbs]"][value="*"]');
+            if (!allCheckbox || !allCheckbox.checked) {
+                return;
+            }
+
+            row.querySelectorAll('input[name$="[verbs]"]').forEach(function (cb) {
+                if (cb !== allCheckbox) {
+                    cb.disabled = true;
+                }
+            });
+        });
+    }, true);
+
+    // A Role/ClusterRole with zero rules is legal (Kubernetes just grants
+    // no permissions) but never what a caller actually meant to submit —
+    // hide the last remaining row's own remove button rather than letting
+    // "+ Add rule"'s only counterpart quietly produce that — a
+    // permanently-disabled-but-still-visible × on a lone row would just
+    // raise the question of why it doesn't do anything, so this hides it
+    // outright instead (also disabled, defensively: a disabled button's
+    // own click never reaches the delegated listener above, since
+    // disabled controls don't dispatch click at all).
+    //
+    // The native `hidden` property, not a "hidden" utility class, is
+    // what actually matters here: this card's own space-y-2 (see
+    // role-add-rule-row) only skips the top margin it would otherwise add
+    // before an element when that element's *preceding* sibling carries
+    // the real hidden attribute — a class merely styled display:none
+    // doesn't count, so the row's "API groups"/"Resources" grid would
+    // still pick up an extra gap above it as if the (invisible) remove
+    // button were a normal sibling taking up space.
+    //
+    // A MutationObserver, rather than re-checking only after this
+    // script's own add/remove above, is what makes this correct after
+    // every way #role-add-rules' contents can change: openRoleAddModal's
+    // pristine-HTML reset on reopen, and a failed submission's own htmx
+    // swap of the whole #role-add-modal-body (both replace the rows
+    // wholesale from outside this listener entirely).
+    function syncRemoveButtons() {
+        var container = document.getElementById('role-add-rules');
+        if (!container) {
+            return;
+        }
+
+        var rows = container.querySelectorAll('[data-rule-row]');
+        var onlyOneLeft = rows.length <= 1;
+
+        rows.forEach(function (row) {
+            var button = row.querySelector('[data-remove-rule]');
+            if (button) {
+                button.disabled = onlyOneLeft;
+                button.hidden = onlyOneLeft;
+            }
+        });
+    }
+
+    new MutationObserver(syncRemoveButtons).observe(document.getElementById('role-add-modal-body'),
+        { childList: true, subtree: true });
+    syncRemoveButtons();
+})();
+</script>
+{{end}}
+
+{{/*
+    role-add-modal-body is the swappable part of the dialog above —
+    handleRoleAdd/handleClusterRoleAdd's POST response replaces just
+    #role-add-modal-body's innerHTML with this same template, executed
+    directly (see Router.renderRoleAddModalBody), so the modal never
+    navigates away from the page underneath.
+*/}}
+{{define "role-add-modal-body"}}
+{{if .CreatedRole}}
+{{/* A hidden marker, not a message rendered inline — iam_namespace_content.html's
+     and iam_cluster_content.html's own htmx:afterSwap listener on
+     #role-add-modal-body reads this, closes the dialog, surfaces the text as
+     a toast, and refreshes the roles list instead of leaving a stale list
+     behind a static success banner — see instance_add_modal.html's identical
+     pattern for why. */}}
+<div data-toast-prefix="Created {{.RoleKind}} {{.CreatedRole}}." class="hidden"></div>
+{{else}}
+{{if .RoleError}}
+<div class="mb-4 bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 text-sm text-red-400">
+    {{.RoleError}}
+</div>
+{{end}}
+<form hx-post="{{.RoleAddURL}}" hx-target="#role-add-modal-body" hx-swap="innerHTML" class="space-y-4">
+    <label class="block">
+        <span class="text-xs uppercase tracking-wider text-neutral-500">Name</span>
+        <input type="text" name="name" value="{{.RoleName}}" required placeholder="my-role"
+               class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+    </label>
+
+    <div>
+        <div class="flex items-center justify-between">
+            <span class="text-xs uppercase tracking-wider text-neutral-500">Rules</span>
+            <!--
+                Only -my-1/-ml-2 here, no negative right margin: this
+                button is the last child of a justify-between row, so
+                flex alignment pins it by its margin box, not its border
+                box — a negative margin-right would pull the margin box
+                in without moving the border box, which just pushes the
+                button's own visible/clickable area (and the padding
+                added for a bigger hitbox) past the row's right edge
+                instead of keeping it flush with the rule cards below.
+            -->
+            <button type="button" data-add-rule="role-add-rules"
+                    class="-my-1 -ml-2 px-2 py-1 rounded-lg text-xs font-medium text-accent hover:bg-neutral-800 transition-colors">
+                + Add rule
+            </button>
+        </div>
+        <div id="role-add-rules" class="mt-2 space-y-3">
+            {{if .Rules}}
+            {{range $i, $rule := .Rules}}
+            {{template "role-add-rule-row" dict "Index" $i "APIGroups" $rule.APIGroups "Resources" $rule.Resources "Verbs" $rule.Verbs}}
+            {{end}}
+            {{else}}
+            {{template "role-add-rule-row" dict "Index" 0 "APIGroups" "" "Resources" ""}}
+            {{end}}
+        </div>
+    </div>
+
+    <div class="flex justify-end pt-2">
+        <!--
+            hx-disabled-elt (see AGENTS.md's UI policy) disables this button
+            for the POST's own round trip — see instance_add_modal.html's
+            identical pattern for why, including the icon-swaps-for-spinner
+            reasoning.
+        -->
+        <button type="submit" hx-disabled-elt="this"
+                class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg bg-accent text-neutral-950 hover:bg-accent/90 disabled:opacity-60 disabled:cursor-not-allowed transition-colors">
+            <span class="[.htmx-request_&]:hidden [&>svg]:h-3.5 [&>svg]:w-3.5">{{template "icon-shield-user"}}</span>
+            <span class="hidden [.htmx-request_&]:inline-flex [&>svg]:h-3.5 [&>svg]:w-3.5 [&>svg]:animate-spin">{{template "icon-loader-circle"}}</span>
+            Add {{.RoleKind}}
+        </button>
+    </div>
+</form>
+
+{{/*
+    Cloned client-side by role-add-modal's own script on every "+ Add
+    rule" click, with __INDEX__ replaced by the row's fresh index — see
+    that script's own doc.
+*/}}
+<template id="role-add-rules-template">
+    {{template "role-add-rule-row" dict "Index" "__INDEX__" "APIGroups" "" "Resources" ""}}
+</template>
+{{end}}
+{{end}}
+
+{{/*
+    role-add-rule-row renders one rbacv1.PolicyRule's editable form —
+    always three fields: comma-separated API groups (blank means the core
+    group), comma-separated resources, and a fixed set of verb checkboxes.
+    Index is either a real 0-based position (server-rendered rows) or the
+    literal string "__INDEX__" (the client-side clone template above),
+    substituted into every field name so the submitted "rules[N][field]"
+    keys line up with parseRuleFields in router.go.
+*/}}
+{{define "role-add-rule-row"}}
+<div class="relative bg-neutral-800/50 border border-neutral-700 rounded-lg p-3 pr-10" data-rule-row>
+    <!-- Same hover treatment as modal-close-button — see that component's own doc. -->
+    <button type="button" data-remove-rule
+            class="absolute top-1 right-1 p-2 rounded-lg text-neutral-500 hover:text-red-400 hover:bg-red-500/10 transition-colors" aria-label="Remove rule">
+        {{template "icon-x"}}
+    </button>
+    <!--
+        space-y-2 lives on this inner wrapper, not the card above — the
+        remove button is absolutely positioned (so it never occupies flow
+        space to begin with) but still counts as a DOM sibling for
+        Tailwind's own space-y selector, which only excludes a sibling
+        carrying the real hidden attribute, not one merely styled
+        display:none. Since this button's own hidden state does toggle
+        that attribute (see this file's own syncRemoveButtons script),
+        keeping it out of the space-y-2 sibling chain entirely — rather
+        than relying on that toggle to always line up with this
+        selector's exact rules — is what keeps this row's own top
+        spacing identical whether or not the button is shown.
+    -->
+    <div class="space-y-3">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <label class="block">
+                <span class="text-xs uppercase tracking-wider text-neutral-500">API groups</span>
+                <input type="text" name="rules[{{.Index}}][apiGroups]" value="{{.APIGroups}}" placeholder="blank = core"
+                       class="mt-1 w-full bg-neutral-900 border border-neutral-700 rounded-md px-2 py-1.5 text-xs text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+            </label>
+            <label class="block">
+                <span class="text-xs uppercase tracking-wider text-neutral-500">Resources</span>
+                <input type="text" name="rules[{{.Index}}][resources]" value="{{.Resources}}" required placeholder="pods, deployments"
+                       class="mt-1 w-full bg-neutral-900 border border-neutral-700 rounded-md px-2 py-1.5 text-xs text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+            </label>
+        </div>
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-3">
+            {{template "verb-checkbox" dict "Index" .Index "Value" "*" "Label" "* (all)" "Checked" (hasVerb .Verbs "*")}}
+            {{template "verb-checkbox" dict "Index" .Index "Value" "get" "Label" "get" "Checked" (hasVerb .Verbs "get")}}
+            {{template "verb-checkbox" dict "Index" .Index "Value" "list" "Label" "list" "Checked" (hasVerb .Verbs "list")}}
+            {{template "verb-checkbox" dict "Index" .Index "Value" "watch" "Label" "watch" "Checked" (hasVerb .Verbs "watch")}}
+            {{template "verb-checkbox" dict "Index" .Index "Value" "create" "Label" "create" "Checked" (hasVerb .Verbs "create")}}
+            {{template "verb-checkbox" dict "Index" .Index "Value" "update" "Label" "update" "Checked" (hasVerb .Verbs "update")}}
+            {{template "verb-checkbox" dict "Index" .Index "Value" "patch" "Label" "patch" "Checked" (hasVerb .Verbs "patch")}}
+            {{template "verb-checkbox" dict "Index" .Index "Value" "delete" "Label" "delete" "Checked" (hasVerb .Verbs "delete")}}
+        </div>
+    </div>
+</div>
+{{end}}
+
+{{/*
+    verb-checkbox renders one rules[N][verbs] checkbox as a hidden native
+    input (peer sr-only) plus a styled sibling box reacting to :checked via
+    Tailwind's peer-checked variant — the same "restyle around a hidden
+    native checkbox" pattern zone_add_modal.html's own "Unregister
+    instances" checkbox established, rather than the raw
+    browser-drawn-checkbox look this replaces.
+*/}}
+{{define "verb-checkbox"}}
+<label class="inline-flex items-center gap-1.5 cursor-pointer group">
+    <input type="checkbox" name="rules[{{.Index}}][verbs]" value="{{.Value}}" {{if .Checked}}checked{{end}} class="peer sr-only">
+    <span class="h-4 w-4 shrink-0 rounded border border-neutral-600 bg-neutral-900 flex items-center justify-center transition-colors peer-checked:bg-accent peer-checked:border-accent peer-focus-visible:ring-2 peer-focus-visible:ring-accent peer-focus-visible:ring-offset-1 peer-focus-visible:ring-offset-neutral-900 [&>svg]:h-3 [&>svg]:w-3 [&>svg]:text-neutral-950 [&>svg]:hidden peer-checked:[&>svg]:block">
+        {{template "icon-check"}}
+    </span>
+    <span class="text-xs text-neutral-400 group-hover:text-white transition-colors">{{.Label}}</span>
+</label>
+{{end}}

@@ -11,10 +11,10 @@
     result into the request's own query string, for a GET) fresh on every
     single request, which is what actually keeps the auto-refresh in sync.
 -->
-<div id="taloscluster-content" hx-get="/app/kontinuum.sh/namespaces/{{.Namespace}}/talosclusters/{{.Name}}" hx-trigger="every 15s"
+<div id="taloscluster-content" hx-get="/app/kontinuum.sh/v1alpha2/namespaces/{{.Namespace}}/talosclusters/{{.Name}}" hx-trigger="every 15s"
      hx-vals="js:{reveal: (new URLSearchParams(location.search).get('reveal') === 'true')}"
      hx-select="#taloscluster-content" hx-swap="outerHTML" hx-disinherit="hx-select hx-swap">
-    <a href="/app/kontinuum.sh/namespaces/{{.Namespace}}/talosclusters" class="inline-flex items-center gap-1.5 text-sm text-neutral-500 hover:text-white transition-colors mb-4">
+    <a href="/app/kontinuum.sh/v1alpha2/namespaces/{{.Namespace}}/talosclusters" class="inline-flex items-center gap-1.5 text-sm text-neutral-500 hover:text-white transition-colors mb-4">
         {{template "icon-chevron-left"}}
         Back to clusters
     </a>
@@ -66,7 +66,7 @@
                 <dt class="text-sm text-neutral-500">Zone</dt>
                 <dd class="text-sm font-medium text-white">
                     {{if .HasZone}}
-                    <a href="/app/kontinuum.sh/namespaces/{{.Namespace}}/zones/{{.ZoneObjectName}}" class="hover:text-accent hover:underline">{{.ZoneRegion}}/{{.ZoneName}}</a>
+                    <a href="/app/kontinuum.sh/v1alpha2/namespaces/{{.Namespace}}/zones/{{.ZoneObjectName}}" class="hover:text-accent hover:underline">{{.ZoneRegion}}/{{.ZoneName}}</a>
                     {{else}}
                     -
                     {{end}}
@@ -147,7 +147,7 @@
                 the fact (see reveal-panel-script's own QueryParam doc for
                 the full mechanism).
             -->
-            {{template "reveal-panel" (dict "ID" "taloscluster-kubeconfig" "Label" "KUBECONFIG" "DownloadURL" (print "/app/kontinuum.sh/namespaces/" .Namespace "/talosclusters/" .Name "/kubeconfig") "Open" .KubeconfigRevealed)}}
+            {{template "reveal-panel" (dict "ID" "taloscluster-kubeconfig" "Label" "KUBECONFIG" "DownloadURL" (print "/app/kontinuum.sh/v1alpha2/namespaces/" .Namespace "/talosclusters/" .Name "/kubeconfig") "Open" .KubeconfigRevealed)}}
             {{else}}
             <p class="text-sm text-neutral-500">
                 No kubeconfig is available yet — this cluster hasn't finished bootstrapping.
@@ -158,7 +158,7 @@
 
     {{if .KubeconfigReady}}
     {{template "copy-snippet-script" (dict "ID" "taloscluster-kubeconfig-import")}}
-    {{template "reveal-panel-script" (dict "ID" "taloscluster-kubeconfig" "URL" (print "/app/kontinuum.sh/namespaces/" .Namespace "/talosclusters/" .Name "/kubeconfig") "QueryParam" "reveal")}}
+    {{template "reveal-panel-script" (dict "ID" "taloscluster-kubeconfig" "URL" (print "/app/kontinuum.sh/v1alpha2/namespaces/" .Namespace "/talosclusters/" .Name "/kubeconfig") "QueryParam" "reveal")}}
     {{end}}
 </div>
 
@@ -186,7 +186,7 @@
                 Cancel
             </button>
             <button type="button"
-                    hx-delete="/app/kontinuum.sh/namespaces/{{.Namespace}}/talosclusters/{{.Name}}"
+                    hx-delete="/app/kontinuum.sh/v1alpha2/namespaces/{{.Namespace}}/talosclusters/{{.Name}}"
                     hx-disabled-elt="this"
                     class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20 disabled:opacity-60 disabled:cursor-not-allowed transition-colors">
                 <span class="[.htmx-request_&]:hidden [&>svg]:h-3.5 [&>svg]:w-3.5">{{template "icon-trash"}}</span>

@@ -4,7 +4,7 @@
     expands a searchable list of every tenant the caller's identity can see
     (see pkg/ui.Router.addTenantSwitcherData). Picking one navigates to that
     tenant's own instances page (see pageMachines' own doc for why
-    kontinuum.sh/namespaces/{ns} is the URL shape) — <details> needs no
+    kontinuum.sh/v1alpha2/namespaces/{ns} is the URL shape) — <details> needs no
     script of its own to close on that navigation, since the whole page
     unloads.
 
@@ -39,12 +39,12 @@
         <div class="px-3 pt-3 pb-2">
             <span class="block px-1 pb-2 text-xs font-bold text-white uppercase tracking-wider">Tenants</span>
             <input type="text" id="{{.ID}}-search" autocomplete="off" placeholder="Search tenants..."
-                   class="w-full bg-neutral-800 border border-neutral-700 rounded-full px-3.5 py-1.5 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+                   class="w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3.5 py-1.5 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
         </div>
         <div id="{{.ID}}-list" class="max-h-64 overflow-y-auto pb-2">
             {{$current := .CurrentTenant}}
             {{range .Tenants}}
-            <a href="/app/kontinuum.sh/namespaces/{{.}}/instances" data-tenant-option data-tenant-name="{{.}}"
+            <a href="/app/kontinuum.sh/v1alpha2/namespaces/{{.}}/instances" data-tenant-option data-tenant-name="{{.}}"
                class="block px-4 py-2 text-sm truncate {{if eq . $current}}bg-neutral-800 text-white font-medium{{else}}text-neutral-300 hover:bg-neutral-800/70{{end}}">
                 {{.}}
             </a>

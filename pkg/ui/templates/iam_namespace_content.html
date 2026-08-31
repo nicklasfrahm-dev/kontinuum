@@ -1,0 +1,203 @@
+{{define "content"}}
+<!--
+    "role-added"/"rolebinding-added from:body" lets a successful "Add
+    role(binding)" submission (see this file's own script block below)
+    refresh this list right away instead of leaving the newly created
+    object invisible until the next poll — hx-trigger survives the
+    outerHTML swap since it's part of the server-rendered markup being
+    swapped in, not a one-off DOM listener. "every 15s" is the same
+    background-refresh cadence instances_content.html's own
+    #instances-content uses, so a role/binding created or deleted by
+    someone else (or via kubectl) while this page is open still shows up
+    without a manual reload. The GET target tracks whichever tab (.View)
+    is currently open, so a refresh never silently switches the visible
+    tab out from under the caller.
+-->
+<div id="iam-namespace-content"
+     hx-get="/app/rbac.authorization.k8s.io/v1/namespaces/{{.Namespace}}/{{if eq .View "bindings"}}rolebindings{{else}}roles{{end}}"
+     hx-trigger="every 15s, role-added from:body, rolebinding-added from:body"
+     hx-select="#iam-namespace-content" hx-swap="outerHTML" hx-disinherit="hx-select hx-swap">
+    <div class="mb-6 flex items-center justify-between gap-4 flex-wrap">
+        <div class="flex items-center gap-4">
+            <div class="text-accent [&>svg]:h-10 [&>svg]:w-10">
+                {{template "icon-door-closed-lock"}}
+            </div>
+            <div>
+                <h1 class="text-xl font-bold text-white">Tenant</h1>
+                <p class="mt-1 text-sm text-neutral-500">Roles and role bindings scoped to the <span class="text-neutral-300">{{.Namespace}}</span> namespace.</p>
+            </div>
+        </div>
+        {{if .AuthEnabled}}
+        {{if eq .View "roles"}}
+        <button type="button" onclick="openRoleAddModal()"
+                class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium uppercase tracking-wider rounded-lg bg-accent text-neutral-950 hover:bg-accent/90 transition-colors">
+            {{template "icon-shield-user"}}
+            Add role
+        </button>
+        {{else}}
+        <button type="button" onclick="openRoleBindingAddModal()"
+                class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium uppercase tracking-wider rounded-lg bg-accent text-neutral-950 hover:bg-accent/90 transition-colors">
+            {{template "icon-user-shield"}}
+            Add role binding
+        </button>
+        {{end}}
+        {{end}}
+    </div>
+
+    {{if not .AuthEnabled}}
+    <div class="bg-neutral-900 border border-neutral-800 rounded-xl px-6 py-4 flex items-start gap-3 text-neutral-500">
+        {{template "icon-info"}}
+        <p class="text-sm">
+            OIDC is not configured for this deployment, so kontinuum accepts unauthenticated requests — every
+            request has full access, and there are no roles or role bindings to show.
+        </p>
+    </div>
+    {{else}}
+
+    <div class="mb-4 inline-flex rounded-lg border border-neutral-800 bg-neutral-900 p-1 text-xs font-medium uppercase tracking-wider">
+        <a href="/app/rbac.authorization.k8s.io/v1/namespaces/{{.Namespace}}/roles"
+           class="px-3 py-1.5 rounded-md transition-colors {{if eq .View "roles"}}bg-accent text-neutral-950{{else}}text-neutral-400 hover:text-white{{end}}">
+            Roles
+        </a>
+        <a href="/app/rbac.authorization.k8s.io/v1/namespaces/{{.Namespace}}/rolebindings"
+           class="px-3 py-1.5 rounded-md transition-colors {{if eq .View "bindings"}}bg-accent text-neutral-950{{else}}text-neutral-400 hover:text-white{{end}}">
+            Role bindings
+        </a>
+    </div>
+
+    {{if eq .View "roles"}}
+    <div class="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+        <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
+            {{template "icon-shield-user"}}
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider">Roles <span class="text-neutral-500">{{len .Roles}}</span></h2>
+        </div>
+        {{if .Roles}}
+        <div class="divide-y divide-neutral-800">
+            {{range .Roles}}
+            {{template "role-row" .}}
+            {{end}}
+        </div>
+        {{else}}
+        <p class="px-6 py-4 text-sm text-neutral-500">No roles found in this namespace.</p>
+        {{end}}
+    </div>
+    {{else}}
+    <div class="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+        <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
+            {{template "icon-user-shield"}}
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider">Role bindings <span class="text-neutral-500">{{len .RoleBindings}}</span></h2>
+        </div>
+        {{if .RoleBindings}}
+        <dl class="divide-y divide-neutral-800">
+            {{range .RoleBindings}}
+            {{template "role-binding-row" .}}
+            {{end}}
+        </dl>
+        {{else}}
+        <p class="px-6 py-4 text-sm text-neutral-500">No role bindings found in this namespace.</p>
+        {{end}}
+    </div>
+    {{end}}
+    {{end}}
+</div>
+
+{{template "role-add-modal" .}}
+{{template "rolebinding-add-modal" .}}
+{{template "iam-delete-modal" .}}
+
+<script>
+    // Captured once, before any submission can mutate either modal body —
+    // restored on every open so a previous success/error state (or
+    // partially-filled form) never lingers into a fresh "Add" attempt. See
+    // registry_content.html's openZoneAddModal, the precedent this follows.
+    var roleAddModalPristineHTML = document.getElementById('role-add-modal-body').innerHTML;
+    var rolebindingAddModalPristineHTML = document.getElementById('rolebinding-add-modal-body').innerHTML;
+
+    function openRoleAddModal() {
+        var body = document.getElementById('role-add-modal-body');
+        body.innerHTML = roleAddModalPristineHTML;
+        htmx.process(body);
+        document.getElementById('role-add-modal').showModal();
+    }
+
+    function openRoleBindingAddModal() {
+        var body = document.getElementById('rolebinding-add-modal-body');
+        body.innerHTML = rolebindingAddModalPristineHTML;
+        htmx.process(body);
+        document.getElementById('rolebinding-add-modal').showModal();
+    }
+
+    // handleRoleAdd/handleRoleBindingAdd's success response swaps in a
+    // hidden [data-toast-prefix] marker rather than a message rendered
+    // inline (see role_add_modal.html/rolebinding_add_modal.html) — close
+    // the dialog, surface it as a toast (see layout.html's showToast), and
+    // refresh #iam-namespace-content right away (see its own "role-added"/
+    // "rolebinding-added from:body" trigger) instead of leaving the newly
+    // created object invisible until the next full page load — the same
+    // pattern instances_content.html's own "instance-added" listener
+    // follows.
+    document.getElementById('role-add-modal-body').addEventListener('htmx:afterSwap', function (event) {
+        var marker = event.target.querySelector('[data-toast-prefix]');
+        if (!marker) {
+            return;
+        }
+
+        document.getElementById('role-add-modal').close();
+        showToast(marker.getAttribute('data-toast-prefix'), '', '');
+        htmx.trigger(document.body, 'role-added');
+    });
+
+    document.getElementById('rolebinding-add-modal-body').addEventListener('htmx:afterSwap', function (event) {
+        var marker = event.target.querySelector('[data-toast-prefix]');
+        if (!marker) {
+            return;
+        }
+
+        document.getElementById('rolebinding-add-modal').close();
+        showToast(marker.getAttribute('data-toast-prefix'), '', '');
+        htmx.trigger(document.body, 'rolebinding-added');
+    });
+
+    // openIAMDeleteModal(kindLabel, name, namespace, resource) retargets
+    // the one shared #iam-delete-modal per row — see that dialog's own
+    // doc. namespace is always {{.Namespace}} here (role-row/
+    // role-binding-row are shared with iam_cluster_content.html, whose own
+    // copy of this function builds a cluster-scoped URL instead), so this
+    // always takes the namespaced branch — resource ("roles"/
+    // "rolebindings") is what actually varies per call site.
+    var iamDeleteModal = document.getElementById('iam-delete-modal');
+    var iamDeleteModalTitle = document.getElementById('iam-delete-modal-title');
+    var iamDeleteModalName = document.getElementById('iam-delete-modal-name');
+    var iamDeleteModalConfirm = document.getElementById('iam-delete-modal-confirm');
+    var iamDeleteModalConfirmLabel = document.getElementById('iam-delete-modal-confirm-label');
+
+    function openIAMDeleteModal(kindLabel, name, namespace, resource) {
+        var url = namespace
+            ? '/app/rbac.authorization.k8s.io/v1/namespaces/' + encodeURIComponent(namespace) + '/' + resource + '/' + encodeURIComponent(name)
+            : '/app/rbac.authorization.k8s.io/v1/cluster' + resource + '/' + encodeURIComponent(name);
+
+        iamDeleteModalTitle.textContent = 'Delete ' + kindLabel;
+        iamDeleteModalConfirmLabel.textContent = 'Delete ' + kindLabel;
+        iamDeleteModalName.textContent = name;
+        iamDeleteModalConfirm.setAttribute('hx-delete', url);
+        // hx-delete is only bound to an element once, on htmx's initial
+        // scan — reassigning the attribute above doesn't itself rebind a
+        // dynamically-retargeted button, so re-process it here exactly as
+        // registry_content.html's openZoneLeaveModal does for its own
+        // freshly-retargeted button.
+        htmx.process(iamDeleteModalConfirm);
+        iamDeleteModal.showModal();
+    }
+
+    // <dialog> has no built-in "click outside to close" — close only when
+    // the click lands on the dialog element itself (the backdrop area),
+    // not when it bubbles up from a click inside the dialog's own content.
+    ['role-add-modal', 'rolebinding-add-modal', 'iam-delete-modal'].forEach(function (id) {
+        document.getElementById(id).addEventListener('click', function (event) {
+            if (event.target === this) {
+                this.close();
+            }
+        });
+    });
+</script>
+{{end}}

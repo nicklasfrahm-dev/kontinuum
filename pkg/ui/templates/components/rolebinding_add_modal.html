@@ -1,0 +1,422 @@
+{{/*
+    rolebinding-add-modal is the "Add role binding"/"Add cluster role
+    binding" dialog shared by iam_namespace_content.html and
+    iam_cluster_content.html — same native-<dialog> + swappable-body shape
+    as role_add_modal.html/zone_add_modal.html. .RoleBindingKind ("role
+    binding" or "cluster role binding") and .RoleBindingAddURL (set by
+    roleBindingAddFormData/clusterRoleBindingAddFormData in router.go) are
+    what make this one template work for both scopes.
+*/}}
+{{define "rolebinding-add-modal"}}
+<dialog id="rolebinding-add-modal" class="bg-neutral-900 border border-neutral-800 rounded-xl p-0 w-full max-w-lg text-neutral-100 backdrop:bg-black/60">
+    <div class="px-6 py-3 border-b border-neutral-800 flex items-center justify-between gap-2">
+        <h2 class="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+            <span class="text-accent [&>svg]:h-4 [&>svg]:w-4">{{template "icon-user-shield"}}</span>
+            Add {{.RoleBindingKind}}
+        </h2>
+        {{template "modal-close-button"}}
+    </div>
+    <div id="rolebinding-add-modal-body" class="p-6">
+        {{template "rolebinding-add-modal-body" .}}
+    </div>
+</dialog>
+
+{{/*
+    Role-field and Subject-kind-field autocomplete, delegated off
+    #rolebinding-add-modal (which never gets swapped, unlike
+    #rolebinding-add-modal-body's own re-renders on every submission) so
+    both survive those re-renders without needing to be rebound — same
+    "combobox with list autocomplete" WAI-ARIA pattern, and the same
+    delegation reasoning, as zone_add_modal.html's own Talos-address field
+    (see registry_content.html's script block for the canonical write-up
+    this mirrors). Unlike that field, there's no separate "existing vs
+    freshly typed" distinction to track for either field here — a
+    RoleBinding just references a Role by name and carries a fixed-enum
+    subject kind, so each visible input doubles as its own actual form
+    field with nothing else to keep in sync.
+
+    initCombobox wires one such instance — parameterized so the Role field
+    and the Subject-kind field (a small, fixed enum, but made to match
+    Role's own interaction pattern for consistency rather than staying a
+    plain <select>) share one implementation instead of two near-identical
+    copies.
+*/}}
+<script>
+(function () {
+    var modal = document.getElementById('rolebinding-add-modal');
+
+    function initCombobox(inputId, listId, optionSelector, nameAttr, emptySelector) {
+        function input() {
+            return document.getElementById(inputId);
+        }
+
+        function list() {
+            return document.getElementById(listId);
+        }
+
+        function isOpen(list) {
+            return !!list && !list.classList.contains('hidden');
+        }
+
+        function openList() {
+            var l = list();
+            var i = input();
+            if (!l) {
+                return;
+            }
+
+            l.classList.remove('hidden');
+            if (i) {
+                i.setAttribute('aria-expanded', 'true');
+            }
+        }
+
+        function currentActive() {
+            var l = list();
+            return l ? l.querySelector(optionSelector + '[aria-selected="true"]') : null;
+        }
+
+        // option may be null to clear the highlight entirely (list closed,
+        // or filtering left nothing active).
+        function setActive(option) {
+            var i = input();
+            var previous = currentActive();
+            if (previous) {
+                previous.setAttribute('aria-selected', 'false');
+                previous.classList.remove('bg-neutral-800', 'text-white');
+            }
+
+            if (!option) {
+                if (i) {
+                    i.removeAttribute('aria-activedescendant');
+                }
+
+                return;
+            }
+
+            option.setAttribute('aria-selected', 'true');
+            option.classList.add('bg-neutral-800', 'text-white');
+            option.scrollIntoView({ block: 'nearest' });
+            if (i) {
+                i.setAttribute('aria-activedescendant', option.id);
+            }
+        }
+
+        function closeList() {
+            var l = list();
+            var i = input();
+            if (!l) {
+                return;
+            }
+
+            l.classList.add('hidden');
+            setActive(null);
+            if (i) {
+                i.setAttribute('aria-expanded', 'false');
+            }
+        }
+
+        function visibleOptions() {
+            var l = list();
+            if (!l) {
+                return [];
+            }
+
+            return Array.from(l.querySelectorAll(optionSelector)).filter(function (option) {
+                return !option.classList.contains('hidden');
+            });
+        }
+
+        // delta is +1 (ArrowDown) or -1 (ArrowUp) — wraps around either
+        // end, and opens the list first if it wasn't already, same as a
+        // native <select>'s own arrow-key behavior.
+        function moveActive(delta) {
+            var options = visibleOptions();
+            if (options.length === 0) {
+                return;
+            }
+
+            openList();
+
+            var active = currentActive();
+            var index = active ? options.indexOf(active) : -1;
+            index = index === -1 ? (delta > 0 ? 0 : options.length - 1) : (index + delta + options.length) % options.length;
+            setActive(options[index]);
+        }
+
+        function selectOption(option) {
+            var i = input();
+            if (i) {
+                i.value = option.getAttribute(nameAttr);
+            }
+
+            closeList();
+            if (i) {
+                i.focus();
+            }
+        }
+
+        // focus/blur don't bubble, so both need the capture phase to
+        // observe them via one delegated listener rather than binding
+        // directly to an input that gets replaced on every swap.
+        modal.addEventListener('focus', function (event) {
+            if (event.target && event.target.id === inputId) {
+                openList();
+            }
+        }, true);
+
+        // Closing here — not just on an "outside click" — is what makes
+        // Tab (not only a mouse click elsewhere) dismiss the list. A
+        // click on a suggestion itself never reaches here: its own
+        // mousedown handler below keeps focus on the input the whole
+        // time, so no blur ever fires for it.
+        modal.addEventListener('blur', function (event) {
+            if (event.target && event.target.id === inputId) {
+                closeList();
+            }
+        }, true);
+
+        modal.addEventListener('input', function (event) {
+            if (!event.target || event.target.id !== inputId) {
+                return;
+            }
+
+            var l = list();
+            if (!l) {
+                return;
+            }
+
+            openList();
+
+            var query = event.target.value.trim().toLowerCase();
+            var visible = 0;
+
+            l.querySelectorAll(optionSelector).forEach(function (option) {
+                var match = option.getAttribute(nameAttr).toLowerCase().indexOf(query) !== -1;
+                option.classList.toggle('hidden', !match);
+                if (match) {
+                    visible++;
+                }
+            });
+
+            // The filtered set just changed under whichever option was
+            // highlighted — re-deriving from scratch on the next arrow
+            // press is simplest, rather than trying to carry a highlight
+            // that may have just been filtered out.
+            setActive(null);
+
+            var empty = l.querySelector(emptySelector);
+            if (empty) {
+                empty.classList.toggle('hidden', visible !== 0);
+            }
+        });
+
+        modal.addEventListener('keydown', function (event) {
+            if (!event.target || event.target.id !== inputId) {
+                return;
+            }
+
+            var l = list();
+            if (!l) {
+                return;
+            }
+
+            switch (event.key) {
+            case 'ArrowDown':
+                event.preventDefault();
+                moveActive(1);
+                break;
+            case 'ArrowUp':
+                event.preventDefault();
+                moveActive(-1);
+                break;
+            case 'Home':
+                if (isOpen(l)) {
+                    event.preventDefault();
+                    var first = visibleOptions()[0];
+                    if (first) {
+                        setActive(first);
+                    }
+                }
+                break;
+            case 'End':
+                if (isOpen(l)) {
+                    event.preventDefault();
+                    var options = visibleOptions();
+                    if (options.length > 0) {
+                        setActive(options[options.length - 1]);
+                    }
+                }
+                break;
+            case 'Enter':
+                var active = currentActive();
+                if (isOpen(l) && active) {
+                    // A highlighted suggestion wins over submitting the
+                    // form with whatever's currently typed.
+                    event.preventDefault();
+                    selectOption(active);
+                }
+                break;
+            case 'Escape':
+                if (isOpen(l)) {
+                    closeList();
+                }
+                break;
+            default:
+                break;
+            }
+        });
+
+        // <dialog> closes itself on Escape by default; while this
+        // combobox's own list is open, the first Escape should only
+        // close *that* (handled by the keydown listener above) — this
+        // intercepts the dialog's own "cancel" event to stop it from
+        // also closing the whole dialog in the same keypress, so a
+        // second Escape is what actually dismisses it.
+        modal.addEventListener('cancel', function (event) {
+            if (isOpen(list())) {
+                event.preventDefault();
+            }
+        });
+
+        // A suggestion's own mousedown is suppressed first — otherwise
+        // the browser would blur this combobox's own input (moving focus
+        // onto the button) before the click ever fires, and the blur
+        // listener above would close the list out from under it. Keeping
+        // focus on the input throughout is also what the WAI-ARIA
+        // combobox pattern itself expects: real DOM focus never actually
+        // leaves it.
+        modal.addEventListener('mousedown', function (event) {
+            if (event.target.closest(optionSelector)) {
+                event.preventDefault();
+            }
+        });
+
+        modal.addEventListener('click', function (event) {
+            var option = event.target.closest(optionSelector);
+            if (option) {
+                selectOption(option);
+            }
+        });
+    }
+
+    initCombobox('rolebinding-add-role-input', 'rolebinding-add-role-list',
+        '[data-role-option]', 'data-role-name', '[data-role-empty]');
+    initCombobox('rolebinding-add-subject-kind-input', 'rolebinding-add-subject-kind-list',
+        '[data-subject-kind-option]', 'data-subject-kind-name', '[data-subject-kind-empty]');
+})();
+</script>
+{{end}}
+
+{{/*
+    rolebinding-add-modal-body is the swappable part of the dialog above —
+    handleRoleBindingAdd/handleClusterRoleBindingAdd's POST response
+    replaces just #rolebinding-add-modal-body's innerHTML with this same
+    template (see Router.renderRoleBindingAddModalBody), so the modal never
+    navigates away from the page underneath.
+*/}}
+{{define "rolebinding-add-modal-body"}}
+{{if .CreatedBinding}}
+{{/* A hidden marker, not a message rendered inline — see role_add_modal.html's
+     identical pattern (and its own doc) for why. */}}
+<div data-toast-prefix="Created {{.RoleBindingKind}} {{.CreatedBinding}}." class="hidden"></div>
+{{else}}
+{{if .BindingError}}
+<div class="mb-4 bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 text-sm text-red-400">
+    {{.BindingError}}
+</div>
+{{end}}
+{{if not .RoleOptions}}
+<p class="text-sm text-neutral-500">
+    No roles exist yet in this scope — add one on the "Roles" tab first, then come back here to bind it to a subject.
+</p>
+{{else}}
+<form hx-post="{{.RoleBindingAddURL}}" hx-target="#rolebinding-add-modal-body" hx-swap="innerHTML" class="space-y-4">
+    <label class="block">
+        <span class="text-xs uppercase tracking-wider text-neutral-500">Name</span>
+        <input type="text" name="name" value="{{.BindingName}}" required placeholder="my-binding"
+               class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+    </label>
+    <!--
+        A searchable combobox, not a plain <select> — same "type to filter,
+        arrow keys plus Enter, or click, to pick" pattern as
+        zone_add_modal.html's own Talos-address field (see this file's own
+        script block, right after </dialog>, for the wiring).
+    -->
+    <label class="block relative">
+        <span class="text-xs uppercase tracking-wider text-neutral-500">Role</span>
+        <input type="text" id="rolebinding-add-role-input" name="role-ref" value="{{.RoleRefName}}" required
+               placeholder="Select a role" autocomplete="off"
+               role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="rolebinding-add-role-list"
+               class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+        <div id="rolebinding-add-role-list" role="listbox" aria-label="Roles"
+             class="hidden absolute left-0 right-0 mt-1 max-h-48 overflow-y-auto bg-neutral-900 border border-neutral-800 rounded-lg shadow-lg z-10">
+            {{range $i, $role := .RoleOptions}}
+            <button type="button" id="rolebinding-add-role-option-{{$i}}" role="option" aria-selected="false" tabindex="-1"
+                    data-role-option data-role-name="{{$role}}"
+                    class="block w-full text-left px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800 hover:text-white transition-colors">
+                {{$role}}
+            </button>
+            {{end}}
+            <p data-role-empty aria-live="polite" class="hidden px-3 py-2 text-xs text-neutral-500">No matching roles.</p>
+        </div>
+    </label>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <label class="block relative">
+            <span class="text-xs uppercase tracking-wider text-neutral-500">Subject kind</span>
+            <input type="text" id="rolebinding-add-subject-kind-input" name="subject-kind"
+                   value="{{if .SubjectKind}}{{.SubjectKind}}{{else}}Group{{end}}" required
+                   placeholder="Select a kind" autocomplete="off"
+                   role="combobox" aria-autocomplete="list" aria-expanded="false"
+                   aria-controls="rolebinding-add-subject-kind-list"
+                   class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+            <div id="rolebinding-add-subject-kind-list" role="listbox" aria-label="Subject kinds"
+                 class="hidden absolute left-0 right-0 mt-1 max-h-48 overflow-y-auto bg-neutral-900 border border-neutral-800 rounded-lg shadow-lg z-10">
+                <button type="button" id="rolebinding-add-subject-kind-option-0" role="option" aria-selected="false" tabindex="-1"
+                        data-subject-kind-option data-subject-kind-name="Group"
+                        class="block w-full text-left px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800 hover:text-white transition-colors">
+                    Group
+                </button>
+                <button type="button" id="rolebinding-add-subject-kind-option-1" role="option" aria-selected="false" tabindex="-1"
+                        data-subject-kind-option data-subject-kind-name="User"
+                        class="block w-full text-left px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800 hover:text-white transition-colors">
+                    User
+                </button>
+                <button type="button" id="rolebinding-add-subject-kind-option-2" role="option" aria-selected="false" tabindex="-1"
+                        data-subject-kind-option data-subject-kind-name="ServiceAccount"
+                        class="block w-full text-left px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-800 hover:text-white transition-colors">
+                    ServiceAccount
+                </button>
+                <p data-subject-kind-empty aria-live="polite" class="hidden px-3 py-2 text-xs text-neutral-500">No matching kinds.</p>
+            </div>
+        </label>
+        <label class="block">
+            <span class="text-xs uppercase tracking-wider text-neutral-500">Subject name</span>
+            <input type="text" name="subject-name" value="{{.SubjectName}}" required placeholder="team-platform"
+                   class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+        </label>
+    </div>
+    <label class="block">
+        <span class="text-xs uppercase tracking-wider text-neutral-500">Subject namespace</span>
+        <input type="text" name="subject-namespace" value="{{if .SubjectNamespace}}{{.SubjectNamespace}}{{else}}{{.Namespace}}{{end}}" placeholder="only used for a ServiceAccount subject"
+               class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+        <span class="mt-1 block text-xs text-neutral-600">Only required when subject kind is ServiceAccount.</span>
+    </label>
+    <div class="flex justify-end pt-2">
+        <!--
+            hx-disabled-elt (see AGENTS.md's UI policy) disables this button
+            for the POST's own round trip — see instance_add_modal.html's
+            identical pattern for why, including the icon-swaps-for-spinner
+            reasoning.
+        -->
+        <button type="submit" hx-disabled-elt="this"
+                class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg bg-accent text-neutral-950 hover:bg-accent/90 disabled:opacity-60 disabled:cursor-not-allowed transition-colors">
+            <span class="[.htmx-request_&]:hidden [&>svg]:h-3.5 [&>svg]:w-3.5">{{template "icon-user-shield"}}</span>
+            <span class="hidden [.htmx-request_&]:inline-flex [&>svg]:h-3.5 [&>svg]:w-3.5 [&>svg]:animate-spin">{{template "icon-loader-circle"}}</span>
+            Add {{.RoleBindingKind}}
+        </button>
+    </div>
+</form>
+{{end}}
+{{end}}
+{{end}}
