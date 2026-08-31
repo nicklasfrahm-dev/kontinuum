@@ -33,7 +33,7 @@ require (
 	github.com/siderolabs/talos/pkg/machinery v1.13.8
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.12.0
-	github.com/testcontainers/testcontainers-go v0.44.0
+	github.com/testcontainers/testcontainers-go v0.43.0
 	go.etcd.io/etcd/api/v3 v3.6.8
 	golang.org/x/mod v0.40.0
 	golang.org/x/oauth2 v0.36.0
@@ -434,7 +434,7 @@ require (
 	go.etcd.io/raft/v3 v3.6.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.60.0 // indirect
-	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.69.0 // indirect
+	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.61.0 // indirect
 	go.opentelemetry.io/otel v1.44.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.43.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.43.0 // indirect
