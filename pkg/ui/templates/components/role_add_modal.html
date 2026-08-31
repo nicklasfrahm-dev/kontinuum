@@ -68,6 +68,44 @@
         }
     });
 
+    // "* (all)" and the named verbs below it (get/list/watch/...) both post
+    // to the same rules[N][verbs] field, so keep them in sync the way a
+    // "select all" checkbox normally behaves: checking/unchecking "*"
+    // checks/unchecks every named verb in that row, checking every named
+    // verb by hand checks "*" too, and unchecking any single named verb
+    // (since the row no longer actually grants *every* verb) unchecks "*".
+    // Delegated on this dialog for the same reason the click listener above
+    // is — rows are cloned or swapped in wholesale after this script runs.
+    dialog.addEventListener('change', function (event) {
+        var checkbox = event.target;
+        if (checkbox.type !== 'checkbox' || !/\[verbs\]$/.test(checkbox.name)) {
+            return;
+        }
+
+        var row = checkbox.closest('[data-rule-row]');
+        var verbCheckboxes = row.querySelectorAll('input[name$="[verbs]"]');
+        var allCheckbox = row.querySelector('input[name$="[verbs]"][value="*"]');
+        var namedCheckboxes = Array.prototype.filter.call(verbCheckboxes, function (cb) {
+            return cb !== allCheckbox;
+        });
+
+        if (checkbox === allCheckbox) {
+            namedCheckboxes.forEach(function (cb) {
+                cb.checked = allCheckbox.checked;
+            });
+            return;
+        }
+
+        if (!checkbox.checked) {
+            allCheckbox.checked = false;
+            return;
+        }
+
+        allCheckbox.checked = namedCheckboxes.every(function (cb) {
+            return cb.checked;
+        });
+    });
+
     // A Role/ClusterRole with zero rules is legal (Kubernetes just grants
     // no permissions) but never what a caller actually meant to submit —
     // hide the last remaining row's own remove button rather than letting
