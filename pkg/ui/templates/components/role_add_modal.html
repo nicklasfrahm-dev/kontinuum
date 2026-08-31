@@ -106,6 +106,33 @@
         });
     });
 
+    // A checked "* (all)" already implies every named verb, so the change
+    // listener above leaves them checked too purely for display — submitting
+    // both would just send a PolicyRule with a redundant ["*", "get", "list",
+    // ...] Verbs list instead of the equivalent, simpler ["*"]. Disabling the
+    // redundant checkboxes right before submit drops them from the
+    // form-encoded body without touching what the user sees (disabled has no
+    // visual style of its own here, and the row is about to be replaced or
+    // reset regardless). This has to run in the capturing phase: htmx's own
+    // submit handling reads the form during the event's "at target" phase, a
+    // bubble-phase listener on this dialog (an ancestor of the form) would
+    // only observe the event *after* htmx already serialized it.
+    dialog.addEventListener('submit', function (event) {
+        var rows = event.target.querySelectorAll('[data-rule-row]');
+        rows.forEach(function (row) {
+            var allCheckbox = row.querySelector('input[name$="[verbs]"][value="*"]');
+            if (!allCheckbox || !allCheckbox.checked) {
+                return;
+            }
+
+            row.querySelectorAll('input[name$="[verbs]"]').forEach(function (cb) {
+                if (cb !== allCheckbox) {
+                    cb.disabled = true;
+                }
+            });
+        });
+    }, true);
+
     // A Role/ClusterRole with zero rules is legal (Kubernetes just grants
     // no permissions) but never what a caller actually meant to submit —
     // hide the last remaining row's own remove button rather than letting
