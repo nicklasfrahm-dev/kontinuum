@@ -4548,8 +4548,15 @@ func newTalosClusterAddonsMux(t *testing.T) *http.ServeMux {
 		Reason: "Installed", LastTransitionTime: metav1.Now(),
 	}}
 
+	// Disabled, but still carrying the Ready condition it had before
+	// someone turned it off — the Reason column must not present that
+	// leftover as the explanation for "Disabled".
 	certManager := addonFixture("cert-manager", testTalosClusterName, 200)
 	certManager.Spec.Enabled = &disabled
+	certManager.Status.Conditions = []metav1.Condition{{
+		Type: testReadyConditionType, Status: metav1.ConditionFalse,
+		Reason: "InstallFailed", LastTransitionTime: metav1.Now(),
+	}}
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
 		return stubKontinuumLister{
@@ -4607,7 +4614,7 @@ func TestHandleTalosClusterDetailRendersAddons(t *testing.T) {
 	assert.Contains(t, string(body), "https://helm.cilium.io/cilium:1.17.1",
 		"the addon's chart, rendered as one repo/name:version string")
 	assert.Contains(t, string(body), "kube-system", "the addon's target namespace")
-	assert.Contains(t, string(body), "Installed", "the Ready condition's own reason")
+	assert.Contains(t, string(body), "Installed", "the Ready condition's own reason, in its own column")
 	assert.NotContains(t, string(body), "other-cluster-addon",
 		"an Addon referencing a different TalosCluster belongs on that cluster's page")
 
@@ -4643,6 +4650,8 @@ func TestHandleTalosClusterDetailRendersDisabledAddon(t *testing.T) {
 	certManager := strings.Index(string(body), "cert-manager")
 	require.NotEqual(t, -1, certManager, "the disabled addon must still be listed")
 	assert.Contains(t, string(body)[certManager:], ">Disabled<")
+	assert.NotContains(t, string(body), "InstallFailed",
+		"a reason left over from before the addon was disabled must not read as the cause of Disabled")
 }
 
 // TestHandleTalosClusterDetailShowsEmptyAddonsState covers a cluster whose
