@@ -96,30 +96,149 @@
             {{template "icon-server"}}
             <h2 class="text-sm font-bold text-white uppercase tracking-wider">Pools</h2>
         </div>
+        <!--
+            One <details> per pool rather than a table row, so each pool can
+            carry its own selector/members body without a table's own
+            column grid getting in the way (see issue #75). Open by default:
+            a TalosCluster has a control plane plus a handful of worker
+            pools at most, so there's nothing to scroll past, and the whole
+            point is seeing why a pool isn't at N/N without an extra click.
+            data-pool is what the collapsed-pool script at the bottom of
+            this file keys off to keep a viewer's own collapse from being
+            undone by the 15s refresh above.
+        -->
+        <div class="divide-y divide-neutral-800">
+            {{range .Pools}}
+            <details open data-pool="{{.Name}}" class="group">
+                <summary class="list-none cursor-pointer px-6 py-3 flex items-center justify-between gap-4 hover:bg-neutral-800/40 transition-colors">
+                    <span class="flex items-center gap-3 min-w-0">
+                        <span class="text-neutral-500 transition-transform group-open:rotate-90">{{template "icon-chevron-right"}}</span>
+                        <span class="text-sm font-medium text-white truncate">{{.Name}}</span>
+                        <span class="text-sm text-neutral-500 truncate">{{.PoolRef}}</span>
+                    </span>
+                    {{if .Found}}
+                    <span class="shrink-0 text-sm text-neutral-400">{{.ReadyReplicas}}/{{.Replicas}}</span>
+                    {{else}}
+                    <span class="shrink-0 inline-flex items-center gap-1.5 bg-neutral-800 border border-neutral-700 rounded-full px-2.5 py-1 text-xs font-medium text-neutral-400">Pending</span>
+                    {{end}}
+                </summary>
+                <div class="px-6 pb-4 space-y-4">
+                    <div>
+                        <h3 class="text-xs font-medium text-neutral-500 uppercase tracking-wider mb-2">Selector</h3>
+                        {{if .Selector}}
+                        <div class="flex flex-wrap gap-1.5">
+                            {{range .Selector}}
+                            <span class="inline-flex items-center bg-neutral-800 border border-neutral-700 rounded-full px-2.5 py-1 text-xs font-medium text-neutral-300">
+                                {{.Key}}<span class="px-1 text-neutral-500">{{.Operator}}</span>{{if .Value}}{{.Value}}{{end}}
+                            </span>
+                            {{end}}
+                        </div>
+                        {{else if .Found}}
+                        <p class="text-sm text-neutral-500">This pool matches on nothing — an empty selector claims no candidates.</p>
+                        {{else}}
+                        <p class="text-sm text-neutral-500">This InstancePool doesn't exist yet.</p>
+                        {{end}}
+                    </div>
+                    <div>
+                        <h3 class="text-xs font-medium text-neutral-500 uppercase tracking-wider mb-2">Claimed instances</h3>
+                        {{if .Members}}
+                        <div class="border border-neutral-800 rounded-lg divide-y divide-neutral-800">
+                            {{range .Members}}
+                            <div class="px-3 py-2 flex items-center justify-between gap-3 flex-wrap">
+                                <a href="/app/kontinuum.sh/v1alpha2/namespaces/{{$.Namespace}}/instances/{{.Name}}"
+                                   class="text-sm font-medium text-white hover:text-accent hover:underline">{{.Name}}</a>
+                                <div class="flex flex-wrap justify-end gap-1.5">
+                                    {{if .Deleting}}
+                                    <span class="inline-flex items-center gap-1.5 bg-amber-900/40 border border-amber-700 rounded-full px-2.5 py-1 text-xs font-medium text-amber-300">Deleting</span>
+                                    {{end}}
+                                    {{range .Conditions}}
+                                    {{if .OK}}
+                                    <span class="inline-flex items-center gap-1.5 bg-green-900/40 border border-green-700 rounded-full px-2.5 py-1 text-xs font-medium text-green-300">{{.Type}}</span>
+                                    {{else}}
+                                    <span class="inline-flex items-center gap-1.5 bg-neutral-800 border border-neutral-700 rounded-full px-2.5 py-1 text-xs font-medium text-neutral-400">{{.Type}}</span>
+                                    {{end}}
+                                    {{else}}
+                                    <span class="text-sm text-neutral-500">No conditions reported yet.</span>
+                                    {{end}}
+                                </div>
+                            </div>
+                            {{end}}
+                        </div>
+                        {{else}}
+                        <p class="text-sm text-neutral-500">No instances claimed yet.</p>
+                        {{end}}
+                    </div>
+                </div>
+            </details>
+            {{end}}
+        </div>
+    </div>
+
+    <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+        <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
+            {{template "icon-package"}}
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider">Addons</h2>
+        </div>
+        {{if .Addons}}
+        <!--
+            Rows are in install order, not alphabetical (see
+            fetchAddonRows) — addons come up in ascending priority waves, so
+            an addon still Pending because the wave above it isn't Ready yet
+            reads directly off the two adjacent rows.
+        -->
         <table class="w-full">
             <thead>
                 <tr class="border-b border-neutral-800">
-                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Role</th>
-                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">InstancePool</th>
-                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Replicas</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Addon</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Chart</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Namespace</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Priority</th>
+                    <th class="px-6 py-2 text-left text-xs font-medium text-neutral-500 uppercase tracking-wider">Status</th>
                 </tr>
             </thead>
             <tbody>
-                {{range .Pools}}
+                {{range .Addons}}
                 <tr class="border-b border-neutral-800 last:border-b-0">
-                    <td class="px-6 py-2 text-sm font-medium text-white">{{.Name}}</td>
-                    <td class="px-6 py-2 text-sm text-neutral-400">{{.PoolRef}}</td>
-                    <td class="px-6 py-2 text-sm text-neutral-400">
-                        {{if .Found}}
-                        {{.ReadyReplicas}}/{{.Replicas}}
-                        {{else}}
-                        <span class="inline-flex items-center gap-1.5 bg-neutral-800 border border-neutral-700 rounded-full px-2.5 py-1 text-xs font-medium text-neutral-400">Pending</span>
-                        {{end}}
+                    <td class="px-6 py-2 text-sm font-medium text-white">{{.ReleaseName}}</td>
+                    <td class="px-6 py-2 text-sm text-neutral-400">{{if .Chart}}{{.Chart}}{{else}}default{{end}}</td>
+                    <td class="px-6 py-2 text-sm text-neutral-400">{{if .TargetNamespace}}{{.TargetNamespace}}{{else}}default{{end}}</td>
+                    <td class="px-6 py-2 text-sm text-neutral-400">{{if .PriorityKnown}}{{.Priority}}{{else}}-{{end}}</td>
+                    <td class="px-6 py-2">
+                        <div class="flex flex-col gap-1">
+                            {{if .Deleting}}
+                            <span class="w-fit inline-flex items-center gap-1.5 bg-amber-900/40 border border-amber-700 rounded-full px-2.5 py-1 text-xs font-medium text-amber-300">Deleting</span>
+                            {{else if not .Enabled}}
+                            <!--
+                                A disabled addon is never going to install,
+                                which isn't the same failure as "not ready
+                                yet" — showing it as a perpetually grey
+                                Ready pill would read as the latter (see
+                                AddonSpec.Enabled's own doc for why someone
+                                disables one: something else, e.g. ArgoCD,
+                                already owns its lifecycle).
+                            -->
+                            <span class="w-fit inline-flex items-center gap-1.5 bg-neutral-800 border border-neutral-700 rounded-full px-2.5 py-1 text-xs font-medium text-neutral-400">Disabled</span>
+                            {{else if .Condition}}
+                            {{if .ConditionOK}}
+                            <span class="w-fit inline-flex items-center gap-1.5 bg-green-900/40 border border-green-700 rounded-full px-2.5 py-1 text-xs font-medium text-green-300">{{.Condition}}</span>
+                            {{else}}
+                            <span class="w-fit inline-flex items-center gap-1.5 bg-neutral-800 border border-neutral-700 rounded-full px-2.5 py-1 text-xs font-medium text-neutral-400">{{.Condition}}</span>
+                            {{end}}
+                            {{else}}
+                            <span class="w-fit inline-flex items-center gap-1.5 bg-neutral-800 border border-neutral-700 rounded-full px-2.5 py-1 text-xs font-medium text-neutral-400">Pending</span>
+                            {{end}}
+                            {{if .Reason}}
+                            <span class="text-xs text-neutral-500">{{.Reason}}</span>
+                            {{end}}
+                        </div>
                     </td>
                 </tr>
                 {{end}}
             </tbody>
         </table>
+        {{else}}
+        <p class="px-6 py-4 text-sm text-neutral-500">No addons yet — this cluster hasn't been seeded with its built-in addons.</p>
+        {{end}}
     </div>
 
     <div class="mt-6 bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
@@ -197,6 +316,50 @@
     </div>
 </dialog>
 
+<!-- Deliberately its own <script> block, not folded into the modal
+     script below: a throw anywhere in that block would take the rest of it
+     with it, and this listener has to be registered for the page's own 15s
+     refresh to stop undoing a viewer's collapse. Outside
+     #taloscluster-content for the same reason the dialog below is — the
+     swap would otherwise re-register these listeners on every poll tick. -->
+<script>
+    // Keep a pool the viewer collapsed collapsed. #taloscluster-content
+    // re-renders itself every 15s with hx-swap="outerHTML" (see the top of
+    // this file), replacing every <details data-pool> with a freshly
+    // server-rendered one — and those always render open, since that's the
+    // right default on a real page load. Without this, collapsing a pool
+    // would silently undo itself on the next poll tick. Deliberately
+    // in-memory only, not sessionStorage: the state only has to outlive an
+    // htmx swap, and a genuine page load going back to "everything
+    // expanded" is the documented default, not a lost preference.
+    //
+    // Snapshot-then-reapply around the swap, rather than tracking 'toggle'
+    // events as they happen: a <details open> inserted by the swap itself
+    // fires a toggle of its own, indistinguishable from the viewer
+    // expanding that pool by hand, which would clear the very state this
+    // is trying to preserve. Reading the DOM immediately before the swap
+    // has no such ambiguity.
+    (function () {
+        var collapsed = new Set();
+
+        document.addEventListener('htmx:beforeSwap', function () {
+            collapsed = new Set();
+
+            document.querySelectorAll('[data-pool]').forEach(function (details) {
+                if (!details.open) {
+                    collapsed.add(details.dataset.pool);
+                }
+            });
+        });
+
+        document.addEventListener('htmx:afterSettle', function () {
+            document.querySelectorAll('[data-pool]').forEach(function (details) {
+                details.open = !collapsed.has(details.dataset.pool);
+            });
+        });
+    })();
+</script>
+
 <script>
     // <dialog> has no built-in "click outside to close" — close only when the
     // click lands on the dialog element itself (the backdrop area), not when
@@ -210,5 +373,6 @@
     });
 
     wireCopyChip(document.getElementById('delete-taloscluster-name-chip'), {{.Name}});
+
 </script>
 {{end}}

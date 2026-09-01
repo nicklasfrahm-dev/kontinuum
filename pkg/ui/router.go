@@ -5,12 +5,14 @@ package ui
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"embed"
 	"errors"
 	"fmt"
 	"html/template"
 	"maps"
+	"math"
 	"net/http"
 	"net/url"
 	"path"
@@ -31,9 +33,11 @@ import (
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/auth"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
+	addondomain "github.com/nicklasfrahm/kontinuum/pkg/domain/addon"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/adminrbac"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/etcdproxy"
 	instancedomain "github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
+	talosclusterdomain "github.com/nicklasfrahm/kontinuum/pkg/domain/taloscluster"
 	zonedomain "github.com/nicklasfrahm/kontinuum/pkg/domain/zone"
 )
 
@@ -184,6 +188,25 @@ func templateDict(pairs ...any) (map[string]any, error) {
 	return dict, nil
 }
 
+// talosClusterPage parses the TalosCluster detail page's own template tree
+// — split out of buildPages purely to keep that function under funlen's
+// line limit, the same reason buildPages itself was split out of NewRouter.
+// It's the page with by far the longest component list: the expandable pool
+// breakdown and the addons table (see issue #75) brought icons of their own
+// on top of an already-large set.
+func talosClusterPage() *template.Template {
+	return mustParsePage("templates/taloscluster_content.html",
+		"templates/components/icon_chevron_left.html", "templates/components/icon_info.html",
+		"templates/components/icon_chevron_right.html", "templates/components/icon_package.html",
+		"templates/components/icon_list_checks.html",
+		"templates/components/icon_key.html", "templates/components/icon_download.html",
+		"templates/components/icon_eye.html", "templates/components/icon_eye_off.html",
+		"templates/components/icon_copy.html", "templates/components/icon_trash.html",
+		"templates/components/icon_loader_circle.html",
+		"templates/components/reveal_panel.html", "templates/components/reveal_panel_script.html",
+		"templates/components/copy_snippet.html", "templates/components/conditions_table.html")
+}
+
 // mustParsePage parses the layout and partials shared by every page, plus
 // the given page-specific content files, into their own template tree —
 // isolated from other pages' template trees, because every content file
@@ -297,15 +320,7 @@ func buildPages() map[string]*template.Template {
 			"templates/components/icon_hard_drive.html", "templates/components/conditions_table.html"),
 		pageTalosClusters: mustParsePage("templates/talosclusters_content.html",
 			"templates/components/icon_trash.html"),
-		pageTalosCluster: mustParsePage("templates/taloscluster_content.html",
-			"templates/components/icon_chevron_left.html", "templates/components/icon_info.html",
-			"templates/components/icon_list_checks.html",
-			"templates/components/icon_key.html", "templates/components/icon_download.html",
-			"templates/components/icon_eye.html", "templates/components/icon_eye_off.html",
-			"templates/components/icon_copy.html", "templates/components/icon_trash.html",
-			"templates/components/icon_loader_circle.html",
-			"templates/components/reveal_panel.html", "templates/components/reveal_panel_script.html",
-			"templates/components/copy_snippet.html", "templates/components/conditions_table.html"),
+		pageTalosCluster: talosClusterPage(),
 		pageZoneDetail: mustParsePage("templates/zone_detail_content.html",
 			"templates/components/icon_chevron_left.html", "templates/components/icon_info.html",
 			"templates/components/icon_kubernetes.html", "templates/components/icon_server.html",
@@ -1114,13 +1129,13 @@ func zoneDetailData(
 		"RegistryJoined":   joined,
 	}
 
-	if cond := conditionOfType(zoneObj.Status.Conditions, "Ready"); cond != nil {
+	if cond := readyCondition(zoneObj.Status.Conditions); cond != nil {
 		data["Ready"] = string(cond.Status)
 		data["ReadyOK"] = cond.Status == metav1.ConditionTrue
 	}
 
 	if hasCluster {
-		if cond := conditionOfType(cluster.Status.Conditions, "Ready"); cond != nil {
+		if cond := readyCondition(cluster.Status.Conditions); cond != nil {
 			data["ClusterReady"] = string(cond.Status)
 			data["ClusterReadyOK"] = cond.Status == metav1.ConditionTrue
 		}
@@ -3002,8 +3017,9 @@ type talosClusterRow struct {
 	Deleting bool
 }
 
-// handleTalosClusters is GET /app/talosclusters's handler — it lists every
-// TalosCluster and renders the list page, following the same "browse/inspect
+// handleTalosClusters is GET
+// /app/kontinuum.sh/v1alpha2/namespaces/{ns}/talosclusters's handler — it
+// lists every TalosCluster in {ns} and renders the list page, following the same "browse/inspect
 // a real object, not a form" precedent as handleIAM (see issue #53's own
 // reference to #38).
 func (r *Router) handleTalosClusters(writer http.ResponseWriter, request *http.Request) {
@@ -3063,13 +3079,15 @@ func (r *Router) handleTalosClusters(writer http.ResponseWriter, request *http.R
 	})
 }
 
-// conditionOfType returns the entry in conditions whose Type matches
-// conditionType, or nil if there is none — used instead of
-// renderRegistry/listZoneRows' own latestCondition where the UI wants one
-// specific, named condition rather than whichever changed most recently.
-func conditionOfType(conditions []metav1.Condition, conditionType string) *metav1.Condition {
+// readyCondition returns the "Ready" entry in conditions, or nil if there
+// is none — used instead of renderRegistry/listZoneRows' own
+// latestCondition where the UI wants that one specific condition rather
+// than whichever changed most recently. Every kontinuum resource the UI
+// pins a badge to (Zone, TalosCluster, Addon) spells it identically, so
+// this hard-codes the type rather than taking it as a parameter.
+func readyCondition(conditions []metav1.Condition) *metav1.Condition {
 	for index := range conditions {
-		if conditions[index].Type == conditionType {
+		if conditions[index].Type == "Ready" {
 			return &conditions[index]
 		}
 	}
@@ -3085,13 +3103,55 @@ func conditionOfType(conditions []metav1.Condition, conditionType string) *metav
 // InstancePool doesn't exist yet (or this viewer's RBAC hides it) — a
 // TalosCluster only ever references a pool by name (see
 // InstancePoolReference's own doc), so that's "not provisioned yet," not a
-// page-load failure.
+// page-load failure. Selector and Members are what the row's own expandable
+// body shows (see issue #75): the matching criteria a candidate Instance has
+// to satisfy to be claimed, and the Instances that already were — the two
+// things "why isn't this pool at N/N ready" actually needs, which otherwise
+// mean leaving the page for kubectl.
 type poolRow struct {
 	Name          string
 	PoolRef       string
 	ReadyReplicas int32
 	Replicas      int32
 	Found         bool
+	Selector      []poolSelectorRow
+	Members       []poolMemberRow
+}
+
+// poolSelectorRow is one matcher from an InstancePool's spec.selector,
+// flattened for display as a single chip. matchLabels entries become
+// Operator "=", matchExpressions keep their own operator lower-cased into
+// the label-selector syntax a reader already knows from kubectl ("in",
+// "notin", "exists", "does not exist") — the two are shown side by side
+// rather than in separate lists, since they're ANDed together into one
+// effective selector anyway. Value is empty for the operators that take no
+// values.
+type poolSelectorRow struct {
+	Key      string
+	Operator string
+	Value    string
+}
+
+// poolMemberRow is one Instance claimed by an InstancePool, rendered inside
+// that pool's expanded body. Deliberately every claimed Instance, not just
+// the Discovered ones pkg/domain/taloscluster's own resolveMembers narrows
+// to: an Instance that was claimed but never discovered is precisely what a
+// pool stuck below its replica count is usually waiting on, so hiding it
+// here would hide the answer.
+type poolMemberRow struct {
+	Name       string
+	Deleting   bool
+	Conditions []poolMemberCondition
+}
+
+// poolMemberCondition is one of a member Instance's status.conditions,
+// rendered as a pill. Only Type and truthiness are kept — the pill's own
+// color carries the status, the same collapsing conditions_table.html
+// already does; a member's reasons and messages stay on its own detail
+// page rather than being inlined into every pool.
+type poolMemberCondition struct {
+	Type string
+	OK   bool
 }
 
 // fetchPoolRow looks up the InstancePool named poolName and summarizes it as
@@ -3100,20 +3160,295 @@ type poolRow struct {
 // the same "not found" rendering rather than failing the whole detail page:
 // kontinuum's RBAC model is all-or-nothing per admin group (see handleIAM's
 // own doc), so a viewer who can already read the TalosCluster itself is
-// never expected to be selectively denied one of its InstancePools.
+// never expected to be selectively denied one of its InstancePools. Members
+// are listed regardless of whether the pool itself was found — an Instance
+// still carrying a claimed-by label for a pool that no longer exists is
+// worth showing, not hiding.
 func fetchPoolRow(ctx context.Context, kontinuums KontinuumClient, namespace, rowName, poolName string) poolRow {
+	row := poolRow{
+		Name: rowName, PoolRef: poolName,
+		Members: listPoolMembers(ctx, kontinuums, namespace, poolName),
+	}
+
 	var pool v1alpha2.InstancePool
 
 	key := client.ObjectKey{Name: poolName, Namespace: namespace}
 
 	err := kontinuums.Get(ctx, key, &pool)
 	if err != nil {
-		return poolRow{Name: rowName, PoolRef: poolName}
+		return row
 	}
 
-	return poolRow{
-		Name: rowName, PoolRef: poolName, Found: true,
-		ReadyReplicas: pool.Status.ReadyReplicas, Replicas: pool.Spec.Replicas,
+	row.Found = true
+	row.ReadyReplicas = pool.Status.ReadyReplicas
+	row.Replicas = pool.Spec.Replicas
+	row.Selector = poolSelectorRows(pool.Spec.Selector)
+
+	return row
+}
+
+// poolSelectorRows flattens selector's matchLabels and matchExpressions into
+// one sorted chip list — see poolSelectorRow's own doc. Sorted by key (then
+// operator, then value) purely so the chips render in a stable order across
+// the page's 15s refresh: matchLabels is a map, which Go iterates in
+// randomized order.
+func poolSelectorRows(selector metav1.LabelSelector) []poolSelectorRow {
+	rows := make([]poolSelectorRow, 0, len(selector.MatchLabels)+len(selector.MatchExpressions))
+
+	for key, value := range selector.MatchLabels {
+		rows = append(rows, poolSelectorRow{Key: key, Operator: "=", Value: value})
+	}
+
+	for _, expr := range selector.MatchExpressions {
+		rows = append(rows, poolSelectorRow{
+			Key:      expr.Key,
+			Operator: selectorOperatorText(expr.Operator),
+			Value:    strings.Join(expr.Values, ", "),
+		})
+	}
+
+	slices.SortFunc(rows, func(left, right poolSelectorRow) int {
+		return cmp.Or(
+			strings.Compare(left.Key, right.Key),
+			strings.Compare(left.Operator, right.Operator),
+			strings.Compare(left.Value, right.Value),
+		)
+	})
+
+	return rows
+}
+
+// selectorOperatorText renders op as the label-selector syntax kubectl
+// itself prints, rather than the Go constant's own CamelCase spelling —
+// "key in (a, b)" is what a reader would type to reproduce the query.
+func selectorOperatorText(operator metav1.LabelSelectorOperator) string {
+	switch operator {
+	case metav1.LabelSelectorOpIn:
+		return "in"
+	case metav1.LabelSelectorOpNotIn:
+		return "notin"
+	case metav1.LabelSelectorOpExists:
+		return "exists"
+	case metav1.LabelSelectorOpDoesNotExist:
+		return "does not exist"
+	default:
+		return string(operator)
+	}
+}
+
+// listPoolMembers lists every Instance in namespace claimed by poolName —
+// the same kontinuum.sh/claimed-by label query
+// pkg/domain/taloscluster's own listClaimedByPool runs (that one is
+// unexported, and takes a full client.Client rather than this package's
+// narrower KontinuumClient, so it can't simply be called). A List failure
+// yields no members rather than failing the whole detail page, for the same
+// reason fetchPoolRow folds its own Get errors away — see that function's
+// own doc.
+func listPoolMembers(
+	ctx context.Context, kontinuums KontinuumClient, namespace, poolName string,
+) []poolMemberRow {
+	var list v1alpha2.InstanceList
+
+	err := kontinuums.List(ctx, &list,
+		client.InNamespace(namespace), client.MatchingLabels{v1alpha2.LabelClaimedBy: poolName})
+	if err != nil {
+		return nil
+	}
+
+	members := make([]poolMemberRow, 0, len(list.Items))
+	for _, item := range list.Items {
+		members = append(members, poolMemberRow{
+			Name:       item.Name,
+			Deleting:   !item.DeletionTimestamp.IsZero(),
+			Conditions: poolMemberConditions(item.Status.Conditions),
+		})
+	}
+
+	sort.Slice(members, func(i, j int) bool { return members[i].Name < members[j].Name })
+
+	return members
+}
+
+// poolMemberConditions renders conditions as pills, sorted into the
+// bootstrap pipeline's own sequence: an Instance is Discovered by
+// pkg/domain/instance, then Configured, then Joined, then Ready as
+// pkg/domain/taloscluster's member reconciler walks it through (see that
+// package's conditions.go), with the non-latching liveness signal last.
+// Kubernetes gives status.conditions no ordering guarantee of its own, so
+// sorting by pipeline stage is what makes the pills read as progress
+// rather than as an arbitrary shuffle. A condition that isn't a known
+// stage sorts after all of them, alphabetically.
+func poolMemberConditions(conditions []metav1.Condition) []poolMemberCondition {
+	stages := []string{
+		instancedomain.DiscoveredConditionType,
+		talosclusterdomain.MemberConfiguredConditionType,
+		talosclusterdomain.MemberJoinedConditionType,
+		talosclusterdomain.MemberReadyConditionType,
+		instancedomain.LiveConditionType,
+	}
+
+	rank := func(conditionType string) int {
+		if index := slices.Index(stages, conditionType); index >= 0 {
+			return index
+		}
+
+		return len(stages)
+	}
+
+	pills := make([]poolMemberCondition, 0, len(conditions))
+	for _, cond := range conditions {
+		pills = append(pills, poolMemberCondition{Type: cond.Type, OK: cond.Status == metav1.ConditionTrue})
+	}
+
+	slices.SortFunc(pills, func(left, right poolMemberCondition) int {
+		return cmp.Or(
+			cmp.Compare(rank(left.Type), rank(right.Type)),
+			strings.Compare(left.Type, right.Type),
+		)
+	})
+
+	return pills
+}
+
+// addonRow is one Addon belonging to the TalosCluster whose detail page this
+// is (see issue #75) — pkg/domain/addon seeds, installs and health-probes
+// these per cluster, and the cluster's own AddonsHealthy condition
+// aggregates over them, but until now none of them had any UI at all, so
+// "which addon is holding AddonsHealthy back" meant kubectl. ReleaseName,
+// Chart and Priority are the *effective* values (see addonRowFrom), not the
+// raw spec fields: an Addon that sets none of them is still installed as
+// something, and that something is what the page has to show.
+type addonRow struct {
+	Name            string
+	ReleaseName     string
+	TargetNamespace string
+	Chart           string
+	Priority        int32
+	// PriorityKnown is false when this addon's effective priority couldn't
+	// be resolved at all — see addonRowFrom, which folds
+	// addon.EffectivePriority's own error into "unknown" rather than
+	// failing the page over a display-only field.
+	PriorityKnown bool
+	Enabled       bool
+	// Condition/ConditionOK/Reason are the addon's own Ready condition (see
+	// pkg/domain/addon's setReady, the only condition it ever writes), not
+	// latestCondition's most-recently-transitioned pick the list pages use
+	// — with exactly one condition type in play there's nothing to choose
+	// between, and pinning to Ready keeps an empty Condition meaning
+	// "hasn't been reconciled yet" (rendered as Pending).
+	Condition   string
+	ConditionOK bool
+	Reason      string
+	Deleting    bool
+}
+
+// fetchAddonRows lists every Addon in namespace belonging to clusterName —
+// the same list-then-filter-on-spec.talosClusterRef.name that
+// pkg/domain/addon.ListForCluster does (that one takes a full
+// client.Client, not this package's narrower KontinuumClient, so it can't
+// simply be called; see its own doc for why the filter is client-side
+// rather than a field index). A List failure yields no rows rather than
+// failing the whole detail page, for the same reason fetchPoolRow folds its
+// own Get errors away.
+func fetchAddonRows(ctx context.Context, kontinuums KontinuumClient, namespace, clusterName string) []addonRow {
+	var list v1alpha2.AddonList
+
+	err := kontinuums.List(ctx, &list, client.InNamespace(namespace))
+	if err != nil {
+		return nil
+	}
+
+	rows := make([]addonRow, 0, len(list.Items))
+
+	for index := range list.Items {
+		if list.Items[index].Spec.TalosClusterRef.Name != clusterName {
+			continue
+		}
+
+		rows = append(rows, addonRowFrom(&list.Items[index]))
+	}
+
+	// Install order, not alphabetical: addons install in ascending priority
+	// waves (see AddonLifecycleSpec.Priority), so reading the table top to
+	// bottom is reading the order they actually come up in — which is what
+	// makes "this one is still Pending because the wave above it isn't
+	// Ready yet" legible without a second lookup.
+	slices.SortFunc(rows, func(left, right addonRow) int {
+		return cmp.Or(
+			cmp.Compare(addonPrioritySortKey(left), addonPrioritySortKey(right)),
+			strings.Compare(left.ReleaseName, right.ReleaseName),
+		)
+	})
+
+	return rows
+}
+
+// addonPrioritySortKey sorts an addon whose effective priority couldn't be
+// resolved at all (see addonRow.PriorityKnown) after every addon whose
+// could — it has no known place in the install order to be shown at.
+func addonPrioritySortKey(row addonRow) int64 {
+	if !row.PriorityKnown {
+		return math.MaxInt64
+	}
+
+	return int64(row.Priority)
+}
+
+// addonRowFrom builds one Addons-table row from item.
+func addonRowFrom(item *v1alpha2.Addon) addonRow {
+	row := addonRow{
+		Name:            item.Name,
+		ReleaseName:     addondomain.ReleaseName(item),
+		TargetNamespace: item.Spec.Namespace.Name,
+		Chart:           addonChartText(item.Spec.Chart),
+		Enabled:         addondomain.Enabled(item.Spec),
+		Deleting:        !item.DeletionTimestamp.IsZero(),
+	}
+
+	priority, err := addondomain.EffectivePriority(item)
+	if err == nil {
+		row.Priority, row.PriorityKnown = priority, true
+	}
+
+	if cond := readyCondition(item.Status.Conditions); cond != nil {
+		row.Condition = cond.Type
+		row.ConditionOK = cond.Status == metav1.ConditionTrue
+		row.Reason = cond.Reason
+	}
+
+	return row
+}
+
+// addonChartText renders chart as the single "<repo>/<name>:<version>"
+// string a reader would recognize from a Helm command line. Empty when
+// spec.chart is unset entirely: the built-in addons' chart identity lives
+// in pkg/domain/addon's own embedded defaults (see AddonChartSpec's doc),
+// which this read-only page deliberately doesn't resolve — those defaults
+// only apply to a built-in ReleaseName, and rendering them would show a
+// chart the viewer never wrote and can't find anywhere on the object.
+func addonChartText(chart *v1alpha2.AddonChartSpec) string {
+	if chart == nil {
+		return ""
+	}
+
+	var text string
+
+	switch {
+	case chart.Repo != "" && chart.Name != "":
+		text = chart.Repo + "/" + chart.Name
+	case chart.Name != "":
+		text = chart.Name
+	default:
+		text = chart.Repo
+	}
+
+	switch {
+	case chart.Version == "":
+		return text
+	case text == "":
+		return chart.Version
+	default:
+		return text + ":" + chart.Version
 	}
 }
 
@@ -3242,6 +3577,11 @@ func (r *Router) fetchTalosCluster(
 // fetchOwningZone/fetchTalosClusterKubeconfig) — factored out of
 // handleTalosClusterDetail purely to keep that function short, mirroring
 // kontinuumDetailData's identical role for the Kontinuum detail page.
+// The pool breakdown and the addons table are both built here rather than
+// by the handler: each fans out into its own extra API reads (one Get per
+// referenced InstancePool plus a claimed-by List per pool, and one Addon
+// List for the cluster — see fetchPoolRow/fetchAddonRows), none of which
+// can fail the page.
 // revealed is handleTalosClusterDetail's own ?reveal=true query parameter,
 // passed straight through as KubeconfigRevealed — see
 // taloscluster_content.html's own reveal-panel/reveal-panel-script calls
@@ -3280,6 +3620,7 @@ func talosClusterDetailData(
 		"KubernetesVersion":  cluster.Spec.Kubernetes.Version,
 		dataKeyAge:           formatAge(cluster.CreationTimestamp.Time),
 		"Pools":              pools,
+		"Addons":             fetchAddonRows(ctx, kontinuums, cluster.Namespace, cluster.Name),
 		dataKeyConditions:    conditions,
 		dataKeyDeleting:      !cluster.DeletionTimestamp.IsZero(),
 		"KubeconfigReady":    len(kubeconfig) > 0,
@@ -3291,7 +3632,7 @@ func talosClusterDetailData(
 		"Labels":             sortedLabels(cluster.Labels),
 	}
 
-	if readyCond := conditionOfType(cluster.Status.Conditions, "Ready"); readyCond != nil {
+	if readyCond := readyCondition(cluster.Status.Conditions); readyCond != nil {
 		data["Ready"] = string(readyCond.Status)
 		data["ReadyOK"] = readyCond.Status == metav1.ConditionTrue
 	}
@@ -3299,10 +3640,13 @@ func talosClusterDetailData(
 	return data
 }
 
-// handleTalosClusterDetail is GET /app/talosclusters/{name}'s handler — one
-// TalosCluster's control-plane/worker pool breakdown, versions, full
-// condition list, and (see fetchTalosClusterKubeconfig) whether a
-// kubeconfig is available to download, without ever fetching or rendering
+// handleTalosClusterDetail is GET
+// /app/kontinuum.sh/v1alpha2/namespaces/{ns}/talosclusters/{name}'s handler
+// — one TalosCluster's control-plane/worker pool breakdown (each pool
+// expandable to its own selector and claimed member Instances, see
+// poolRow), its addons (see addonRow), versions, full condition list, and
+// (see fetchTalosClusterKubeconfig) whether a kubeconfig is available to
+// download, without ever fetching or rendering
 // that kubeconfig's own contents into the page — see
 // handleTalosClusterKubeconfigDownload for the actual download. An
 // optional ?reveal=true query parameter (see talosClusterDetailData's own
@@ -3343,7 +3687,8 @@ func (r *Router) handleTalosClusterDetail(writer http.ResponseWriter, request *h
 }
 
 // handleTalosClusterKubeconfigDownload is GET
-// /app/talosclusters/{name}/kubeconfig's handler — it streams the cluster's
+// /app/kontinuum.sh/v1alpha2/namespaces/{ns}/talosclusters/{name}/kubeconfig's
+// handler — it streams the cluster's
 // kubeconfig (see fetchTalosClusterKubeconfig) straight to the response,
 // serving two different callers from taloscluster_content.html: the
 // `<a download>` link (browser save-as-file, via Content-Disposition below)
