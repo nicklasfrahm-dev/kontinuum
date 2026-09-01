@@ -17,6 +17,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -86,6 +87,15 @@ const testExampleDomain = "example.com"
 // copy rather than importing either domain package just for this one
 // string, same rationale as this file's other test-only literal constants.
 const testReadyConditionType = "Ready"
+
+// testDiscoveredConditionType mirrors instance.DiscoveredConditionType's
+// own literal, and testControlPlaneRole the claimed-by/role fixture value
+// the instance and cluster tests below share — both kept as local copies
+// for the same reason testReadyConditionType is.
+const (
+	testDiscoveredConditionType = "Discovered"
+	testControlPlaneRole        = "control-plane"
+)
 
 // zoneAddFormRegionKey/zoneAddFormZoneKey/zoneAddFormTalosAddressKey are the
 // "Add zone" form's own field names (see zone_add_modal.html), reused across
@@ -223,6 +233,11 @@ type stubKontinuumLister struct {
 	// pools backs Get calls for a *v1alpha2.InstancePool — used by
 	// handleTalosClusterDetail's pool breakdown (see fetchPoolRow).
 	pools []v1alpha2.InstancePool
+	// addons backs List calls for a *v1alpha2.AddonList — used by
+	// handleTalosClusterDetail's addons table (see fetchAddonRows).
+	// addonErr, when set, is returned by List instead.
+	addons   []v1alpha2.Addon
+	addonErr error
 	// roles/roleBindings/clusterRoles back List calls for the IAM roles
 	// pages (see handleIAMNamespaceRoles/handleIAMNamespaceRoleBindings/
 	// handleIAMClusterRoles). listErr, reused from the
@@ -279,7 +294,7 @@ func (s stubKontinuumLister) Get(
 	}
 }
 
-func (s stubKontinuumLister) List(_ context.Context, list client.ObjectList, _ ...client.ListOption) error {
+func (s stubKontinuumLister) List(_ context.Context, list client.ObjectList, opts ...client.ListOption) error {
 	switch target := list.(type) {
 	case *v1alpha2.KontinuumList:
 		if s.err != nil {
@@ -292,18 +307,52 @@ func (s stubKontinuumLister) List(_ context.Context, list client.ObjectList, _ .
 			return s.instanceErr
 		}
 
-		target.Items = s.instances
+		target.Items = matchingInstances(s.instances, opts)
 	case *v1alpha2.TalosClusterList:
 		if s.talosClustersErr != nil {
 			return s.talosClustersErr
 		}
 
 		target.Items = s.talosClusters
+	case *v1alpha2.AddonList:
+		if s.addonErr != nil {
+			return s.addonErr
+		}
+
+		target.Items = s.addons
 	default:
 		return s.listRBAC(list)
 	}
 
 	return nil
+}
+
+// matchingInstances applies opts' own label selector to instances, so a
+// test exercising handleTalosClusterDetail's per-pool claimed-by List (see
+// listPoolMembers) actually gets that pool's members rather than every
+// Instance the stub holds — the only ListOption any caller of this stub
+// narrows an Instance list with. Options that aren't a label selector
+// (e.g. client.InNamespace) are ignored: this stub's items are already
+// scoped to whatever namespace the test is exercising.
+func matchingInstances(instances []v1alpha2.Instance, opts []client.ListOption) []v1alpha2.Instance {
+	listOpts := &client.ListOptions{}
+	for _, opt := range opts {
+		opt.ApplyToList(listOpts)
+	}
+
+	if listOpts.LabelSelector == nil {
+		return instances
+	}
+
+	matched := make([]v1alpha2.Instance, 0, len(instances))
+
+	for _, item := range instances {
+		if listOpts.LabelSelector.Matches(labels.Set(item.Labels)) {
+			matched = append(matched, item)
+		}
+	}
+
+	return matched
 }
 
 func (s stubKontinuumLister) Delete(_ context.Context, _ client.Object, _ ...client.DeleteOption) error {
@@ -3579,8 +3628,8 @@ func discoveredInstance(name, talosVersion string) v1alpha2.Instance {
 			SerialNumber: "SN-1234567890",
 			Conditions: []metav1.Condition{
 				{
-					Type: "Discovered", Status: metav1.ConditionTrue,
-					Reason: "Discovered", Message: "discovered via 10.0.0.5",
+					Type: testDiscoveredConditionType, Status: metav1.ConditionTrue,
+					Reason: testDiscoveredConditionType, Message: "discovered via 10.0.0.5",
 				},
 			},
 		},
@@ -3593,7 +3642,7 @@ func TestHandleMachinesRendersInstances(t *testing.T) {
 	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
 
 	claimed := discoveredInstance("node-a", "v1.9.0")
-	claimed.Labels = map[string]string{v1alpha2.LabelClaimedBy: "control-plane"}
+	claimed.Labels = map[string]string{v1alpha2.LabelClaimedBy: testControlPlaneRole}
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
 		return stubKontinuumLister{instances: []v1alpha2.Instance{
@@ -3620,7 +3669,7 @@ func TestHandleMachinesRendersInstances(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, string(body), "node-a")
 	assert.Contains(t, string(body), "v1.9.0")
-	assert.Contains(t, string(body), "control-plane")
+	assert.Contains(t, string(body), testControlPlaneRole)
 	assert.Contains(t, string(body), "node-b")
 	assert.Contains(t, string(body), "Unclaimed")
 }
@@ -3655,9 +3704,9 @@ func deletingInstanceMux(t *testing.T) *http.ServeMux {
 }
 
 // assertRendersDeletingNotDiscovered asserts body renders the amber
-// "Deleting" badge instead of a green "Discovered" one in that same
+// "Deleting" badge instead of a green testDiscoveredConditionType one in that same
 // title/list-row spot — shared by the Instance list/detail "Deleting"
-// tests below. wantConditionPill is how many *other* green "Discovered"
+// tests below. wantConditionPill is how many *other* green testDiscoveredConditionType
 // pills body is still allowed to carry: the detail page's own conditions
 // table (see "conditions-table") always shows the raw, unfiltered
 // status.conditions list — same as the TalosCluster detail page's own
@@ -3677,7 +3726,7 @@ func assertRendersDeletingNotDiscovered(t *testing.T, body string, wantCondition
 // an Instance mid-reset (InstanceResetFinalizer still resetting it back to
 // maintenance mode): its own Discovered=True condition is left over from
 // before deletion started — the row must show "Deleting" instead of
-// "Discovered".
+// testDiscoveredConditionType.
 func TestHandleMachinesRendersDeletingForInstanceWithDeletionTimestamp(t *testing.T) {
 	t.Parallel()
 
@@ -3764,7 +3813,7 @@ func TestHandleMachineDetailRendersInstance(t *testing.T) {
 	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
 
 	claimed := discoveredInstance("node-a", "v1.9.0")
-	claimed.Labels = map[string]string{v1alpha2.LabelClaimedBy: "control-plane", "kontinuum.sh/zone": "zone-a"}
+	claimed.Labels = map[string]string{v1alpha2.LabelClaimedBy: testControlPlaneRole, "kontinuum.sh/zone": "zone-a"}
 
 	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
 		return stubKontinuumLister{instances: []v1alpha2.Instance{claimed}}, nil
@@ -3791,7 +3840,7 @@ func TestHandleMachineDetailRendersInstance(t *testing.T) {
 	assert.Contains(t, string(body), "eth0")
 	assert.Contains(t, string(body), "aa:bb:cc:dd:ee:ff")
 	assert.Contains(t, string(body), "10.0.0.5/24")
-	assert.Contains(t, string(body), "control-plane")
+	assert.Contains(t, string(body), testControlPlaneRole)
 	assert.Contains(t, string(body), "Discovered via 10.0.0.5")
 	assert.Contains(t, string(body), "kontinuum.sh/zone")
 	assert.Contains(t, string(body), "zone-a")
@@ -4298,6 +4347,332 @@ func TestHandleTalosClusterDetailRendersOverviewPoolsAndConditions(t *testing.T)
 	assert.Regexp(t, `id="taloscluster-kubeconfig-masked"\s+class="relative`, string(body),
 		"the masked panel starts visible when the page loads without ?reveal=true")
 	assert.Regexp(t, `id="taloscluster-kubeconfig-content"\s+class="hidden relative`, string(body))
+}
+
+// newTalosClusterPoolDetailMux builds a router+mux serving the same
+// "eu-eu-1a" TalosCluster as newTalosClusterKubeconfigMux, but with its
+// control-plane InstancePool carrying a real selector and two claimed
+// member Instances, plus a third Instance claimed by an unrelated pool —
+// the fixture the expandable-pool tests below (issue #75) need. Kept
+// separate from newTalosClusterKubeconfigMux so the reveal-panel tests
+// sharing that one keep asserting against an unchanged page.
+func newTalosClusterPoolDetailMux(t *testing.T) *http.ServeMux {
+	t.Helper()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	controlPlanePool := v1alpha2.InstancePool{
+		ObjectMeta: metav1.ObjectMeta{Name: testTalosClusterName},
+		Spec: v1alpha2.InstancePoolSpec{
+			Replicas: 2,
+			Selector: metav1.LabelSelector{
+				MatchLabels: map[string]string{"kontinuum.sh/role": testControlPlaneRole},
+				MatchExpressions: []metav1.LabelSelectorRequirement{{
+					Key:      "kontinuum.sh/zone",
+					Operator: metav1.LabelSelectorOpIn,
+					Values:   []string{"eu-1a", "eu-1b"},
+				}},
+			},
+		},
+		Status: v1alpha2.InstancePoolStatus{ReadyReplicas: 1},
+	}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{
+			talosClusters: []v1alpha2.TalosCluster{talosClusterFixture(metav1.ConditionTrue)},
+			pools:         []v1alpha2.InstancePool{controlPlanePool},
+			instances: []v1alpha2.Instance{
+				claimedInstanceFixture("node-a", testTalosClusterName, metav1.ConditionTrue),
+				claimedInstanceFixture("node-b", testTalosClusterName, metav1.ConditionFalse),
+				claimedInstanceFixture("unrelated-node", "some-other-pool", metav1.ConditionTrue),
+			},
+		}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	return mux
+}
+
+// claimedInstanceFixture is one Instance claimed by poolName. Its
+// conditions are deliberately stored out of bootstrap-pipeline order
+// (Joined, then Discovered, then Configured) — Kubernetes gives
+// status.conditions no ordering guarantee, so a handler that rendered them
+// in storage order would otherwise satisfy the ordering assertions below
+// by accident.
+// joined is the Joined condition's own status, so a test can hold one
+// member back mid-pipeline.
+func claimedInstanceFixture(name, poolName string, joined metav1.ConditionStatus) v1alpha2.Instance {
+	return v1alpha2.Instance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: v1alpha2.KontinuumSystemNamespace,
+			Labels:    map[string]string{v1alpha2.LabelClaimedBy: poolName},
+		},
+		Status: v1alpha2.InstanceStatus{Conditions: []metav1.Condition{
+			{Type: "Joined", Status: joined, Reason: "Joined", LastTransitionTime: metav1.Now()},
+			{
+				Type: testDiscoveredConditionType, Status: metav1.ConditionTrue,
+				Reason: "Reachable", LastTransitionTime: metav1.Now(),
+			},
+			{
+				Type: "Configured", Status: metav1.ConditionTrue,
+				Reason: "ConfigApplied", LastTransitionTime: metav1.Now(),
+			},
+		}},
+	}
+}
+
+// TestHandleTalosClusterDetailExpandsPoolsWithSelectorAndMembers covers
+// issue #75: each pool renders as a <details> that's open by default and
+// carries the pool's own spec.selector plus every Instance claimed by it,
+// so "why isn't this pool at 2/2" is answerable without leaving the page
+// for kubectl.
+func TestHandleTalosClusterDetailExpandsPoolsWithSelectorAndMembers(t *testing.T) {
+	t.Parallel()
+
+	mux := newTalosClusterPoolDetailMux(t)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	assert.Contains(t, string(body), `<details open data-pool="Control plane"`,
+		"pools expand by default — a cluster has few enough of them that hiding this behind a click is pure friction")
+	assert.Contains(t, string(body), `kontinuum.sh/role<span class="px-1 text-neutral-500">=</span>control-plane`,
+		"the pool's matchLabels selector")
+	assert.Contains(t, string(body), `kontinuum.sh/zone<span class="px-1 text-neutral-500">in</span>eu-1a, eu-1b`,
+		"the pool's matchExpressions selector, in the label-selector syntax kubectl itself prints")
+	assert.Contains(t, string(body),
+		`href="/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/instances/node-a"`,
+		"each claimed member links to its own instance detail page")
+	assert.Contains(t, string(body), "node-b")
+	assert.Contains(t, string(body), "No instances claimed yet.",
+		"the worker pool has no claimed instances of its own")
+}
+
+// TestHandleTalosClusterDetailSortsPoolMemberConditionsByPipelineStage
+// covers the member condition pills reading as bootstrap progress
+// (Discovered, then Configured, then Joined) rather than in whatever order
+// status.conditions happens to store them — see claimedInstanceFixture,
+// whose own fixture order is deliberately the reverse.
+func TestHandleTalosClusterDetailSortsPoolMemberConditionsByPipelineStage(t *testing.T) {
+	t.Parallel()
+
+	mux := newTalosClusterPoolDetailMux(t)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	memberStart := strings.Index(string(body), "instances/node-a")
+	require.NotEqual(t, -1, memberStart, "node-a must be rendered")
+
+	member := string(body)[memberStart:]
+	discovered := strings.Index(member, ">Discovered<")
+	configured := strings.Index(member, ">Configured<")
+	joined := strings.Index(member, ">Joined<")
+
+	require.NotEqual(t, -1, discovered)
+	require.NotEqual(t, -1, configured)
+	require.NotEqual(t, -1, joined)
+	assert.Less(t, discovered, configured, "Discovered comes before Configured in the bootstrap pipeline")
+	assert.Less(t, configured, joined, "Configured comes before Joined in the bootstrap pipeline")
+}
+
+// TestHandleTalosClusterDetailScopesPoolMembersToTheirOwnPool covers the
+// claimed-by narrowing: an Instance claimed by a different InstancePool
+// must not show up under this cluster's pools, even though it lives in the
+// same namespace.
+func TestHandleTalosClusterDetailScopesPoolMembersToTheirOwnPool(t *testing.T) {
+	t.Parallel()
+
+	mux := newTalosClusterPoolDetailMux(t)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.NotContains(t, string(body), "unrelated-node",
+		"an Instance claimed by another pool belongs to that pool's page, not this one")
+}
+
+// newTalosClusterAddonsMux builds a router+mux serving the "eu-eu-1a"
+// TalosCluster alongside three Addons: two of its own (at different
+// install priorities, one of them disabled) and one belonging to a
+// different cluster entirely, so the filtering and the install-order sort
+// are both exercised.
+func newTalosClusterAddonsMux(t *testing.T) *http.ServeMux {
+	t.Helper()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+
+	disabled := false
+	crds := addonFixture("gateway-api-crds", testTalosClusterName, 50)
+	cilium := addonFixture("cilium", testTalosClusterName, 100)
+	cilium.Spec.Chart = &v1alpha2.AddonChartSpec{
+		Repo: "https://helm.cilium.io", Name: "cilium", Version: "1.17.1",
+	}
+	cilium.Spec.Namespace = v1alpha2.AddonNamespaceSpec{Name: "kube-system"}
+	cilium.Status.Conditions = []metav1.Condition{{
+		Type: testReadyConditionType, Status: metav1.ConditionTrue,
+		Reason: "Installed", LastTransitionTime: metav1.Now(),
+	}}
+
+	// Disabled, but still carrying the Ready condition it had before
+	// someone turned it off — the Reason column must not present that
+	// leftover as the explanation for "Disabled".
+	certManager := addonFixture("cert-manager", testTalosClusterName, 200)
+	certManager.Spec.Enabled = &disabled
+	certManager.Status.Conditions = []metav1.Condition{{
+		Type: testReadyConditionType, Status: metav1.ConditionFalse,
+		Reason: "InstallFailed", LastTransitionTime: metav1.Now(),
+	}}
+
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) {
+		return stubKontinuumLister{
+			talosClusters: []v1alpha2.TalosCluster{talosClusterFixture(metav1.ConditionTrue)},
+			addons: []v1alpha2.Addon{
+				cilium, certManager, crds, addonFixture("other-cluster-addon", "some-other-cluster", 100),
+			},
+		}, nil
+	}
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	return mux
+}
+
+// addonFixture is one Addon belonging to clusterName at an explicit
+// install priority — explicit so the ordering assertions don't depend on
+// pkg/domain/addon's own embedded per-built-in defaults.
+func addonFixture(name, clusterName string, priority int32) v1alpha2.Addon {
+	return v1alpha2.Addon{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace},
+		Spec: v1alpha2.AddonSpec{
+			TalosClusterRef: v1alpha2.TalosClusterReference{Name: clusterName},
+			Lifecycle:       v1alpha2.AddonLifecycleSpec{Priority: &priority},
+		},
+	}
+}
+
+// TestHandleTalosClusterDetailRendersAddons covers issue #75's second half:
+// the cluster's own Addons get a table of their own, in install-priority
+// order, so "which addon is holding AddonsHealthy back" stops being a
+// kubectl-only question.
+func TestHandleTalosClusterDetailRendersAddons(t *testing.T) {
+	t.Parallel()
+
+	mux := newTalosClusterAddonsMux(t)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	assert.Contains(t, string(body), "Addons")
+	assert.Contains(t, string(body), "https://helm.cilium.io/cilium:1.17.1",
+		"the addon's chart, rendered as one repo/name:version string")
+	assert.Contains(t, string(body), "kube-system", "the addon's target namespace")
+	assert.Contains(t, string(body), "Installed", "the Ready condition's own reason, in its own column")
+	assert.NotContains(t, string(body), "other-cluster-addon",
+		"an Addon referencing a different TalosCluster belongs on that cluster's page")
+
+	crds := strings.Index(string(body), "gateway-api-crds")
+	cilium := strings.Index(string(body), ">cilium<")
+
+	require.NotEqual(t, -1, crds)
+	require.NotEqual(t, -1, cilium)
+	assert.Less(t, crds, cilium,
+		"addons render in install-priority order — the lower-priority wave installs first")
+}
+
+// TestHandleTalosClusterDetailRendersDisabledAddon covers a
+// spec.enabled: false addon: it is never going to install, which isn't the
+// same thing as "not ready yet", so it must not render as a grey Ready
+// pill.
+func TestHandleTalosClusterDetailRendersDisabledAddon(t *testing.T) {
+	t.Parallel()
+
+	mux := newTalosClusterAddonsMux(t)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	certManager := strings.Index(string(body), "cert-manager")
+	require.NotEqual(t, -1, certManager, "the disabled addon must still be listed")
+	assert.Contains(t, string(body)[certManager:], ">Disabled<")
+	assert.NotContains(t, string(body), "InstallFailed",
+		"a reason left over from before the addon was disabled must not read as the cause of Disabled")
+}
+
+// TestHandleTalosClusterDetailShowsEmptyAddonsState covers a cluster whose
+// built-in addons haven't been seeded yet — the card renders its own empty
+// state rather than a headerless table.
+func TestHandleTalosClusterDetailShowsEmptyAddonsState(t *testing.T) {
+	t.Parallel()
+
+	mux := newTalosClusterKubeconfigMux(t)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "No addons yet")
 }
 
 // TestHandleTalosClusterDetailSortsConditionsNewestFirst covers issue #98:

@@ -64,45 +64,67 @@ needs no action.
 **Never manually restart the server just because you see it rebuild.** Only
 these two cases call for action:
 
-- **Port 8080 stops responding and stays down** — restart immediately,
-  without asking for confirmation (see step 4).
+- **Port 8080 stops responding and stays down** past a rebuild's own
+  window — restart without asking for confirmation (see step 4 for how long
+  to wait, and for why a failing compile is not this case).
 - **Anything else** (compile errors, postgres/proxy issues, the user wants a
   restart after editing `.env` or `compose.yaml`, which air doesn't watch) —
   explain what's wrong and ask before restarting.
 
 ## 4. Auto-restart only on a real port-8080 outage
 
-A rebuild briefly drops the port for a couple of seconds — that's not an
-outage. Only treat it as down if `/healthz` keeps failing well past a normal
-rebuild:
+A rebuild drops the port briefly — that's not an outage. Measured on this
+project, a warm `air` rebuild is down for about **1 second** (~6s from edit
+to healthy), but a cold-cache rebuild — after a dependency bump, a wiped
+build cache, or heavy parallel `go build`/`go test` on the host — runs well
+past ten. A threshold near the warm case restarts the server in the middle
+of a perfectly healthy rebuild, which is worse than waiting: it throws away
+the in-progress build and starts over.
+
+So treat it as down only after **90 seconds** of sustained failure. A real
+outage (crash loop, panic on boot) never recovers on its own, so waiting
+longer costs nothing, while a false restart actively interrupts work.
+
+A failing *compile* also holds the port down indefinitely, and restarting
+the container rebuilds exactly the same broken code — check the logs before
+restarting, and report a build error rather than looping on it (this is the
+"compile errors → explain, don't restart" case from step 3):
 
 ```bash
 fails=0
 while true; do
-  if curl -sf http://localhost:8080/healthz >/dev/null; then
+  if curl -sf http://localhost:8080/healthz >/dev/null 2>&1; then
     fails=0
   else
     fails=$((fails + 1))
-    if [ "$fails" -ge 10 ]; then  # ~10s of sustained failure
-      break
+    # -eq, not -ge: fire once per outage rather than every second it stays down.
+    if [ "$fails" -eq 90 ]; then
+      errs=$(docker compose --profile dev logs --tail 40 kontinuum-dev 2>/dev/null \
+        | grep -iE "\.go:[0-9]+:[0-9]+:|undefined:|syntax error|build failed" | tail -3)
+      if [ -n "$errs" ]; then
+        echo "port 8080 down 90s — build is failing, not restarting:"
+        echo "$errs"
+      else
+        echo "port 8080 down 90s with no build error — restarting kontinuum-dev"
+        docker compose --profile dev restart kontinuum-dev >/dev/null 2>&1 || echo "restart failed"
+        until curl -sf http://localhost:8080/healthz >/dev/null 2>&1; do sleep 2; done
+        echo "kontinuum-dev restarted; /healthz answering again"
+        fails=0
+      fi
     fi
   fi
   sleep 1
 done
 ```
 
-When that fires, restart just the affected service (leave postgres/proxy
-running) and re-verify health, with no confirmation prompt:
+Only `kontinuum-dev` is restarted — postgres and proxy keep running.
 
-```bash
-docker compose --profile dev restart kontinuum-dev
-until curl -sf http://localhost:8080/healthz >/dev/null; do sleep 1; done
-```
-
-Tell the user afterward that it dropped off port 8080 and was restarted.
+Tell the user afterward that it dropped off port 8080 and was restarted, or
+— for a build failure — what the compiler said, so they can fix it rather
+than watch it retry.
 
 Use the Monitor tool for this watch loop (persistent, one notification per
-restart) rather than blocking the conversation on it.
+event) rather than blocking the conversation on it.
 
 ## Stopping
 
