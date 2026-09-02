@@ -18,9 +18,17 @@ import (
 	"math/big"
 	"net"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
+	cosiv1alpha1 "github.com/cosi-project/runtime/api/v1alpha1"
+	"github.com/cosi-project/runtime/pkg/resource"
+	"github.com/cosi-project/runtime/pkg/state"
+	"github.com/cosi-project/runtime/pkg/state/impl/inmem"
+	"github.com/cosi-project/runtime/pkg/state/impl/namespaced"
+	cosiserver "github.com/cosi-project/runtime/pkg/state/protobuf/server"
+	"github.com/siderolabs/talos/pkg/machinery/resources/k8s"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -164,15 +172,77 @@ func (pki testPKI) serverTLSConfig(t *testing.T) *tls.Config {
 
 // fakeBootstrapMachineServer implements just enough of Talos's real
 // (post-maintenance-mode) MachineService for the wire-compat test below:
-// Version, Read, and Kubeconfig — the RPCs talosBootstrapper.Version/
-// CPUTopology/Kubeconfig actually call.
+// Version, Read, Kubeconfig, Upgrade, and ApplyConfiguration — the RPCs
+// talosBootstrapper.Version/CPUTopology/Kubeconfig/UpgradeTalos/
+// UpgradeConfiguration actually call.
 type fakeBootstrapMachineServer struct {
 	machineapi.UnimplementedMachineServiceServer
 
 	tag, arch      string
 	sysfs          map[string]string
 	kubeconfigYAML string
+
+	// mu guards the two recorded requests below. The gRPC server runs each
+	// handler on its own goroutine, so a test reading them back — even
+	// strictly after the call it made returned — is a second goroutine as
+	// far as the race detector is concerned.
+	mu               sync.Mutex
+	upgradeReq       *machineapi.UpgradeRequest
+	appliedConfigReq *machineapi.ApplyConfigurationRequest
 }
+
+// Upgrade implements MachineService's own Upgrade RPC, recording the
+// request so the test can assert on the exact image/reboot-mode/preserve
+// triple talosBootstrapper.UpgradeTalos puts on the wire.
+func (s *fakeBootstrapMachineServer) Upgrade(
+	_ context.Context, req *machineapi.UpgradeRequest,
+) (*machineapi.UpgradeResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.upgradeReq = req
+
+	return &machineapi.UpgradeResponse{
+		Messages: []*machineapi.Upgrade{{Ack: "Upgrade request received"}},
+	}, nil
+}
+
+// ApplyConfiguration implements MachineService's own ApplyConfiguration
+// RPC — the real-identity counterpart of the maintenance-mode apply, see
+// Upgrade above for why the request is recorded.
+func (s *fakeBootstrapMachineServer) ApplyConfiguration(
+	_ context.Context, req *machineapi.ApplyConfigurationRequest,
+) (*machineapi.ApplyConfigurationResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.appliedConfigReq = req
+
+	return &machineapi.ApplyConfigurationResponse{
+		Messages: []*machineapi.ApplyConfiguration{{Mode: req.GetMode()}},
+	}, nil
+}
+
+// seedKubeletSpec populates coreState with the k8s.KubeletSpec resource a
+// real Talos node's kubelet controller publishes — the one
+// talosBootstrapper.KubeletVersion reads the running Kubernetes version's
+// image tag out of.
+func seedKubeletSpec(t *testing.T, coreState state.CoreState) {
+	t.Helper()
+
+	spec := k8s.NewKubeletSpec(k8s.NamespaceName, k8s.KubeletID)
+	spec.TypedSpec().Image = "ghcr.io/siderolabs/kubelet:" + testWireKubernetesVersion
+
+	require.NoError(t, coreState.Create(context.Background(), spec))
+}
+
+// testWireKubernetesVersion is the Kubernetes version seedKubeletSpec's
+// fixture image is tagged with.
+const testWireKubernetesVersion = "v1.32.0"
+
+// testWireInstallerImage is the installer reference the upgrade assertion
+// below expects on the wire.
+const testWireInstallerImage = "ghcr.io/siderolabs/installer:v1.13.0"
 
 func (s *fakeBootstrapMachineServer) Version(
 	context.Context, *emptypb.Empty,
@@ -244,6 +314,17 @@ func (s *fakeBootstrapMachineServer) Kubeconfig(
 	return nil
 }
 
+// recorded returns the two requests above under the lock — see mu's own
+// doc for why reading them directly would race.
+func (s *fakeBootstrapMachineServer) recorded() (
+	*machineapi.UpgradeRequest, *machineapi.ApplyConfigurationRequest,
+) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.upgradeReq, s.appliedConfigReq
+}
+
 // testKubeconfigYAML is a placeholder kubeconfig's worth of bytes — its
 // contents don't matter to this test, only that they round-trip intact
 // through the real tar.gz unwrapping talosBootstrapper.Kubeconfig relies
@@ -270,8 +351,14 @@ func TestTalosBootstrapperWireCompat(t *testing.T) {
 
 	pki := generateTestPKI(t)
 
+	inmemBuilder := inmem.NewStateWithOptions()
+	coreState := namespaced.NewState(func(ns resource.Namespace) state.CoreState { return inmemBuilder(ns) })
+	seedKubeletSpec(t, coreState)
+
 	grpcServer := grpc.NewServer(grpc.Creds(credentials.NewTLS(pki.serverTLSConfig(t))))
-	machineapi.RegisterMachineServiceServer(grpcServer, &fakeBootstrapMachineServer{
+	cosiv1alpha1.RegisterStateServer(grpcServer, cosiserver.NewState(coreState))
+
+	machineServer := &fakeBootstrapMachineServer{
 		tag: testTalosVersionFixture, arch: testTalosArchFixture, kubeconfigYAML: testKubeconfigYAML,
 		sysfs: map[string]string{
 			"/sys/devices/system/cpu/possible":                      "0-3",
@@ -281,7 +368,8 @@ func TestTalosBootstrapperWireCompat(t *testing.T) {
 			"/sys/devices/system/cpu/cpu3/topology/core_id":         "1",
 			"/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq": "1500000",
 		},
-	})
+	}
+	machineapi.RegisterMachineServiceServer(grpcServer, machineServer)
 
 	serveErr := make(chan error, 1)
 
@@ -312,4 +400,42 @@ func TestTalosBootstrapperWireCompat(t *testing.T) {
 	kubeconfig, err := bootstrapper.Kubeconfig(ctx, "127.0.0.1", talosCfg)
 	require.NoError(t, err)
 	assert.YAMLEq(t, testKubeconfigYAML, string(kubeconfig))
+
+	assertUpgradeWireCompat(ctx, t, bootstrapper, machineServer, talosCfg)
+}
+
+// assertUpgradeWireCompat exercises the three RPCs the upgrade path adds —
+// KubeletVersion's COSI read, UpgradeTalos, and UpgradeConfiguration — and
+// asserts on exactly what each put on the wire. Split out of
+// TestTalosBootstrapperWireCompat itself purely to keep that function's own
+// length down.
+func assertUpgradeWireCompat(
+	ctx context.Context, t *testing.T, bootstrapper taloscluster.ClusterBootstrapper,
+	machineServer *fakeBootstrapMachineServer, talosCfg *clientconfig.Config,
+) {
+	t.Helper()
+
+	kubernetesVersion, err := bootstrapper.KubeletVersion(ctx, "127.0.0.1", "test-node", talosCfg)
+	require.NoError(t, err)
+	assert.Equal(t, testWireKubernetesVersion, kubernetesVersion,
+		"the running kubernetes version is the kubelet image's own tag")
+
+	require.NoError(t, bootstrapper.UpgradeTalos(ctx, "127.0.0.1", "test-node", talosCfg, testWireInstallerImage))
+
+	configBytes := []byte("version: v1alpha1\n")
+	require.NoError(t, bootstrapper.UpgradeConfiguration(ctx, "127.0.0.1", "test-node", talosCfg, configBytes))
+
+	upgradeReq, applyReq := machineServer.recorded()
+
+	require.NotNil(t, upgradeReq)
+	assert.Equal(t, testWireInstallerImage, upgradeReq.GetImage())
+	assert.Equal(t, machineapi.UpgradeRequest_DEFAULT, upgradeReq.GetRebootMode())
+	assert.True(t, upgradeReq.GetPreserve(),
+		"a single-node control plane's only etcd member must never have its ephemeral partition wiped")
+	assert.False(t, upgradeReq.GetForce(), "talos's own pre-upgrade checks must not be skipped by a reconciler")
+
+	require.NotNil(t, applyReq)
+	assert.Equal(t, configBytes, applyReq.GetData())
+	assert.Equal(t, machineapi.ApplyConfigurationRequest_AUTO, applyReq.GetMode(),
+		"a kubernetes version bump must only reboot the node if talos itself decides it has to")
 }

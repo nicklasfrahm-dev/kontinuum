@@ -70,6 +70,71 @@ type fakeBootstrapper struct {
 	// TestReconcileTeardownRetriesFailedMemberWhileReleasingOthers, which
 	// needs one member's reset to fail without blocking the rest.
 	resetErrForNode string
+	// upgradeCalls records every node UpgradeTalos was asked to upgrade,
+	// paired with upgradeImages' own installer image reference for that
+	// same call — see upgrade_test.go, which asserts on both the roll
+	// order and the exact image each member was sent to.
+	upgradeCalls  []string
+	upgradeImages []string
+	upgradeErr    error
+	// upgradeConfigCalls and upgradeConfigs mirror upgradeCalls for
+	// UpgradeConfiguration — the Kubernetes-side upgrade, which re-applies
+	// a regenerated machine config rather than triggering an installer.
+	upgradeConfigCalls []string
+	upgradeConfigs     [][]byte
+	upgradeConfigErr   error
+	// kubeletVersionCalls records every node KubeletVersion was asked
+	// about; kubeletVersion is what every one of them reports back, unless
+	// kubeletVersionForNode names an override for that specific node — see
+	// versionForNode, which lets a test model a half-rolled cluster.
+	kubeletVersionCalls   []string
+	kubeletVersion        string
+	kubeletVersionForNode map[string]string
+	kubeletVersionErr     error
+	// versionForNode overrides the shared version field for the named
+	// nodes only, the same way kubeletVersionForNode does for kubelets.
+	versionForNode map[string]string
+}
+
+// versionForNode returns the version node should report, preferring an
+// explicit per-node override over the shared fallback — see
+// fakeBootstrapper.versionForNode's own doc.
+func versionForNode(overrides map[string]string, node, fallback string) string {
+	if override, ok := overrides[node]; ok {
+		return override
+	}
+
+	return fallback
+}
+
+func (f *fakeBootstrapper) UpgradeTalos(
+	_ context.Context, _, node string, _ *clientconfig.Config, image string,
+) error {
+	f.upgradeCalls = append(f.upgradeCalls, node)
+	f.upgradeImages = append(f.upgradeImages, image)
+
+	return f.upgradeErr
+}
+
+func (f *fakeBootstrapper) UpgradeConfiguration(
+	_ context.Context, _, node string, _ *clientconfig.Config, data []byte,
+) error {
+	f.upgradeConfigCalls = append(f.upgradeConfigCalls, node)
+	f.upgradeConfigs = append(f.upgradeConfigs, data)
+
+	return f.upgradeConfigErr
+}
+
+func (f *fakeBootstrapper) KubeletVersion(
+	_ context.Context, _, node string, _ *clientconfig.Config,
+) (string, error) {
+	f.kubeletVersionCalls = append(f.kubeletVersionCalls, node)
+
+	if f.kubeletVersionErr != nil {
+		return "", f.kubeletVersionErr
+	}
+
+	return versionForNode(f.kubeletVersionForNode, node, f.kubeletVersion), nil
 }
 
 func (f *fakeBootstrapper) ApplyConfiguration(_ context.Context, addr string, data []byte) error {
@@ -106,7 +171,7 @@ func (f *fakeBootstrapper) Version(_ context.Context, _, node string, _ *clientc
 		return "", "", f.versionErr
 	}
 
-	return f.version, f.arch, nil
+	return versionForNode(f.versionForNode, node, f.version), f.arch, nil
 }
 
 func (f *fakeBootstrapper) CPUTopology(

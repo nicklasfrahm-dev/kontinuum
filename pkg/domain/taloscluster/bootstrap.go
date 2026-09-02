@@ -9,13 +9,16 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/cosi-project/runtime/pkg/safe"
 	clusterapi "github.com/siderolabs/talos/pkg/machinery/api/cluster"
 	machineapi "github.com/siderolabs/talos/pkg/machinery/api/machine"
 	talosclient "github.com/siderolabs/talos/pkg/machinery/client"
 	clientconfig "github.com/siderolabs/talos/pkg/machinery/client/config"
 	"github.com/siderolabs/talos/pkg/machinery/constants"
+	"github.com/siderolabs/talos/pkg/machinery/resources/k8s"
 )
 
 // maintenanceModePort is the gRPC port apid listens on while a Talos node
@@ -77,6 +80,33 @@ type ClusterBootstrapper interface {
 	CPUTopology(
 		ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config,
 	) (coreCount, threadCount, maxSpeedMHz uint32, err error)
+	// UpgradeTalos triggers a Talos upgrade of node to image (an installer
+	// image reference, e.g. ghcr.io/siderolabs/installer:v1.13.0) —
+	// talosctl upgrade's programmatic equivalent — dialing endpoint with
+	// the real (non-maintenance-mode) admin identity in talosCfg and
+	// routing the request to node via client.WithNode, the same targeting
+	// Version already uses. The RPC only *starts* the upgrade sequence and
+	// returns; the node then reboots into the new version, so a caller
+	// must treat node going unreachable afterwards as the expected
+	// outcome, not a failure — see upgrade.go's own reconcileUpgrades.
+	UpgradeTalos(ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config, image string) error
+	// UpgradeConfiguration applies data (a regenerated machine config) to
+	// an already-configured node — unlike ApplyConfiguration above, which
+	// only ever reaches a node still in maintenance mode, this dials
+	// endpoint with the real admin identity in talosCfg and routes to node
+	// via client.WithNode. Applied in AUTO mode: Talos reboots the node
+	// only if the specific fields that changed actually require it, which
+	// a Kubernetes version bump (component image tags alone) does not.
+	UpgradeConfiguration(
+		ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config, data []byte,
+	) error
+	// KubeletVersion reads the Kubernetes version node's kubelet actually
+	// runs, from its own k8s.KubeletSpec COSI resource — the same
+	// resource `talosctl get kubeletspec` reads, and the closest thing
+	// this package has to `kubectl get nodes`' own reported version
+	// without building a Kubernetes client against the downstream cluster.
+	// Dialed exactly like Version above.
+	KubeletVersion(ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config) (string, error)
 	// Reset wipes node back to maintenance mode — talosctl reset's
 	// programmatic equivalent — dialing endpoint with the real
 	// (non-maintenance-mode) admin identity in talosCfg and routing the
@@ -449,6 +479,115 @@ func (t talosBootstrapper) Reset(
 	}
 
 	return nil
+}
+
+// UpgradeTalos implements ClusterBootstrapper. Preserve is always true:
+// every cluster this reconciler bootstraps today is realistically
+// single-node (see issue #24's architecture decision 3/5), and a
+// non-preserving upgrade wipes the EPHEMERAL partition — which on a
+// single-node control plane is that cluster's only etcd member, with no
+// second member left to resync from. Reboot mode is Talos's own default
+// (a full reboot rather than a kexec-staged one), matching what `talosctl
+// upgrade` does with no flags. Force is left false so Talos's own
+// pre-upgrade etcd/health checks still run: skipping them is an operator
+// escape hatch, not something a reconciler should decide on its own.
+func (t talosBootstrapper) UpgradeTalos(
+	ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config, image string,
+) error {
+	talosClient, err := t.dial(ctx, endpoint, talosCfg)
+	if err != nil {
+		return err
+	}
+	defer talosClient.Close() //nolint:errcheck // best-effort close of a short-lived upgrade connection
+
+	rpcCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+
+	// MachineService's own Upgrade RPC is marked deprecated in favor of
+	// the newer LifecycleService.Upgrade, which this deliberately does not
+	// use: that one takes an image already pulled into the node's
+	// containerd (see its InstallArtifactsSource doc) and only exists on
+	// Talos 1.13 and later, while an upgrade by definition targets a node
+	// running an *older* release — frequently one predating that service
+	// entirely, which would answer Unimplemented. The deprecated RPC is
+	// implemented by every Talos version this controller can realistically
+	// find in the field, and is still what carries the preserve/reboot-mode
+	// semantics a rolling control-plane upgrade depends on.
+	//nolint:staticcheck // see comment above
+	_, err = talosClient.UpgradeWithOptions(talosclient.WithNode(rpcCtx, node),
+		talosclient.WithUpgradeImage(image),
+		talosclient.WithUpgradeRebootMode(machineapi.UpgradeRequest_DEFAULT),
+		talosclient.WithUpgradePreserve(true),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to upgrade %s to %s via %s: %w", node, image, endpoint, err)
+	}
+
+	return nil
+}
+
+// UpgradeConfiguration implements ClusterBootstrapper.
+func (t talosBootstrapper) UpgradeConfiguration(
+	ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config, data []byte,
+) error {
+	talosClient, err := t.dial(ctx, endpoint, talosCfg)
+	if err != nil {
+		return err
+	}
+	defer talosClient.Close() //nolint:errcheck // best-effort close of a short-lived apply-config connection
+
+	rpcCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+
+	_, err = talosClient.ApplyConfiguration(talosclient.WithNode(rpcCtx, node), &machineapi.ApplyConfigurationRequest{
+		Data: data,
+		Mode: machineapi.ApplyConfigurationRequest_AUTO,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to apply configuration to %s via %s: %w", node, endpoint, err)
+	}
+
+	return nil
+}
+
+// KubeletVersion implements ClusterBootstrapper. The kubelet image is a
+// full reference (e.g. ghcr.io/siderolabs/kubelet:v1.32.0); only its tag
+// is the version, and a digest-pinned or untagged reference has none to
+// report, which is an empty string rather than an error — the caller
+// treats "not yet known" and "disagrees with the target" identically (see
+// upgrade.go's own memberVersions).
+func (t talosBootstrapper) KubeletVersion(
+	ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config,
+) (string, error) {
+	talosClient, err := t.dial(ctx, endpoint, talosCfg)
+	if err != nil {
+		return "", err
+	}
+	defer talosClient.Close() //nolint:errcheck // best-effort close of a short-lived kubelet-version connection
+
+	rpcCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+
+	spec, err := safe.StateGetByID[*k8s.KubeletSpec](
+		talosclient.WithNode(rpcCtx, node), talosClient.COSI, k8s.KubeletID)
+	if err != nil {
+		return "", fmt.Errorf("failed to read kubelet spec for %s via %s: %w", node, endpoint, err)
+	}
+
+	return imageTag(spec.TypedSpec().Image), nil
+}
+
+// imageTag returns ref's tag, or an empty string when it carries none —
+// see KubeletVersion's own doc. The registry host may itself contain a
+// port (host:5000/repo), so the tag is whatever follows the last colon,
+// and only when no "/" follows it.
+func imageTag(ref string) string {
+	idx := strings.LastIndex(ref, ":")
+	if idx < 0 || strings.Contains(ref[idx+1:], "/") {
+		return ""
+	}
+
+	return ref[idx+1:]
 }
 
 // dial connects to addr with talosCfg's real (non-maintenance-mode) admin

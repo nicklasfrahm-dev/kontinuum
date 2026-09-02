@@ -48,6 +48,13 @@
                 <dt class="text-sm text-neutral-500">Talos version</dt>
                 <dd class="text-sm font-medium text-white">{{if .TalosVersion}}{{.TalosVersion}}{{else}}-{{end}}</dd>
             </div>
+            <!-- Only ever populated once this Instance is a member of a
+                 bootstrapped cluster — see v1alpha2.InstanceKubernetesStatus
+                 — so an unclaimed node in inventory legitimately shows "-". -->
+            <div class="px-6 py-3 flex items-center justify-between gap-4">
+                <dt class="text-sm text-neutral-500">Kubernetes version</dt>
+                <dd class="text-sm font-medium text-white">{{if .KubernetesVersion}}{{.KubernetesVersion}}{{else}}-{{end}}</dd>
+            </div>
             <div class="px-6 py-3 flex items-center justify-between gap-4">
                 <dt class="text-sm text-neutral-500">Discovery source</dt>
                 <dd class="text-sm font-medium text-white break-all text-right">{{.DiscoverySource}}</dd>
