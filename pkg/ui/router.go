@@ -127,11 +127,16 @@ const (
 	dataKeyInstances    = "Instances"
 	dataKeyAuthEnabled  = "AuthEnabled"
 	dataKeyTalosVersion = "TalosVersion"
-	dataKeyName         = "Name"
-	dataKeyAge          = "Age"
-	dataKeyRegion       = "Region"
-	dataKeyDeleting     = "Deleting"
-	dataKeyConditions   = "Conditions"
+	// dataKeyKubernetesVersion and dataKeyError are shared by every
+	// version-carrying page and every modal-body form fragment
+	// respectively, the same way the keys above are shared across pages.
+	dataKeyKubernetesVersion = "KubernetesVersion"
+	dataKeyError             = "Error"
+	dataKeyName              = "Name"
+	dataKeyAge               = "Age"
+	dataKeyRegion            = "Region"
+	dataKeyDeleting          = "Deleting"
+	dataKeyConditions        = "Conditions"
 )
 
 // defaultTenantNamespace is where GET /app and /app/home land a caller who
@@ -272,6 +277,25 @@ func NewRouter(
 // buildPages parses every page's own template tree — split out of NewRouter
 // purely to keep that function's own line count under funlen's limit, not
 // for any functional reason.
+// talosClusterPage parses the cluster detail page's own template set —
+// split out of buildPages purely to keep that function under funlen's line
+// limit, the same reasoning registerIAMRoutes was split out of
+// RegisterRoutes for. It's the largest set of the lot: the page carries a
+// conditions table, a kubeconfig reveal panel, and two dialogs (delete and
+// upgrade) on top of its own overview.
+func talosClusterPage() *template.Template {
+	return mustParsePage("templates/taloscluster_content.html",
+		"templates/components/icon_chevron_left.html", "templates/components/icon_info.html",
+		"templates/components/icon_list_checks.html", "templates/components/icon_key.html",
+		"templates/components/icon_download.html", "templates/components/icon_eye.html",
+		"templates/components/icon_eye_off.html", "templates/components/icon_copy.html",
+		"templates/components/icon_trash.html", "templates/components/icon_loader_circle.html",
+		"templates/components/icon_x.html", "templates/components/modal_close_button.html",
+		"templates/components/reveal_panel.html", "templates/components/reveal_panel_script.html",
+		"templates/components/copy_snippet.html", "templates/components/conditions_table.html",
+		"templates/components/taloscluster_upgrade_modal.html")
+}
+
 func buildPages() map[string]*template.Template {
 	return map[string]*template.Template{
 		pageRegistry: mustParsePage("templates/registry_content.html",
@@ -297,15 +321,7 @@ func buildPages() map[string]*template.Template {
 			"templates/components/icon_hard_drive.html", "templates/components/conditions_table.html"),
 		pageTalosClusters: mustParsePage("templates/talosclusters_content.html",
 			"templates/components/icon_trash.html"),
-		pageTalosCluster: mustParsePage("templates/taloscluster_content.html",
-			"templates/components/icon_chevron_left.html", "templates/components/icon_info.html",
-			"templates/components/icon_list_checks.html",
-			"templates/components/icon_key.html", "templates/components/icon_download.html",
-			"templates/components/icon_eye.html", "templates/components/icon_eye_off.html",
-			"templates/components/icon_copy.html", "templates/components/icon_trash.html",
-			"templates/components/icon_loader_circle.html",
-			"templates/components/reveal_panel.html", "templates/components/reveal_panel_script.html",
-			"templates/components/copy_snippet.html", "templates/components/conditions_table.html"),
+		pageTalosCluster: talosClusterPage(),
 		pageZoneDetail: mustParsePage("templates/zone_detail_content.html",
 			"templates/components/icon_chevron_left.html", "templates/components/icon_info.html",
 			"templates/components/icon_kubernetes.html", "templates/components/icon_server.html",
@@ -393,6 +409,8 @@ func (r *Router) RegisterRoutes(
 		wrap(r.handleDeleteTalosCluster))
 	mux.HandleFunc("GET /app/kontinuum.sh/v1alpha2/namespaces/{ns}/talosclusters/{name}/kubeconfig",
 		wrap(r.handleTalosClusterKubeconfigDownload))
+	mux.HandleFunc("POST /app/kontinuum.sh/v1alpha2/namespaces/{ns}/talosclusters/{name}/upgrade",
+		wrap(r.handleTalosClusterUpgrade))
 	r.registerIAMRoutes(mux, wrap)
 	mux.HandleFunc("GET /app/connect", wrap(r.handleConnect))
 	mux.HandleFunc("GET /app/registry/kubeconfig", wrap(r.handleRegistryKubeconfigDownload))
@@ -1157,16 +1175,16 @@ func (r *Router) zoneAddFormData(
 	fields zoneAddFields, createdZone, formErr string, suggestions []instanceSuggestion,
 ) map[string]any {
 	return map[string]any{
-		dataKeyRegion:         fields.region,
-		"Zone":                fields.zone,
-		"TalosAddress":        fields.talosAddress,
-		dataKeyTalosVersion:   fields.talosVersion,
-		"KubernetesVersion":   fields.kubernetesVersion,
-		"UnregisterInstances": fields.unregisterInstances,
-		"ExistingInstance":    fields.existingInstance,
-		"InstanceSuggestions": suggestions,
-		"CreatedZone":         createdZone,
-		"Error":               formErr,
+		dataKeyRegion:            fields.region,
+		"Zone":                   fields.zone,
+		"TalosAddress":           fields.talosAddress,
+		dataKeyTalosVersion:      fields.talosVersion,
+		dataKeyKubernetesVersion: fields.kubernetesVersion,
+		"UnregisterInstances":    fields.unregisterInstances,
+		"ExistingInstance":       fields.existingInstance,
+		"InstanceSuggestions":    suggestions,
+		"CreatedZone":            createdZone,
+		dataKeyError:             formErr,
 	}
 }
 
@@ -2479,6 +2497,10 @@ type instanceRow struct {
 	Name         string
 	Namespace    string
 	TalosVersion string
+	// KubernetesVersion is the version this Instance's own kubelet runs
+	// (see v1alpha2.InstanceKubernetesStatus) — empty for anything not yet
+	// a member of a bootstrapped cluster, which is most of an inventory.
+	KubernetesVersion string
 	// Condition/ConditionOK reflect whichever of status.conditions most
 	// recently transitioned (see latestCondition) — an Instance can carry
 	// several (Discovered, then once claimed: Configured, Joined, a
@@ -2501,12 +2523,13 @@ type instanceRow struct {
 // instanceRowFrom builds one instances-list row from item.
 func instanceRowFrom(item v1alpha2.Instance) instanceRow {
 	row := instanceRow{
-		Name:         item.Name,
-		Namespace:    item.Namespace,
-		TalosVersion: item.Status.Talos.Version,
-		ClaimedBy:    item.Labels[v1alpha2.LabelClaimedBy],
-		Age:          formatAge(item.CreationTimestamp.Time),
-		Deleting:     !item.DeletionTimestamp.IsZero(),
+		Name:              item.Name,
+		Namespace:         item.Namespace,
+		TalosVersion:      item.Status.Talos.Version,
+		KubernetesVersion: item.Status.Kubernetes.Version,
+		ClaimedBy:         item.Labels[v1alpha2.LabelClaimedBy],
+		Age:               formatAge(item.CreationTimestamp.Time),
+		Deleting:          !item.DeletionTimestamp.IsZero(),
 	}
 
 	if cond := latestCondition(item.Status.Conditions); cond != nil {
@@ -2596,7 +2619,7 @@ func (r *Router) instanceAddFormData(namespace, address, createdInstance, formEr
 		dataKeyNamespace:  namespace,
 		"Address":         address,
 		"CreatedInstance": createdInstance,
-		"Error":           formErr,
+		dataKeyError:      formErr,
 	}
 }
 
@@ -2874,25 +2897,26 @@ func instanceDetailData(item v1alpha2.Instance, version string, authEnabled bool
 	}
 
 	data := map[string]any{
-		dataKeyTitle:        item.Name,
-		dataKeyActiveMenu:   "instances",
-		dataKeyVersion:      version,
-		dataKeyAuthEnabled:  authEnabled,
-		dataKeyName:         item.Name,
-		dataKeyNamespace:    item.Namespace,
-		dataKeyAge:          formatAge(item.CreationTimestamp.Time),
-		dataKeyTalosVersion: item.Status.Talos.Version,
-		"DiscoverySource":   discoverySource,
-		"Hostname":          item.Annotations[instancedomain.AnnotationHostname],
-		"SerialNumber":      item.Status.SerialNumber,
-		"ClaimedBy":         item.Labels[v1alpha2.LabelClaimedBy],
-		"Labels":            sortedLabels(item.Labels),
-		"Interfaces":        interfaces,
-		"Disks":             disks,
-		"CPUs":              cpus,
-		"Memory":            memory,
-		dataKeyConditions:   conditions,
-		dataKeyDeleting:     !item.DeletionTimestamp.IsZero(),
+		dataKeyTitle:             item.Name,
+		dataKeyActiveMenu:        "instances",
+		dataKeyVersion:           version,
+		dataKeyAuthEnabled:       authEnabled,
+		dataKeyName:              item.Name,
+		dataKeyNamespace:         item.Namespace,
+		dataKeyAge:               formatAge(item.CreationTimestamp.Time),
+		dataKeyTalosVersion:      item.Status.Talos.Version,
+		dataKeyKubernetesVersion: item.Status.Kubernetes.Version,
+		"DiscoverySource":        discoverySource,
+		"Hostname":               item.Annotations[instancedomain.AnnotationHostname],
+		"SerialNumber":           item.Status.SerialNumber,
+		"ClaimedBy":              item.Labels[v1alpha2.LabelClaimedBy],
+		"Labels":                 sortedLabels(item.Labels),
+		"Interfaces":             interfaces,
+		"Disks":                  disks,
+		"CPUs":                   cpus,
+		"Memory":                 memory,
+		dataKeyConditions:        conditions,
+		dataKeyDeleting:          !item.DeletionTimestamp.IsZero(),
 	}
 
 	// The title-bar badge shows the same condition instanceRowFrom picks
@@ -3270,25 +3294,32 @@ func talosClusterDetailData(
 	}
 
 	data := map[string]any{
-		dataKeyTitle:         cluster.Name,
-		dataKeyActiveMenu:    "talosclusters",
-		dataKeyVersion:       version,
-		dataKeyAuthEnabled:   authEnabled,
-		dataKeyName:          cluster.Name,
-		dataKeyNamespace:     cluster.Namespace,
-		dataKeyTalosVersion:  cluster.Spec.Talos.Version,
-		"KubernetesVersion":  cluster.Spec.Kubernetes.Version,
-		dataKeyAge:           formatAge(cluster.CreationTimestamp.Time),
-		"Pools":              pools,
-		dataKeyConditions:    conditions,
-		dataKeyDeleting:      !cluster.DeletionTimestamp.IsZero(),
-		"KubeconfigReady":    len(kubeconfig) > 0,
-		"KubeconfigRevealed": revealed,
-		"HasZone":            zone.Name != "",
-		"ZoneObjectName":     zone.Name,
-		"ZoneRegion":         zone.Spec.Region,
-		"ZoneName":           zone.Spec.Zone,
-		"Labels":             sortedLabels(cluster.Labels),
+		dataKeyTitle:             cluster.Name,
+		dataKeyActiveMenu:        "talosclusters",
+		dataKeyVersion:           version,
+		dataKeyAuthEnabled:       authEnabled,
+		dataKeyName:              cluster.Name,
+		dataKeyNamespace:         cluster.Namespace,
+		dataKeyTalosVersion:      cluster.Spec.Talos.Version,
+		dataKeyKubernetesVersion: cluster.Spec.Kubernetes.Version,
+		// The status counterparts of the two spec versions above — what
+		// the members actually run, as opposed to what this cluster asks
+		// them to (see v1alpha2.TalosClusterVersionStatus). Empty while a
+		// roll has them split across two versions, which the UpToDate
+		// condition in the table above explains.
+		"TalosVersionObserved":      cluster.Status.Talos.Version,
+		"KubernetesVersionObserved": cluster.Status.Kubernetes.Version,
+		dataKeyAge:                  formatAge(cluster.CreationTimestamp.Time),
+		"Pools":                     pools,
+		dataKeyConditions:           conditions,
+		dataKeyDeleting:             !cluster.DeletionTimestamp.IsZero(),
+		"KubeconfigReady":           len(kubeconfig) > 0,
+		"KubeconfigRevealed":        revealed,
+		"HasZone":                   zone.Name != "",
+		"ZoneObjectName":            zone.Name,
+		"ZoneRegion":                zone.Spec.Region,
+		"ZoneName":                  zone.Spec.Zone,
+		"Labels":                    sortedLabels(cluster.Labels),
 	}
 
 	if readyCond := conditionOfType(cluster.Status.Conditions, "Ready"); readyCond != nil {
@@ -3419,6 +3450,122 @@ func (r *Router) handleDeleteTalosCluster(writer http.ResponseWriter, request *h
 
 	r.deleteAndRedirect(writer, request, kontinuums, target,
 		"taloscluster", "/app/kontinuum.sh/v1alpha2/namespaces/"+namespace+"/talosclusters")
+}
+
+// maxTalosClusterUpgradeFormBytes bounds the "Upgrade cluster" form's
+// request body — two short version strings, never a bulk upload, same
+// rationale as maxZoneAddFormBytes.
+const maxTalosClusterUpgradeFormBytes = 1 << 12
+
+// talosClusterUpgradeFields is the "Upgrade cluster" form's parsed input —
+// both fields optional, since an empty one deliberately means "stop
+// managing this version" rather than "leave it as it was" (see
+// taloscluster.UpToDateConditionType's own doc).
+type talosClusterUpgradeFields struct {
+	talosVersion      string
+	kubernetesVersion string
+}
+
+// handleTalosClusterUpgrade is POST
+// /app/kontinuum.sh/v1alpha2/namespaces/{ns}/talosclusters/{name}/upgrade's
+// handler — it writes the submitted Talos/Kubernetes versions onto the
+// TalosCluster's own spec and leaves everything else to
+// pkg/domain/taloscluster's upgrade reconciler, which rolls the members one
+// at a time once the cluster is healthy. Deliberately not a "start an
+// upgrade" action: the spec is the desired state, and this only edits it,
+// so re-submitting the same versions is a no-op rather than a second roll.
+// On success it swaps the modal body to a hidden toast marker; on failure
+// it re-renders the form with the submitted values and an error, so a typo
+// in one field doesn't cost the other.
+func (r *Router) handleTalosClusterUpgrade(writer http.ResponseWriter, request *http.Request) {
+	request.Body = http.MaxBytesReader(writer, request.Body, maxTalosClusterUpgradeFormBytes)
+
+	err := request.ParseForm()
+	if err != nil {
+		http.Error(writer, "failed to parse form: "+err.Error(), http.StatusBadRequest)
+
+		return
+	}
+
+	fields := talosClusterUpgradeFields{
+		talosVersion:      strings.TrimSpace(request.PostFormValue("talos-version")),
+		kubernetesVersion: strings.TrimSpace(request.PostFormValue("kubernetes-version")),
+	}
+
+	// zonesFor, despite its name, is this Router's per-request-identity
+	// factory for a full controller-runtime client.Client (see
+	// ZoneClientFactory's own doc) — the spec edit below needs Update,
+	// which kontinuumsFor's narrower KontinuumClient doesn't expose, so
+	// this reuses zonesFor exactly as handleInstanceAdd/handleZoneAdd
+	// already do for their own writes rather than widening that interface
+	// for one caller. A client.Client satisfies KontinuumClient, so the
+	// same value serves fetchTalosCluster's read below too.
+	zones, err := r.zonesFor(request.Context())
+	if err != nil {
+		http.Error(writer, "failed to build kubernetes client: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	cluster, found := r.fetchTalosCluster(writer, request, zones, request.PathValue("ns"), request.PathValue("name"))
+	if !found {
+		return
+	}
+
+	cluster.Spec.Talos.Version = fields.talosVersion
+	cluster.Spec.Kubernetes.Version = fields.kubernetesVersion
+
+	err = zones.Update(request.Context(), &cluster)
+	if err != nil {
+		if apierrors.IsForbidden(err) && r.invalidateSession != nil {
+			r.invalidateSession(writer, request, auth.MapError(err))
+
+			return
+		}
+
+		r.renderTalosClusterUpgradeModalBody(writer, talosClusterUpgradeData(&cluster, fields, false, err.Error()))
+
+		return
+	}
+
+	r.renderTalosClusterUpgradeModalBody(writer, talosClusterUpgradeData(&cluster, fields, true, ""))
+}
+
+// talosClusterUpgradeData builds the "Upgrade cluster" modal body's own
+// template data — the submitted versions (so a rejected submission keeps
+// what was typed) alongside the observed ones straight off status, which
+// the form shows as each field's "Running:" caption.
+func talosClusterUpgradeData(
+	cluster *v1alpha2.TalosCluster, fields talosClusterUpgradeFields, upgraded bool, errMessage string,
+) map[string]any {
+	return map[string]any{
+		dataKeyName:                 cluster.Name,
+		dataKeyNamespace:            cluster.Namespace,
+		dataKeyTalosVersion:         fields.talosVersion,
+		dataKeyKubernetesVersion:    fields.kubernetesVersion,
+		"TalosVersionObserved":      cluster.Status.Talos.Version,
+		"KubernetesVersionObserved": cluster.Status.Kubernetes.Version,
+		"Upgraded":                  upgraded,
+		dataKeyError:                errMessage,
+	}
+}
+
+// renderTalosClusterUpgradeModalBody executes just the
+// taloscluster-upgrade-modal-body fragment (not the whole page through
+// layout.html) — mirrors renderZoneAddModalBody's identical role for the
+// "Add zone" dialog.
+func (r *Router) renderTalosClusterUpgradeModalBody(writer http.ResponseWriter, data map[string]any) {
+	var buf bytes.Buffer
+
+	err := r.pages[pageTalosCluster].ExecuteTemplate(&buf, "taloscluster-upgrade-modal-body", data)
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = buf.WriteTo(writer)
 }
 
 // handleRegistryKubeconfigDownload is GET /app/registry/kubeconfig's

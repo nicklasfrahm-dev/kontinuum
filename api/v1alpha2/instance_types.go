@@ -51,6 +51,22 @@ type InstanceTalosStatus struct {
 	Version string `json:"version"`
 }
 
+// InstanceKubernetesStatus groups every Kubernetes-reported status value
+// under status.kubernetes — currently just Version, mirroring
+// InstanceTalosStatus's own shape so the two versions this node runs read
+// the same way.
+type InstanceKubernetesStatus struct {
+	// Version is the Kubernetes version this Instance's kubelet runs — the
+	// same value `kubectl get nodes` reports for it. Only ever populated
+	// once this Instance is a member of a bootstrapped TalosCluster: it's
+	// read from the node's own k8s.KubeletSpec COSI resource, which needs
+	// the real, post-config admin identity maintenance mode can't present
+	// (see InstanceTalosStatus.Version's own doc for the same limitation),
+	// and an unclaimed node runs no kubelet at all.
+	// +optional
+	Version string `json:"version"`
+}
+
 // InstanceDiskStatus is one disk discovered on this Instance, via Talos's
 // COSI block.Disk resource while probing spec.interfaces in maintenance
 // mode — see issue #76. A one-shot snapshot from initial discovery, not
@@ -168,6 +184,10 @@ type InstanceStatus struct {
 	// InstanceTalosStatus's own doc.
 	// +optional
 	Talos InstanceTalosStatus `json:"talos"`
+	// Kubernetes groups every Kubernetes-reported status value — see
+	// InstanceKubernetesStatus's own doc.
+	// +optional
+	Kubernetes InstanceKubernetesStatus `json:"kubernetes"`
 	// LastProbeTime is when this Instance's liveness (see the Live
 	// condition below) was last actively checked — distinct from a
 	// condition's own LastTransitionTime, which only updates on a status
@@ -201,6 +221,7 @@ type InstanceStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced
 // +kubebuilder:printcolumn:name="TalosVersion",type="string",JSONPath=".status.talos.version"
+// +kubebuilder:printcolumn:name="KubernetesVersion",type="string",JSONPath=".status.kubernetes.version"
 // The line exceeds this repo's normal length limit, but splitting a
 // kubebuilder marker across lines isn't supported, so it's exempted rather
 // than shortened — same convention as api/v1alpha2/kontinuum_types.go's own

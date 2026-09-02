@@ -18,6 +18,9 @@ spec:
     - jsonPath: .status.talos.version
       name: TalosVersion
       type: string
+    - jsonPath: .status.kubernetes.version
+      name: KubernetesVersion
+      type: string
     - jsonPath: .status.conditions[?(@.type=="Discovered")].status
       name: Discovered
       type: string
@@ -301,6 +304,22 @@ spec:
                   - name
                   type: object
                 type: array
+              kubernetes:
+                description: |-
+                  Kubernetes groups every Kubernetes-reported status value — see
+                  InstanceKubernetesStatus's own doc.
+                properties:
+                  version:
+                    description: |-
+                      Version is the Kubernetes version this Instance's kubelet runs — the
+                      same value `kubectl get nodes` reports for it. Only ever populated
+                      once this Instance is a member of a bootstrapped TalosCluster: it's
+                      read from the node's own k8s.KubeletSpec COSI resource, which needs
+                      the real, post-config admin identity maintenance mode can't present
+                      (see InstanceTalosStatus.Version's own doc for the same limitation),
+                      and an unclaimed node runs no kubelet at all.
+                    type: string
+                type: object
               lastProbeTime:
                 description: |-
                   LastProbeTime is when this Instance's liveness (see the Live

@@ -97,10 +97,40 @@ type TalosClusterSpec struct {
 	Teardown TeardownSpec `json:"teardown,omitempty"`
 }
 
+// TalosClusterVersionStatus reports one component's (Talos or Kubernetes)
+// converged version across this cluster's members — the observed
+// counterpart to TalosSpec/KubernetesSpec's own requested version, and
+// what pkg/domain/taloscluster's upgrade reconciler compares against to
+// decide whether an upgrade is owed. Deliberately a version every member
+// agrees on rather than any single member's own: a rolling upgrade leaves
+// the cluster genuinely split across two versions for as long as it runs,
+// and reporting the first member's value there would claim the whole
+// cluster had already moved.
+type TalosClusterVersionStatus struct {
+	// Version is the version every one of this cluster's members currently
+	// reports. Empty means either nothing has been observed yet, or the
+	// members disagree — mid-roll, or a member that hasn't answered a
+	// probe yet — in which case the UpToDate condition's own message
+	// carries the per-member detail.
+	// +optional
+	Version string `json:"version"`
+}
+
 // TalosClusterStatus reports this cluster's bootstrap progress.
 type TalosClusterStatus struct {
+	// Talos reports the Talos version this cluster's members are actually
+	// running — see TalosClusterVersionStatus's own doc, and TalosSpec for
+	// the requested counterpart.
+	// +optional
+	Talos TalosClusterVersionStatus `json:"talos"`
+	// Kubernetes reports the Kubernetes version this cluster's members are
+	// actually running, read from each member's own kubelet — see
+	// TalosClusterVersionStatus's own doc, and KubernetesSpec for the
+	// requested counterpart.
+	// +optional
+	Kubernetes TalosClusterVersionStatus `json:"kubernetes"`
 	// Conditions reports this cluster's state, e.g. ControlPlaneReady,
-	// Bootstrapped, Ready.
+	// Bootstrapped, Ready, UpToDate.
 	// +optional
 	// +patchMergeKey=type
 	// +patchStrategy=merge
@@ -121,6 +151,9 @@ type TalosClusterStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced
 // +kubebuilder:printcolumn:name="ControlPlanePool",type="string",JSONPath=".spec.controlPlane.poolRef.name"
+// +kubebuilder:printcolumn:name="Talos",type="string",JSONPath=".status.talos.version"
+// +kubebuilder:printcolumn:name="Kubernetes",type="string",JSONPath=".status.kubernetes.version"
+// +kubebuilder:printcolumn:name="UpToDate",type="string",JSONPath=".status.conditions[?(@.type==\"UpToDate\")].status"
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].status"
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].reason"
 

@@ -18,6 +18,15 @@ spec:
     - jsonPath: .spec.controlPlane.poolRef.name
       name: ControlPlanePool
       type: string
+    - jsonPath: .status.talos.version
+      name: Talos
+      type: string
+    - jsonPath: .status.kubernetes.version
+      name: Kubernetes
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="UpToDate")].status
+      name: UpToDate
+      type: string
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
       type: string
@@ -160,7 +169,7 @@ spec:
               conditions:
                 description: |-
                   Conditions reports this cluster's state, e.g. ControlPlaneReady,
-                  Bootstrapped, Ready.
+                  Bootstrapped, Ready, UpToDate.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -219,6 +228,22 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              kubernetes:
+                description: |-
+                  Kubernetes reports the Kubernetes version this cluster's members are
+                  actually running, read from each member's own kubelet — see
+                  TalosClusterVersionStatus's own doc, and KubernetesSpec for the
+                  requested counterpart.
+                properties:
+                  version:
+                    description: |-
+                      Version is the version every one of this cluster's members currently
+                      reports. Empty means either nothing has been observed yet, or the
+                      members disagree — mid-roll, or a member that hasn't answered a
+                      probe yet — in which case the UpToDate condition's own message
+                      carries the per-member detail.
+                    type: string
+                type: object
               secretRef:
                 description: |-
                   SecretRef points to the Secret holding this cluster's generated Talos
@@ -233,6 +258,21 @@ spec:
                     type: string
                   namespace:
                     description: Namespace is the Secret's namespace.
+                    type: string
+                type: object
+              talos:
+                description: |-
+                  Talos reports the Talos version this cluster's members are actually
+                  running — see TalosClusterVersionStatus's own doc, and TalosSpec for
+                  the requested counterpart.
+                properties:
+                  version:
+                    description: |-
+                      Version is the version every one of this cluster's members currently
+                      reports. Empty means either nothing has been observed yet, or the
+                      members disagree — mid-roll, or a member that hasn't answered a
+                      probe yet — in which case the UpToDate condition's own message
+                      carries the per-member detail.
                     type: string
                 type: object
             type: object

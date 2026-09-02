@@ -4631,3 +4631,174 @@ func TestHandleDeleteTalosClusterInvalidatesSessionOnForbidden(t *testing.T) {
 		newTestDeleteRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"),
 		kontinuumFactory)
 }
+
+// talosClusterUpgradePath is the "Upgrade cluster" form's own endpoint for
+// the shared testTalosClusterName fixture.
+const talosClusterUpgradePath = "/app/kontinuum.sh/v1alpha2/namespaces/" +
+	v1alpha2.KontinuumSystemNamespace + "/talosclusters/" + testTalosClusterName + "/upgrade"
+
+// newTalosClusterUpgradeMux builds a router+mux whose zone client (the
+// full client.Client the upgrade handler writes through — see
+// handleTalosClusterUpgrade's own doc) is backed by cluster, and returns
+// both so a test can submit the form and then read the stored spec back.
+func newTalosClusterUpgradeMux(t *testing.T, cluster *v1alpha2.TalosCluster) (*http.ServeMux, client.Client) {
+	t.Helper()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	zoneClient := newTestZoneClient(t, cluster)
+	zonesFactory := func(context.Context) (client.Client, error) { return zoneClient, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	return mux, zoneClient
+}
+
+// newTalosClusterUpgradeRequest posts form to the "Upgrade cluster"
+// endpoint — mirrors newTestZoneAddRequest's identical role for the "Add
+// zone" form.
+func newTalosClusterUpgradeRequest(t *testing.T, form url.Values) *http.Request {
+	t.Helper()
+
+	request := httptest.NewRequestWithContext(
+		context.Background(), http.MethodPost, talosClusterUpgradePath, strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	return request
+}
+
+// TestHandleTalosClusterUpgradeWritesSpecVersions covers the whole point of
+// the "Upgrade cluster" form: it edits the desired state on the object and
+// nothing else — pkg/domain/taloscluster's own reconciler is what actually
+// rolls the members.
+func TestHandleTalosClusterUpgradeWritesSpecVersions(t *testing.T) {
+	t.Parallel()
+
+	cluster := talosClusterFixture(metav1.ConditionTrue)
+	mux, zoneClient := newTalosClusterUpgradeMux(t, &cluster)
+
+	form := url.Values{}
+	form.Set("talos-version", "v1.14.0")
+	form.Set("kubernetes-version", "v1.33.0")
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTalosClusterUpgradeRequest(t, form))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `data-toast-command="kubectl get taloscluster `+testTalosClusterName+`"`)
+	assert.NotContains(t, string(body), `name="talos-version"`, "a success response leaves nothing to resubmit")
+
+	var stored v1alpha2.TalosCluster
+
+	key := client.ObjectKey{Name: testTalosClusterName, Namespace: v1alpha2.KontinuumSystemNamespace}
+	require.NoError(t, zoneClient.Get(context.Background(), key, &stored))
+	assert.Equal(t, "v1.14.0", stored.Spec.Talos.Version)
+	assert.Equal(t, "v1.33.0", stored.Spec.Kubernetes.Version)
+}
+
+// TestHandleTalosClusterUpgradeClearsUnmanagedVersion covers the decision
+// that an empty field means "stop managing this version" rather than
+// "leave whatever was pinned before" — see taloscluster.UpToDateConditionType's
+// own doc for why the two must not be conflated.
+func TestHandleTalosClusterUpgradeClearsUnmanagedVersion(t *testing.T) {
+	t.Parallel()
+
+	cluster := talosClusterFixture(metav1.ConditionTrue)
+	mux, zoneClient := newTalosClusterUpgradeMux(t, &cluster)
+
+	form := url.Values{}
+	form.Set("talos-version", "")
+	form.Set("kubernetes-version", "  v1.33.0  ")
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTalosClusterUpgradeRequest(t, form))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var stored v1alpha2.TalosCluster
+
+	key := client.ObjectKey{Name: testTalosClusterName, Namespace: v1alpha2.KontinuumSystemNamespace}
+	require.NoError(t, zoneClient.Get(context.Background(), key, &stored))
+	assert.Empty(t, stored.Spec.Talos.Version)
+	assert.Equal(t, "v1.33.0", stored.Spec.Kubernetes.Version, "a pasted version's surrounding whitespace is trimmed")
+}
+
+// TestHandleTalosClusterUpgradeWalksUpWhenClusterIsGone covers the path
+// where the cluster was deleted between the modal opening and its
+// submission: the handler's own 404 goes through notFoundFallback like
+// every other route's, so the browser is steered to the cluster's (now
+// itself missing) detail page and walks up from there — via Hx-Redirect,
+// since the form submits over htmx, not as a top-level navigation.
+func TestHandleTalosClusterUpgradeWalksUpWhenClusterIsGone(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	zoneClient := newTestZoneClient(t)
+	zonesFactory := func(context.Context) (client.Client, error) { return zoneClient, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	request := newTalosClusterUpgradeRequest(t, url.Values{})
+	request.Header.Set("Hx-Request", "true")
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, request)
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "/app/kontinuum.sh/v1alpha2/namespaces/"+v1alpha2.KontinuumSystemNamespace+
+		"/talosclusters/"+testTalosClusterName, resp.Header.Get("Hx-Redirect"))
+}
+
+// TestTalosClusterDetailRendersRequestedAndRunningVersions covers the
+// status half of the version model reaching the page: requested and
+// running are shown separately, since they genuinely differ for as long as
+// a roll takes.
+func TestTalosClusterDetailRendersRequestedAndRunningVersions(t *testing.T) {
+	t.Parallel()
+
+	mux := newTalosClusterKubeconfigMux(t)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t,
+		"/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/talosclusters/eu-eu-1a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "Talos version (requested)")
+	assert.Contains(t, string(body), "Talos version (running)")
+	assert.Contains(t, string(body), "Kubernetes version (requested)")
+	assert.Contains(t, string(body), "Kubernetes version (running)")
+	assert.Contains(t, string(body), "mixed or unknown",
+		"a fixture with no observed versions yet must say so rather than echo the requested ones")
+	assert.Contains(t, string(body), `id="taloscluster-upgrade-modal"`)
+}

@@ -64,7 +64,7 @@ All kinds below belong to the `kontinuum.sh/v1alpha2` API group/version (`kontin
 | `Zone` | `pkg/domain/zone` | A single availability zone. Once its `TalosCluster` is Ready, installs kontinuum's downstream footprint (namespace, Deployment/Service, Gateway/Certificate) onto that zone's own cluster — see [Add zone](workflows/zone-add.md). |
 | `Instance` | `pkg/domain/instance` | A candidate machine, discovered over the Talos maintenance-mode API. |
 | `InstancePool` | `pkg/domain/instancepool` | Claims a set of `Instance`s matching a selector, up to `spec.replicas`. |
-| `TalosCluster` | `pkg/domain/taloscluster` | Bootstraps a Talos Kubernetes cluster from a control-plane `InstancePool` and optional worker pools. |
+| `TalosCluster` | `pkg/domain/taloscluster` | Bootstraps a Talos Kubernetes cluster from a control-plane `InstancePool` and optional worker pools, and keeps its members on the Talos/Kubernetes versions `spec` pins — see [Upgrade a cluster](workflows/cluster-upgrade.md). |
 | `Addon` | `pkg/domain/addon` | A Helm-based addon (Cilium, cert-manager) installed and health-probed as part of `TalosCluster` bootstrap. |
 
 See [Architecture](architecture.md) for how these controllers cooperate, and [Add zone](workflows/zone-add.md) for the full `Instance` → `InstancePool` → `TalosCluster` → `Addon` flow.

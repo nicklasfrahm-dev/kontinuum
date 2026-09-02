@@ -1,0 +1,89 @@
+{{/*
+    taloscluster-upgrade-modal is the cluster detail page's own "Upgrade
+    cluster" dialog — a native <dialog> element (see AGENTS.md's UI policy:
+    never confirm()), opened by the header's own Upgrade button. It's
+    rendered outside #taloscluster-content, so that div's 15s poll can't
+    close it out from under a half-typed submission.
+*/}}
+{{define "taloscluster-upgrade-modal"}}
+<dialog id="taloscluster-upgrade-modal" class="bg-neutral-900 border border-neutral-800 rounded-xl p-0 w-full max-w-lg text-neutral-100 backdrop:bg-black/60">
+    <div class="px-6 py-3 border-b border-neutral-800 flex items-center justify-between gap-2">
+        <h2 class="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+            <span class="text-accent [&>svg]:h-4 [&>svg]:w-4">{{template "icon-kubernetes"}}</span>
+            Upgrade cluster
+        </h2>
+        {{template "modal-close-button"}}
+    </div>
+    <div id="taloscluster-upgrade-modal-body" class="p-6">
+        {{template "taloscluster-upgrade-modal-body" .}}
+    </div>
+</dialog>
+{{end}}
+
+{{/*
+    taloscluster-upgrade-modal-body is the swappable part of the dialog
+    above — handleTalosClusterUpgrade's POST response replaces just
+    #taloscluster-upgrade-modal-body's innerHTML with this same template,
+    executed directly (see Router.renderTalosClusterUpgradeModalBody)
+    rather than through layout.html.
+*/}}
+{{define "taloscluster-upgrade-modal-body"}}
+{{if .Upgraded}}
+{{/* A hidden marker, not an inline banner — taloscluster_content.html's own
+     htmx:afterSwap listener reads this, closes the dialog, and surfaces the
+     text as a toast, so a successful submission doesn't leave a stale
+     success message sitting in the modal the next time it's opened.
+     Mirrors zone_add_modal.html's identical pattern. */}}
+<div data-toast-prefix="Upgrade requested for {{.Name}}. Members roll one at a time — follow along with "
+     data-toast-command="kubectl get taloscluster {{.Name}}"
+     data-toast-suffix="." class="hidden"></div>
+{{else}}
+{{if .Error}}
+<div class="mb-4 bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 text-sm text-red-400">
+    {{.Error}}
+</div>
+{{end}}
+<form hx-post="/app/kontinuum.sh/v1alpha2/namespaces/{{.Namespace}}/talosclusters/{{.Name}}/upgrade"
+      hx-target="#taloscluster-upgrade-modal-body" hx-swap="innerHTML" class="space-y-4">
+    <p class="text-sm text-neutral-400">
+        Members are upgraded one at a time, and only while the cluster is healthy. If both versions change,
+        Talos rolls first and Kubernetes follows. Leave a field empty to stop managing that version — nothing
+        is upgraded toward a version you haven't pinned.
+    </p>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <label class="block">
+            <span class="text-xs uppercase tracking-wider text-neutral-500">Talos version</span>
+            <input type="text" name="talos-version" value="{{.TalosVersion}}" placeholder="unmanaged"
+                   class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+            <span class="mt-1 block text-xs text-neutral-600">Running: {{if .TalosVersionObserved}}{{.TalosVersionObserved}}{{else}}mixed or unknown{{end}}</span>
+        </label>
+        <label class="block">
+            <span class="text-xs uppercase tracking-wider text-neutral-500">Kubernetes version</span>
+            <input type="text" name="kubernetes-version" value="{{.KubernetesVersion}}" placeholder="unmanaged"
+                   class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+            <span class="mt-1 block text-xs text-neutral-600">Running: {{if .KubernetesVersionObserved}}{{.KubernetesVersionObserved}}{{else}}mixed or unknown{{end}}</span>
+        </label>
+    </div>
+    <div class="flex justify-end gap-2 pt-2">
+        <button type="button" onclick="this.closest('dialog').close()"
+                class="inline-flex items-center px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg border border-neutral-700 text-neutral-300 hover:bg-neutral-800 transition-colors">
+            Cancel
+        </button>
+        <!--
+            hx-disabled-elt (see AGENTS.md's UI policy) disables this button
+            for the POST's own round trip, with the leading icon swapping
+            for the spinner in place so the button keeps its width — both
+            keyed off the "htmx-request" class htmx adds to this button
+            itself, with no hx-indicator attribute (see
+            instance_add_modal.html's identical pattern for why).
+        -->
+        <button type="submit" hx-disabled-elt="this"
+                class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg bg-accent text-neutral-950 hover:bg-accent/90 disabled:opacity-60 disabled:cursor-not-allowed transition-colors">
+            <span class="[.htmx-request_&]:hidden [&>svg]:h-3.5 [&>svg]:w-3.5">{{template "icon-kubernetes"}}</span>
+            <span class="hidden [.htmx-request_&]:inline-flex [&>svg]:h-3.5 [&>svg]:w-3.5 [&>svg]:animate-spin">{{template "icon-loader-circle"}}</span>
+            Upgrade cluster
+        </button>
+    </div>
+</form>
+{{end}}
+{{end}}

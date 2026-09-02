@@ -32,12 +32,20 @@
             {{end}}
             {{end}}
         </div>
-        <button type="button" onclick="document.getElementById('delete-cluster-modal').showModal()"
-                class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium uppercase tracking-wider rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20 transition-colors"
-                aria-label="Delete cluster {{.Name}}">
-            {{template "icon-trash"}}
-            Delete cluster
-        </button>
+        <div class="shrink-0 flex items-center gap-2">
+            <button type="button" onclick="document.getElementById('taloscluster-upgrade-modal').showModal()"
+                    class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium uppercase tracking-wider rounded-lg bg-accent/10 border border-accent/30 text-accent hover:bg-accent/20 transition-colors"
+                    aria-label="Upgrade cluster {{.Name}}">
+                {{template "icon-kubernetes"}}
+                Upgrade cluster
+            </button>
+            <button type="button" onclick="document.getElementById('delete-cluster-modal').showModal()"
+                    class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium uppercase tracking-wider rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20 transition-colors"
+                    aria-label="Delete cluster {{.Name}}">
+                {{template "icon-trash"}}
+                Delete cluster
+            </button>
+        </div>
     </div>
 
     <div class="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
@@ -54,13 +62,32 @@
             <h2 class="text-sm font-bold text-white uppercase tracking-wider">Overview</h2>
         </div>
         <dl class="divide-y divide-neutral-800">
+            <!--
+                Two rows per component, requested (spec) above running
+                (status), rather than one combined value: they genuinely
+                differ for as long as a rolling upgrade takes, and the
+                whole point of the UpToDate condition in the card above is
+                that the difference is visible rather than papered over.
+                "unmanaged" is what an unpinned spec version means — see
+                v1alpha2's own UpToDate condition doc — and a running
+                version reads "mixed or unknown" whenever the members
+                disagree, which is exactly the mid-roll state.
+            -->
             <div class="px-6 py-3 flex items-center justify-between gap-4">
-                <dt class="text-sm text-neutral-500">Talos version</dt>
-                <dd class="text-sm font-medium text-white">{{if .TalosVersion}}{{.TalosVersion}}{{else}}default{{end}}</dd>
+                <dt class="text-sm text-neutral-500">Talos version (requested)</dt>
+                <dd class="text-sm font-medium text-white">{{if .TalosVersion}}{{.TalosVersion}}{{else}}unmanaged{{end}}</dd>
             </div>
             <div class="px-6 py-3 flex items-center justify-between gap-4">
-                <dt class="text-sm text-neutral-500">Kubernetes version</dt>
-                <dd class="text-sm font-medium text-white">{{if .KubernetesVersion}}{{.KubernetesVersion}}{{else}}default{{end}}</dd>
+                <dt class="text-sm text-neutral-500">Talos version (running)</dt>
+                <dd class="text-sm font-medium text-white">{{if .TalosVersionObserved}}{{.TalosVersionObserved}}{{else}}mixed or unknown{{end}}</dd>
+            </div>
+            <div class="px-6 py-3 flex items-center justify-between gap-4">
+                <dt class="text-sm text-neutral-500">Kubernetes version (requested)</dt>
+                <dd class="text-sm font-medium text-white">{{if .KubernetesVersion}}{{.KubernetesVersion}}{{else}}unmanaged{{end}}</dd>
+            </div>
+            <div class="px-6 py-3 flex items-center justify-between gap-4">
+                <dt class="text-sm text-neutral-500">Kubernetes version (running)</dt>
+                <dd class="text-sm font-medium text-white">{{if .KubernetesVersionObserved}}{{.KubernetesVersionObserved}}{{else}}mixed or unknown{{end}}</dd>
             </div>
             <div class="px-6 py-3 flex items-center justify-between gap-4">
                 <dt class="text-sm text-neutral-500">Zone</dt>
@@ -163,8 +190,10 @@
 </div>
 
 <!-- Deliberately outside #taloscluster-content: that div's own 15s poll
-     (hx-swap="outerHTML" above) would otherwise close this dialog out from
-     under the user every time the page refreshes. -->
+     (hx-swap="outerHTML" above) would otherwise close these dialogs out
+     from under the user every time the page refreshes. -->
+{{template "taloscluster-upgrade-modal" .}}
+
 <dialog id="delete-cluster-modal" class="bg-neutral-900 border border-neutral-800 rounded-xl p-0 w-full max-w-md text-neutral-100 backdrop:bg-black/60">
     <div class="px-6 py-3 border-b border-neutral-800 flex items-center justify-between gap-2">
         <h2 class="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
@@ -207,6 +236,29 @@
         if (event.target === this) {
             this.close();
         }
+    });
+
+    document.getElementById('taloscluster-upgrade-modal').addEventListener('click', function (event) {
+        if (event.target === this) {
+            this.close();
+        }
+    });
+
+    // A successful upgrade submission swaps in a hidden
+    // [data-toast-prefix] marker rather than an inline banner, so the
+    // dialog closes and the outcome surfaces as a toast (see layout.html's
+    // showToast) instead of a stale success message waiting in the modal
+    // the next time it opens — mirrors registry_content.html's identical
+    // zone-add listener.
+    document.getElementById('taloscluster-upgrade-modal-body').addEventListener('htmx:afterSwap', function (event) {
+        var marker = event.target.querySelector('[data-toast-prefix]');
+        if (!marker) {
+            return;
+        }
+
+        document.getElementById('taloscluster-upgrade-modal').close();
+        showToast(marker.getAttribute('data-toast-prefix'), marker.getAttribute('data-toast-command'),
+            marker.getAttribute('data-toast-suffix'));
     });
 
     wireCopyChip(document.getElementById('delete-taloscluster-name-chip'), {{.Name}});
