@@ -28,3 +28,6 @@ updates:
     ignore:
       - dependency-name: "k8s.io/*"
       - dependency-name: "sigs.k8s.io/*"
+      # Bumps break the build until kine and the k8s 0.32.x pin can move.
+      - dependency-name: "go.etcd.io/etcd/*"
+      - dependency-name: "github.com/testcontainers/testcontainers-go*"
