@@ -89,6 +89,15 @@ func (r *Reconciler) planComponentOnMember(
 	ctx context.Context, component kubernetesComponent, member upgradeMember,
 	desired string, upgradeCtx upgradeContext,
 ) (k8sUpgradePlan, error) {
+	// Same reasoning as upgradeTalosMember's own reachability gate: a
+	// member that did not answer this pass's Version probe cannot be
+	// read, let alone patched, and every probe below would fail against
+	// it — which would report UpgradeFailed for a node that is merely
+	// down. Park the plan on it instead, and skip the dials entirely.
+	if !member.reachable {
+		return k8sUpgradePlan{waitingFor: "member " + member.instance.Name}, nil
+	}
+
 	node := dialAddress(*member.instance)
 
 	current, err := r.Bootstrapper.KubernetesComponentImage(

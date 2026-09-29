@@ -57,6 +57,13 @@ type upgradeMember struct {
 	// machineType is machine.TypeControlPlane or machine.TypeWorker — see
 	// configBytes, which needs it to generate this member's own config.
 	machineType machine.Type
+	// reachable is whether this member answered refreshMemberVersions'
+	// own Version RPC on this pass. A member that did not is either
+	// rebooting into an upgrade it was already given or down for some
+	// unrelated reason, and either way must not be given another one —
+	// see upgradeTalosMember, which parks the roll on it rather than
+	// re-issuing an RPC that cannot succeed.
+	reachable bool
 }
 
 // installerImage is the installer image reference for version — see
@@ -194,6 +201,26 @@ func (r *Reconciler) upgradeTalosMember(
 ) (ctrl.Result, error) {
 	target := stale[0].instance
 	image := installerImage(desired)
+
+	// A stale member that did not answer this pass's own Version probe is
+	// already doing what we would ask it to: a Talos upgrade reboots the
+	// node, so the member at the head of the roll goes unreachable for the
+	// duration and only reappears once it is back on the new version.
+	// Re-issuing the RPC at it cannot succeed — it would report
+	// UpgradeFailed on a member that is upgrading perfectly well — so the
+	// roll parks here instead, exactly as the Kubernetes plan parks on a
+	// component that has not finished rolling out. This is also what keeps
+	// workers to one at a time: the control-plane health check upstream
+	// covers control-plane members, but it is built from
+	// ClusterInfo.ControlPlaneNodes alone and never sees a worker.
+	if !stale[0].reachable {
+		r.Logger.Info("Waiting for cluster member to come back from its talos upgrade",
+			"cluster", cluster.Name, "instance", target.Name, "version", desired)
+
+		return r.setUpToDateCondition(ctx, cluster, observed, metav1.ConditionFalse, reasonUpgradingTalos,
+			fmt.Sprintf("upgrading to talos %s, waiting for %s to come back", desired, target.Name),
+			ctrl.Result{RequeueAfter: r.RetryInterval})
+	}
 
 	r.Logger.Info("Upgrading talos on cluster member",
 		"cluster", cluster.Name, "instance", target.Name, "image", image, "remaining", len(stale))
@@ -365,12 +392,18 @@ func (r *Reconciler) refreshMemberVersions(
 	ctx context.Context, cluster *v1alpha2.TalosCluster, members []upgradeMember, controlPlaneAddr string,
 	talosCfg *config.Config,
 ) {
-	for _, member := range members {
-		instance := member.instance
+	for idx := range members {
+		instance := members[idx].instance
 		addr := dialAddress(*instance)
 		updated := false
 
+		// The Version RPC doubles as this pass's liveness probe — the
+		// same signal MemberLiveConditionType is built on — so the roll
+		// below gets its "is this member up right now?" answer for free
+		// rather than dialing every member a second time to ask.
 		talosVersion, _, err := r.Bootstrapper.Version(ctx, controlPlaneAddr, addr, talosCfg)
+		members[idx].reachable = err == nil
+
 		if err != nil {
 			r.Logger.Warn("Failed to refresh talos version for member, it may be mid-upgrade",
 				"cluster", cluster.Name, "instance", instance.Name, "error", err)

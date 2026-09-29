@@ -33,6 +33,9 @@ const (
 
 	secondCPNodeName        = "cp-node-2"
 	secondCPInstanceAddress = "10.0.0.3"
+
+	secondWorkerNodeName        = "worker-node-2"
+	secondWorkerInstanceAddress = "10.0.0.4"
 )
 
 // upgradeHarness is everything an upgrade test needs to drive one more
@@ -91,6 +94,47 @@ func upgradeFixture(
 	fakeClient := newFakeClient(t, objects...)
 
 	bootstrapper := newUpgradeBootstrapper()
+	reconciler := newReconciler(fakeClient, bootstrapper)
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName}}
+
+	return upgradeHarness{
+		client:       fakeClient,
+		bootstrapper: bootstrapper,
+		reconciler:   reconciler,
+		request:      req,
+		converged:    convergeFullyReadyCluster(t, fakeClient, reconciler, req),
+	}
+}
+
+// upgradeWorkerFixture builds a cluster whose control plane is already on
+// the pinned Talos version and whose worker pool is not, so the roll
+// starts in the worker pool rather than the control plane — the only way
+// to exercise the worker half of the roll, which the control-plane health
+// check does not cover.
+func upgradeWorkerFixture(
+	t *testing.T, talosVersion string, extraWorkers ...*v1alpha2.Instance,
+) upgradeHarness {
+	t.Helper()
+
+	cluster := testCluster()
+	cluster.Spec.Talos.Version = talosVersion
+
+	objects := make([]client.Object, 0, 3+len(extraWorkers))
+	objects = append(objects, cluster,
+		claimedDiscoveredInstance(cpNodeName, "cp-pool", controlPlaneInstanceAddress),
+		claimedDiscoveredInstance(workerNodeName, "worker-pool", workerInstanceAddress))
+
+	for _, extra := range extraWorkers {
+		objects = append(objects, extra)
+	}
+
+	fakeClient := newFakeClient(t, objects...)
+
+	bootstrapper := newUpgradeBootstrapper()
+	// Only the control plane is already where it should be; every worker
+	// still reports the fixture's own older version.
+	bootstrapper.versionForNode = map[string]string{controlPlaneInstanceAddress: talosVersion}
+
 	reconciler := newReconciler(fakeClient, bootstrapper)
 	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: testClusterName}}
 
@@ -463,4 +507,99 @@ func TestReconcileUpgradesReportsFailure(t *testing.T) {
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, "UpgradeFailed", cond.Reason)
 	assert.Equal(t, testRetryInterval, result.RequeueAfter, "a failed upgrade is retried, not given up on")
+}
+
+// TestReconcileUpgradesWaitsForRebootingMember is the Talos-side gate: the
+// member at the head of the roll goes unreachable for the whole of its own
+// upgrade, because that upgrade reboots it. Re-issuing the RPC at it can
+// only fail, so the roll must park on it and say so — reporting
+// UpgradeFailed for a member that is upgrading perfectly well is both
+// wrong and alarming.
+func TestReconcileUpgradesWaitsForRebootingMember(t *testing.T) {
+	t.Parallel()
+
+	harness := upgradeFixture(t, testUpgradeTalosVersion, "")
+
+	require.Len(t, harness.bootstrapper.upgradeCalls, 1, "the roll started")
+
+	// The member is now rebooting into the version it was just given.
+	harness.bootstrapper.versionErrForNode = map[string]error{controlPlaneInstanceAddress: assert.AnError}
+
+	_, err := harness.reconciler.Reconcile(context.Background(), harness.request)
+	require.NoError(t, err)
+
+	assert.Len(t, harness.bootstrapper.upgradeCalls, 1,
+		"a member that is already rebooting must not be given a second upgrade")
+
+	cond := upToDateCondition(t, harness.client)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, "UpgradingTalos", cond.Reason,
+		"a member mid-reboot is an upgrade in progress, not a failed one")
+	assert.Contains(t, cond.Message, "waiting for "+cpNodeName+" to come back")
+}
+
+// TestReconcileUpgradesWaitsForRebootingWorker is the reason the gate above
+// cannot be left to the control-plane health check: that check is built
+// from ClusterInfo.ControlPlaneNodes alone and never sees a worker, so
+// without a per-member gate a rebooting worker would be handed a second
+// upgrade on the very next pass.
+func TestReconcileUpgradesWaitsForRebootingWorker(t *testing.T) {
+	t.Parallel()
+
+	secondWorker := claimedDiscoveredInstance(secondWorkerNodeName, "worker-pool", secondWorkerInstanceAddress)
+
+	harness := upgradeWorkerFixture(t, testUpgradeTalosVersion, secondWorker)
+
+	// The control plane is already converged, so the roll is into the
+	// worker pool, and takes its first member.
+	require.Equal(t, []string{workerInstanceAddress}, harness.bootstrapper.upgradeCalls,
+		"the worker roll starts at the first worker by name")
+
+	harness.bootstrapper.versionErrForNode = map[string]error{workerInstanceAddress: assert.AnError}
+
+	_, err := harness.reconciler.Reconcile(context.Background(), harness.request)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{workerInstanceAddress}, harness.bootstrapper.upgradeCalls,
+		"the second worker must not be taken down while the first is still rebooting")
+
+	cond := upToDateCondition(t, harness.client)
+	assert.Equal(t, "UpgradingTalos", cond.Reason)
+	assert.Contains(t, cond.Message, "waiting for "+workerNodeName+" to come back")
+
+	// Once it is back on the new version, the roll moves on. Added to the
+	// fixture's own overrides rather than replacing them, so the control
+	// plane stays converged and the roll stays in the worker pool.
+	harness.bootstrapper.versionErrForNode = nil
+	harness.bootstrapper.versionForNode[workerInstanceAddress] = testUpgradeTalosVersion
+
+	_, err = harness.reconciler.Reconcile(context.Background(), harness.request)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{workerInstanceAddress, secondWorkerInstanceAddress},
+		harness.bootstrapper.upgradeCalls, "the roll continues to the next worker once the first is back")
+}
+
+// TestReconcileUpgradesWaitsForUnreachableMemberOnKubernetesPath is the
+// same gate on the Kubernetes side, where an unreachable member would
+// otherwise fail every component probe in turn and surface as
+// UpgradeFailed rather than as the wait it actually is.
+func TestReconcileUpgradesWaitsForUnreachableMemberOnKubernetesPath(t *testing.T) {
+	t.Parallel()
+
+	harness := upgradeFixture(t, testTalosVersionFixture, testUpgradeKubernetesVersion)
+
+	require.Len(t, harness.bootstrapper.componentPatches, 1, "the component roll started")
+
+	harness.bootstrapper.versionErrForNode = map[string]error{controlPlaneInstanceAddress: assert.AnError}
+
+	_, err := harness.reconciler.Reconcile(context.Background(), harness.request)
+	require.NoError(t, err)
+
+	assert.Len(t, harness.bootstrapper.componentPatches, 1,
+		"nothing may be patched onto a member that is not answering")
+
+	cond := upToDateCondition(t, harness.client)
+	assert.Equal(t, "UpgradingKubernetes", cond.Reason)
+	assert.Contains(t, cond.Message, "waiting for member "+cpNodeName)
 }

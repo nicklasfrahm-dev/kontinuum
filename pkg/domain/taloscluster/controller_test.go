@@ -107,6 +107,10 @@ type fakeBootstrapper struct {
 	// versionForNode overrides the shared version field for the named
 	// nodes only, the same way kubeletVersionForNode does for kubelets.
 	versionForNode map[string]string
+	// versionErrForNode fails the Version RPC for the named nodes only —
+	// how a test models one member being unreachable (rebooting into an
+	// upgrade, say) while the rest of the cluster answers normally.
+	versionErrForNode map[string]error
 }
 
 // versionForNode returns the version node should report, preferring an
@@ -238,6 +242,10 @@ func (f *fakeBootstrapper) Version(_ context.Context, _, node string, _ *clientc
 
 	if f.versionErr != nil {
 		return "", "", f.versionErr
+	}
+
+	if err, ok := f.versionErrForNode[node]; ok {
+		return "", "", err
 	}
 
 	return versionForNode(f.versionForNode, node, f.version), f.arch, nil

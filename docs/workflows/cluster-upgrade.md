@@ -67,14 +67,33 @@ pass. That has two consequences worth knowing:
   once the cluster comes up. The two never interleave — a half-bootstrapped
   control plane being rebooted into a new installer image is how etcd gets
   lost.
-- A member that is mid-upgrade is rebooting, so it's unreachable, so the
-  next pass's health check fails, so no second member is touched until the
-  first one is back. That is the entire rolling mechanism; there is no
-  separate lock.
+- A member that is mid-upgrade is rebooting, so it's unreachable, so
+  nothing else is touched until it is back. There is no separate lock.
 
 An unhealthy cluster — or one whose addons have gone unhealthy, taking
 `Ready` down with them — is therefore also a cluster that will not upgrade.
 Fix the health problem first.
+
+#### What actually holds the roll to one member
+
+Two gates, because the health check alone does not cover the whole cluster:
+
+- The **control-plane health check** is built from the control-plane
+  members only (`ClusterInfo.ControlPlaneNodes`); it never sees a worker.
+  A rebooting control-plane member fails it, and the whole pass stops
+  before it reaches the upgrade step at all. This is what preserves etcd
+  quorum: on a three- or five-member control plane, exactly one is ever
+  down.
+- A **per-member reachability gate** covers everyone, workers included.
+  Each pass already probes every member's version, and a member that does
+  not answer is either rebooting into an upgrade it was given or down for
+  an unrelated reason. Either way the roll parks on it rather than issuing
+  it anything further, and says so on the condition.
+
+The second gate is why a rebooting member reports `UpgradingTalos` and not
+`UpgradeFailed`: it is doing exactly what it was asked to, and a reconciler
+that re-issued the RPC at it would only collect an error from a node that
+is upgrading perfectly well.
 
 ### One node at a time, control plane first
 
@@ -104,7 +123,7 @@ The `UpToDate` condition ties the two together:
 | `VersionsUnmanaged` | Neither version is pinned, so there is nothing to converge. |
 | `UpgradingTalos` | A member is being upgraded to the pinned Talos version; the message names it and how many are left. |
 | `UpgradingKubernetes` | A component is being moved to the pinned Kubernetes version, or has been and is still rolling out; the message names the component and the member. |
-| `UpgradeFailed` | The upgrade call itself was refused. Retried on the next pass — this is not terminal. |
+| `UpgradeFailed` | The upgrade call itself was refused by a member that *was* reachable. Retried on the next pass — this is not terminal. A member that is merely rebooting reports `UpgradingTalos`/`UpgradingKubernetes` instead. |
 
 ## How it works
 
@@ -200,8 +219,10 @@ flowchart TD
     Pinned -- No --> Unmanaged([UpToDate = True\nVersionsUnmanaged])
 
     Pinned -- Yes --> TalosStale{Any member off the\npinned talos version?}
-    TalosStale -- Yes --> UpgradeTalos[Upgrade the first such member\nvia the installer image]
-    UpgradeTalos --> Upgrading([UpToDate = False\nUpgradingTalos])
+    TalosStale -- Yes --> Reachable{First such member\nanswering?}
+    Reachable -- No --> Upgrading([UpToDate = False\nUpgradingTalos])
+    Reachable -- Yes --> UpgradeTalos[Upgrade that member\nvia the installer image]
+    UpgradeTalos --> Upgrading
     Upgrading --> Requeue
 
     TalosStale -- No --> K8sStale{Any member off the pinned\nkubernetes version?}
