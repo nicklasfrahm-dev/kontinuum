@@ -129,8 +129,8 @@ func TestReconcileUpgradesReportsUnmanagedVersions(t *testing.T) {
 	harness := upgradeFixture(t, "", "")
 
 	assert.Empty(t, harness.bootstrapper.upgradeCalls, "an unpinned talos version must never trigger an upgrade")
-	assert.Empty(t, harness.bootstrapper.upgradeConfigCalls,
-		"an unpinned kubernetes version must never re-apply config")
+	assert.Empty(t, harness.bootstrapper.componentPatches,
+		"an unpinned kubernetes version must never patch a component")
 
 	cond := upToDateCondition(t, harness.client)
 	assert.Equal(t, metav1.ConditionTrue, cond.Status)
@@ -147,7 +147,7 @@ func TestReconcileUpgradesRecordsObservedVersions(t *testing.T) {
 	harness := upgradeFixture(t, testTalosVersionFixture, testUpgradeRunningKubernetesVersion)
 
 	assert.Empty(t, harness.bootstrapper.upgradeCalls, "a cluster already at its pinned versions has nothing to roll")
-	assert.Empty(t, harness.bootstrapper.upgradeConfigCalls)
+	assert.Empty(t, harness.bootstrapper.componentPatches)
 
 	cond := upToDateCondition(t, harness.client)
 	assert.Equal(t, metav1.ConditionTrue, cond.Status)
@@ -178,7 +178,7 @@ func TestReconcileUpgradesAcceptsUnprefixedKubernetesVersion(t *testing.T) {
 
 	harness := upgradeFixture(t, "", "1.32.0")
 
-	assert.Empty(t, harness.bootstrapper.upgradeConfigCalls)
+	assert.Empty(t, harness.bootstrapper.componentPatches)
 	assert.Equal(t, "UpToDate", upToDateCondition(t, harness.client).Reason)
 }
 
@@ -212,25 +212,150 @@ func TestReconcileUpgradesTalosBeforeKubernetes(t *testing.T) {
 	harness := upgradeFixture(t, testUpgradeTalosVersion, testUpgradeKubernetesVersion)
 
 	assert.Len(t, harness.bootstrapper.upgradeCalls, 1, "the talos roll must start")
-	assert.Empty(t, harness.bootstrapper.upgradeConfigCalls,
+	assert.Empty(t, harness.bootstrapper.componentPatches,
 		"kubernetes must not be touched while any member still runs the old talos version")
 }
 
 // TestReconcileUpgradesKubernetesOnceTalosConverged covers the second half
 // of the precedence rule: with Talos already where it should be, a stale
-// Kubernetes version re-applies that member's regenerated machine config.
+// Kubernetes version starts the component roll — at its first component,
+// the apiserver, and nowhere else.
 func TestReconcileUpgradesKubernetesOnceTalosConverged(t *testing.T) {
 	t.Parallel()
 
 	harness := upgradeFixture(t, testTalosVersionFixture, testUpgradeKubernetesVersion)
 
 	assert.Empty(t, harness.bootstrapper.upgradeCalls, "talos is already at its pinned version")
-	require.Equal(t, []string{controlPlaneInstanceAddress}, harness.bootstrapper.upgradeConfigCalls)
-	assert.NotEmpty(t, harness.bootstrapper.upgradeConfigs[0], "the re-applied config must actually carry bytes")
+	require.Equal(t, []string{
+		controlPlaneInstanceAddress + "/kube-apiserver=registry.k8s.io/kube-apiserver:" + testUpgradeKubernetesVersion,
+	}, harness.bootstrapper.componentPatches,
+		"the roll starts at the apiserver and patches exactly one component per pass")
 
 	cond := upToDateCondition(t, harness.client)
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, "UpgradingKubernetes", cond.Reason)
+}
+
+// reconcileUntilStable drives the harness until the Kubernetes roll stops
+// making progress, returning the patches it made along the way. Bounded so
+// a plan that fails to converge fails the test rather than hanging it.
+func reconcileUntilStable(t *testing.T, harness upgradeHarness) []string {
+	t.Helper()
+
+	const maxPasses = 40
+
+	for range maxPasses {
+		before := len(harness.bootstrapper.componentPatches)
+
+		_, err := harness.reconciler.Reconcile(context.Background(), harness.request)
+		require.NoError(t, err)
+
+		if len(harness.bootstrapper.componentPatches) == before {
+			return harness.bootstrapper.componentPatches
+		}
+	}
+
+	t.Fatal("the kubernetes roll never stopped patching components")
+
+	return nil
+}
+
+// TestReconcileUpgradesKubernetesComponentsInOrder is the equivalence this
+// package owes talosctl upgrade-k8s: the control plane's static pods move
+// innermost outwards, then kube-proxy, and the kubelet only once all of
+// them have — never the other way round, which would put a component ahead
+// of the apiserver it talks to.
+func TestReconcileUpgradesKubernetesComponentsInOrder(t *testing.T) {
+	t.Parallel()
+
+	harness := upgradeFixture(t, testTalosVersionFixture, testUpgradeKubernetesVersion)
+
+	patches := reconcileUntilStable(t, harness)
+
+	assert.Equal(t, []string{
+		controlPlaneInstanceAddress + "/kube-apiserver=registry.k8s.io/kube-apiserver:" + testUpgradeKubernetesVersion,
+		controlPlaneInstanceAddress + "/kube-controller-manager=registry.k8s.io/kube-controller-manager:" +
+			testUpgradeKubernetesVersion,
+		controlPlaneInstanceAddress + "/kube-scheduler=registry.k8s.io/kube-scheduler:" + testUpgradeKubernetesVersion,
+		controlPlaneInstanceAddress + "/kube-proxy=registry.k8s.io/kube-proxy:" + testUpgradeKubernetesVersion,
+		controlPlaneInstanceAddress + "/kubelet=ghcr.io/siderolabs/kubelet:" + testUpgradeKubernetesVersion,
+	}, patches)
+}
+
+// TestReconcileUpgradesWaitsForComponentRollout is the gate between one
+// patch and the next: a component that has been patched but has not come
+// back Ready parks the whole plan, so nothing else — not the next
+// component, not the next member — moves until it does.
+func TestReconcileUpgradesWaitsForComponentRollout(t *testing.T) {
+	t.Parallel()
+
+	harness := upgradeFixture(t, testTalosVersionFixture, testUpgradeKubernetesVersion)
+
+	require.Len(t, harness.bootstrapper.componentPatches, 1, "the apiserver patch went out")
+
+	harness.bootstrapper.pendingRollout = map[string]bool{
+		controlPlaneInstanceAddress + "/kube-apiserver": true,
+	}
+
+	_, err := harness.reconciler.Reconcile(context.Background(), harness.request)
+	require.NoError(t, err)
+
+	assert.Len(t, harness.bootstrapper.componentPatches, 1,
+		"nothing may move while the apiserver has not finished rolling out")
+
+	cond := upToDateCondition(t, harness.client)
+	assert.Equal(t, "UpgradingKubernetes", cond.Reason)
+	assert.Contains(t, cond.Message, "waiting for kube-apiserver on "+cpNodeName)
+
+	// Let it finish, and the plan picks up exactly where it parked.
+	harness.bootstrapper.pendingRollout = nil
+
+	_, err = harness.reconciler.Reconcile(context.Background(), harness.request)
+	require.NoError(t, err)
+
+	require.Len(t, harness.bootstrapper.componentPatches, 2)
+	assert.Contains(t, harness.bootstrapper.componentPatches[1], "kube-controller-manager")
+}
+
+// TestReconcileUpgradesKubernetesOneMemberAtATime covers the other axis of
+// the walk: a component is moved on every control-plane member before the
+// next component is started on any of them, one member per pass.
+func TestReconcileUpgradesKubernetesOneMemberAtATime(t *testing.T) {
+	t.Parallel()
+
+	secondCP := claimedDiscoveredInstance(secondCPNodeName, "cp-pool", secondCPInstanceAddress)
+
+	harness := upgradeFixture(t, testTalosVersionFixture, testUpgradeKubernetesVersion, secondCP)
+
+	patches := reconcileUntilStable(t, harness)
+
+	require.GreaterOrEqual(t, len(patches), 4)
+	assert.Equal(t, controlPlaneInstanceAddress+"/kube-apiserver=registry.k8s.io/kube-apiserver:"+
+		testUpgradeKubernetesVersion, patches[0])
+	assert.Equal(t, secondCPInstanceAddress+"/kube-apiserver=registry.k8s.io/kube-apiserver:"+
+		testUpgradeKubernetesVersion, patches[1],
+		"the apiserver moves on every member before any other component starts")
+	assert.Contains(t, patches[2], "kube-controller-manager")
+}
+
+// TestReconcileUpgradesPreservesKubeletFlavour covers the one image whose
+// repository has variants: Talos publishes plain, -slim and -fat kubelets,
+// and a version bump must keep a node on the flavour it already runs
+// rather than quietly moving it onto the default one.
+func TestReconcileUpgradesPreservesKubeletFlavour(t *testing.T) {
+	t.Parallel()
+
+	harness := upgradeFixture(t, testTalosVersionFixture, testUpgradeKubernetesVersion)
+
+	harness.bootstrapper.componentImages = map[string]string{
+		controlPlaneInstanceAddress + "/kubelet": "ghcr.io/siderolabs/kubelet:" +
+			testUpgradeRunningKubernetesVersion + "-slim",
+	}
+
+	patches := reconcileUntilStable(t, harness)
+
+	assert.Contains(t, patches, controlPlaneInstanceAddress+"/kubelet=ghcr.io/siderolabs/kubelet:"+
+		testUpgradeKubernetesVersion+"-slim")
 }
 
 // TestReconcileUpgradesOneMemberAtATime is the rolling guarantee: two

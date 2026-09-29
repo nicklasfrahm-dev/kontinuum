@@ -103,7 +103,7 @@ The `UpToDate` condition ties the two together:
 | `UpToDate` | Every member runs every pinned version. |
 | `VersionsUnmanaged` | Neither version is pinned, so there is nothing to converge. |
 | `UpgradingTalos` | A member is being upgraded to the pinned Talos version; the message names it and how many are left. |
-| `UpgradingKubernetes` | Same, for the Kubernetes version. |
+| `UpgradingKubernetes` | A component is being moved to the pinned Kubernetes version, or has been and is still rolling out; the message names the component and the member. |
 | `UpgradeFailed` | The upgrade call itself was refused. Retried on the next pass — this is not terminal. |
 
 ## How it works
@@ -120,20 +120,66 @@ cluster's only etcd member. Talos's own pre-upgrade checks are left enabled
 
 ### Kubernetes
 
-Kontinuum regenerates the member's machine config with the new Kubernetes
-version and re-applies it with the cluster's admin identity in `AUTO` mode,
-so Talos reboots the node only if the change actually requires it — a
-component image tag bump does not. Talos's own controllers then roll the
-static control-plane pods, restart the kubelet, and re-render the bootstrap
-manifests from the new config.
+Kontinuum performs the same ordered, component-by-component rollout
+`talosctl upgrade-k8s` does.
 
-This is deliberately **not** a reimplementation of `talosctl upgrade-k8s`'s
-per-component sequencing, which lives in the main `siderolabs/talos` module
-rather than the `pkg/machinery` module kontinuum depends on. It is
-config-driven convergence: correct for the version bumps this API exposes,
-but without the ordered, component-by-component rollout `upgrade-k8s`
-performs. If you need that, run `talosctl upgrade-k8s` yourself against the
-cluster's kubeconfig and set `spec.kubernetes.version` to match afterwards.
+Each step reads the node's own **active** machine config, points a single
+component's image field at the new version, and applies the result with
+`NO_REBOOT`. Patching in place is what makes the ordering possible at all:
+regenerating the whole config would move every component's image at once,
+and `NO_REBOOT` means a Kubernetes upgrade can never reboot a node as a
+side effect — if Talos decides a patch needs one, it refuses, and the
+refusal surfaces as `UpgradeFailed` instead.
+
+The components move in this order, and a step only begins once the
+previous one has been observed to finish:
+
+| Order | Component | Config field | Runs on |
+| --- | --- | --- | --- |
+| 1 | `kube-apiserver` | `cluster.apiServer.image` | Control plane |
+| 2 | `kube-controller-manager` | `cluster.controllerManager.image` | Control plane |
+| 3 | `kube-scheduler` | `cluster.scheduler.image` | Control plane |
+| 4 | `kube-proxy` | `cluster.proxy.image` | Control plane |
+| 5 | `kubelet` | `machine.kubelet.image` | Every member |
+
+The order is the point: an apiserver may run ahead of the components that
+talk to it, but a controller-manager, scheduler or kubelet running ahead of
+the apiserver is outside the version skew Kubernetes supports. Within a
+component, every member is moved — control plane first, by name — before
+the next component starts on any of them.
+
+"Observed to finish" means the node itself reports it, read over the Talos
+API rather than the workload cluster's:
+
+- A **static pod** counts as rolled out when the node's own
+  `StaticPodStatus` shows a container running the new image *and* a true
+  `Ready` condition. This is the equivalent of `talosctl upgrade-k8s`'s own
+  post-patch wait — if anything the stricter of the two, since it cannot
+  pass on a pod that kept its old image.
+- The **kubelet** counts as rolled out when its `KubeletSpec` carries the
+  new image *and* its service is running and healthy. Both halves matter:
+  the service stays "running" across the restart that picks up a new image.
+- **kube-proxy** is not waited for. It is a DaemonSet rendered from the
+  bootstrap manifests rather than something the patched node runs itself,
+  so there is nothing node-local to observe — `talosctl upgrade-k8s` does
+  not wait for it either.
+
+Where `talosctl` does all of this inside one blocking call, the controller
+spreads it across reconcile passes: one patch, or one wait, per pass, with
+the cluster's own health check gating each pass on top. The `UpToDate`
+condition names whichever component and member the roll is currently on.
+
+Two details worth knowing:
+
+- **Bootstrap manifests converge on their own.** Talos's own
+  `ManifestApplyController` watches the rendered manifests and re-applies
+  them whenever the config changes, so CoreDNS and the kube-proxy DaemonSet
+  follow the config without kontinuum pushing them. `talosctl upgrade-k8s`
+  pushes them itself for immediacy and pruning, not because the mechanism
+  needs it.
+- **The kubelet's image flavour is preserved.** Talos publishes plain,
+  `-slim` and `-fat` kubelet images; an upgrade keeps a node on whichever
+  it already runs rather than moving it onto the default.
 
 ## Flow chart
 
@@ -159,8 +205,11 @@ flowchart TD
     Upgrading --> Requeue
 
     TalosStale -- No --> K8sStale{Any member off the pinned\nkubernetes version?}
-    K8sStale -- Yes --> ApplyConfig[Re-apply that member's config,\nregenerated at the new version]
-    ApplyConfig --> UpgradingK8s([UpToDate = False\nUpgradingKubernetes])
+    K8sStale -- Yes --> Plan[Walk the component plan:\napiserver, controller-manager, scheduler,\nproxy, kubelet — members in order]
+    Plan --> Parked{Previous component\nrolled out?}
+    Parked -- No --> UpgradingK8s([UpToDate = False\nUpgradingKubernetes])
+    Parked -- Yes --> Patch[Patch the next component's image\ninto that member's active config]
+    Patch --> UpgradingK8s
     UpgradingK8s --> Requeue
 
     K8sStale -- No --> Done([UpToDate = True\nUpToDate])

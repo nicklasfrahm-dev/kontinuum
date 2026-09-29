@@ -77,12 +77,25 @@ type fakeBootstrapper struct {
 	upgradeCalls  []string
 	upgradeImages []string
 	upgradeErr    error
-	// upgradeConfigCalls and upgradeConfigs mirror upgradeCalls for
-	// UpgradeConfiguration — the Kubernetes-side upgrade, which re-applies
-	// a regenerated machine config rather than triggering an installer.
-	upgradeConfigCalls []string
-	upgradeConfigs     [][]byte
-	upgradeConfigErr   error
+	// componentImages is the image each member reports for each
+	// Kubernetes component, keyed by componentKey. A member with no entry
+	// for a component reports the default image for whatever version its
+	// kubelet reports, so a fixture only has to name the ones it wants to
+	// differ. PatchKubernetesComponent writes into this map, so a later
+	// pass sees what an earlier one patched — which is what makes the
+	// multi-pass rollout tests possible.
+	componentImages   map[string]string
+	componentImageErr error
+	// componentPatches records every PatchKubernetesComponent in order as
+	// "<node>/<component>=<image>" — the roll order itself, which is what
+	// upgrade_test.go asserts on.
+	componentPatches  []string
+	componentPatchErr error
+	// pendingRollout names the componentKeys that report *not* rolled out,
+	// letting a test park the plan on one component and prove nothing else
+	// moves while it is parked.
+	pendingRollout map[string]bool
+	rolledOutErr   error
 	// kubeletVersionCalls records every node KubeletVersion was asked
 	// about; kubeletVersion is what every one of them reports back, unless
 	// kubeletVersionForNode names an override for that specific node — see
@@ -116,13 +129,69 @@ func (f *fakeBootstrapper) UpgradeTalos(
 	return f.upgradeErr
 }
 
-func (f *fakeBootstrapper) UpgradeConfiguration(
-	_ context.Context, _, node string, _ *clientconfig.Config, data []byte,
-) error {
-	f.upgradeConfigCalls = append(f.upgradeConfigCalls, node)
-	f.upgradeConfigs = append(f.upgradeConfigs, data)
+func (f *fakeBootstrapper) KubernetesComponentImage(
+	_ context.Context, _, node string, _ *clientconfig.Config, component string,
+) (string, error) {
+	if f.componentImageErr != nil {
+		return "", f.componentImageErr
+	}
 
-	return f.upgradeConfigErr
+	if image, ok := f.componentImages[componentKey(node, component)]; ok {
+		return image, nil
+	}
+
+	return defaultComponentImage(component, versionForNode(f.kubeletVersionForNode, node, f.kubeletVersion)), nil
+}
+
+func (f *fakeBootstrapper) PatchKubernetesComponent(
+	_ context.Context, _, node string, _ *clientconfig.Config, component, image string,
+) error {
+	if f.componentPatchErr != nil {
+		return f.componentPatchErr
+	}
+
+	f.componentPatches = append(f.componentPatches, componentKey(node, component)+"="+image)
+
+	if f.componentImages == nil {
+		f.componentImages = map[string]string{}
+	}
+
+	f.componentImages[componentKey(node, component)] = image
+
+	return nil
+}
+
+func (f *fakeBootstrapper) KubernetesComponentRolledOut(
+	_ context.Context, _, node string, _ *clientconfig.Config, component, _ string,
+) (bool, error) {
+	if f.rolledOutErr != nil {
+		return false, f.rolledOutErr
+	}
+
+	return !f.pendingRollout[componentKey(node, component)], nil
+}
+
+// componentKey identifies one component on one member, the key
+// fakeBootstrapper's own component maps and patch log are built from.
+func componentKey(node, component string) string {
+	return node + "/" + component
+}
+
+// defaultComponentImage is the image a member reports for component when a
+// fixture has not said otherwise: the real repository Talos pins, at the
+// version that member's kubelet reports. Spelled out here rather than
+// taken from the package under test so the tests assert the actual
+// repositories rather than agreeing with whatever the code says.
+func defaultComponentImage(component, version string) string {
+	repositories := map[string]string{
+		"kube-apiserver":          "registry.k8s.io/kube-apiserver",
+		"kube-controller-manager": "registry.k8s.io/kube-controller-manager",
+		"kube-scheduler":          "registry.k8s.io/kube-scheduler",
+		"kube-proxy":              "registry.k8s.io/kube-proxy",
+		"kubelet":                 "ghcr.io/siderolabs/kubelet",
+	}
+
+	return repositories[component] + ":" + version
 }
 
 func (f *fakeBootstrapper) KubeletVersion(

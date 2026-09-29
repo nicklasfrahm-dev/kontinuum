@@ -38,6 +38,42 @@ const rpcTimeout = 30 * time.Second
 // errNoCPUsReported is CPUTopology's own sentinel — see its own doc.
 var errNoCPUsReported = errors.New("no possible cpus reported")
 
+// KubernetesComponentBootstrapper is the Kubernetes-component half of
+// ClusterBootstrapper, split out as its own interface because the three
+// operations only ever make sense together: an upgrade reads a
+// component's image, patches it, and then watches it roll out, and no
+// caller wants one of the three without the others.
+type KubernetesComponentBootstrapper interface {
+	// KubernetesComponentImage reports the image reference node currently
+	// runs for one Kubernetes component (see k8scomponent.go's own
+	// component constants), read from the COSI resource Talos renders
+	// that component's configuration into. Dialed exactly like
+	// ClusterBootstrapper.Version.
+	KubernetesComponentImage(
+		ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config, component string,
+	) (string, error)
+	// PatchKubernetesComponent points one component's image field in
+	// node's own *active* machine config at image and applies the result
+	// without rebooting — the programmatic equivalent of one step of
+	// talosctl upgrade-k8s, and the reason a Kubernetes roll can move one
+	// component at a time where regenerating the whole config could not.
+	// Dialed exactly like ClusterBootstrapper.Version.
+	PatchKubernetesComponent(
+		ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config, component, image string,
+	) error
+	// KubernetesComponentRolledOut reports whether node has finished
+	// moving component onto image: for a static pod, that it runs that
+	// image and is Ready; for the kubelet, that its spec carries the
+	// image and its service is running and healthy. This is the gate
+	// between one node's patch and the next one's — see upgrade.go's own
+	// k8sUpgradeStep. A component that has not been reported yet is not
+	// an error, just not rolled out. Dialed exactly like
+	// ClusterBootstrapper.Version.
+	KubernetesComponentRolledOut(
+		ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config, component, image string,
+	) (bool, error)
+}
+
 // ClusterBootstrapper is the Discoverer-style seam this package's
 // controller dials Talos through — see instance.Discoverer's own doc for
 // why this pattern exists. talosBootstrapper is the production
@@ -90,16 +126,9 @@ type ClusterBootstrapper interface {
 	// must treat node going unreachable afterwards as the expected
 	// outcome, not a failure — see upgrade.go's own reconcileUpgrades.
 	UpgradeTalos(ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config, image string) error
-	// UpgradeConfiguration applies data (a regenerated machine config) to
-	// an already-configured node — unlike ApplyConfiguration above, which
-	// only ever reaches a node still in maintenance mode, this dials
-	// endpoint with the real admin identity in talosCfg and routes to node
-	// via client.WithNode. Applied in AUTO mode: Talos reboots the node
-	// only if the specific fields that changed actually require it, which
-	// a Kubernetes version bump (component image tags alone) does not.
-	UpgradeConfiguration(
-		ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config, data []byte,
-	) error
+	// KubernetesComponentBootstrapper covers the Kubernetes-component
+	// half of an upgrade — see its own doc above this interface.
+	KubernetesComponentBootstrapper
 	// KubeletVersion reads the Kubernetes version node's kubelet actually
 	// runs, from its own k8s.KubeletSpec COSI resource — the same
 	// resource `talosctl get kubeletspec` reads, and the closest thing
@@ -526,33 +555,10 @@ func (t talosBootstrapper) UpgradeTalos(
 	return nil
 }
 
-// UpgradeConfiguration implements ClusterBootstrapper.
-func (t talosBootstrapper) UpgradeConfiguration(
-	ctx context.Context, endpoint, node string, talosCfg *clientconfig.Config, data []byte,
-) error {
-	talosClient, err := t.dial(ctx, endpoint, talosCfg)
-	if err != nil {
-		return err
-	}
-	defer talosClient.Close() //nolint:errcheck // best-effort close of a short-lived apply-config connection
-
-	rpcCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
-	defer cancel()
-
-	_, err = talosClient.ApplyConfiguration(talosclient.WithNode(rpcCtx, node), &machineapi.ApplyConfigurationRequest{
-		Data: data,
-		Mode: machineapi.ApplyConfigurationRequest_AUTO,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to apply configuration to %s via %s: %w", node, endpoint, err)
-	}
-
-	return nil
-}
-
 // KubeletVersion implements ClusterBootstrapper. The kubelet image is a
 // full reference (e.g. ghcr.io/siderolabs/kubelet:v1.32.0); only its tag
-// is the version, and a digest-pinned or untagged reference has none to
+// is the version — minus its flavour suffix, if any, see
+// kubeletVersionFromImage — and a digest-pinned or untagged reference has none to
 // report, which is an empty string rather than an error — the caller
 // treats "not yet known" and "disagrees with the target" identically (see
 // upgrade.go's own memberVersions).
@@ -574,7 +580,7 @@ func (t talosBootstrapper) KubeletVersion(
 		return "", fmt.Errorf("failed to read kubelet spec for %s via %s: %w", node, endpoint, err)
 	}
 
-	return imageTag(spec.TypedSpec().Image), nil
+	return kubeletVersionFromImage(spec.TypedSpec().Image), nil
 }
 
 // imageTag returns ref's tag, or an empty string when it carries none —

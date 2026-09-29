@@ -28,6 +28,9 @@ import (
 	"github.com/cosi-project/runtime/pkg/state/impl/inmem"
 	"github.com/cosi-project/runtime/pkg/state/impl/namespaced"
 	cosiserver "github.com/cosi-project/runtime/pkg/state/protobuf/server"
+	"github.com/siderolabs/talos/pkg/machinery/config/container"
+	v1alpha1cfg "github.com/siderolabs/talos/pkg/machinery/config/types/v1alpha1"
+	talosconfig "github.com/siderolabs/talos/pkg/machinery/resources/config"
 	"github.com/siderolabs/talos/pkg/machinery/resources/k8s"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -236,6 +239,39 @@ func seedKubeletSpec(t *testing.T, coreState state.CoreState) {
 	require.NoError(t, coreState.Create(context.Background(), spec))
 }
 
+// seedCOSIState populates coreState with everything the wire assertions
+// below read back over the real COSI protocol.
+func seedCOSIState(t *testing.T, coreState state.CoreState) {
+	t.Helper()
+
+	seedKubeletSpec(t, coreState)
+	seedMachineConfig(t, coreState)
+}
+
+// seedMachineConfig populates coreState with the active machine config
+// PatchKubernetesComponent reads, patches and re-applies. It carries an
+// explicit apiServer image so the assertion below can prove the patch
+// replaced that one field rather than regenerating the document.
+func seedMachineConfig(t *testing.T, coreState state.CoreState) {
+	t.Helper()
+
+	provider := &v1alpha1cfg.Config{
+		ConfigVersion: "v1alpha1",
+		MachineConfig: &v1alpha1cfg.MachineConfig{},
+		ClusterConfig: &v1alpha1cfg.ClusterConfig{
+			APIServerConfig: &v1alpha1cfg.APIServerConfig{
+				ContainerImage: "registry.k8s.io/kube-apiserver:" + testWireKubernetesVersion,
+			},
+		},
+	}
+
+	container, err := container.New(provider)
+	require.NoError(t, err)
+
+	require.NoError(t, coreState.Create(context.Background(),
+		talosconfig.NewMachineConfig(container)))
+}
+
 // testWireKubernetesVersion is the Kubernetes version seedKubeletSpec's
 // fixture image is tagged with.
 const testWireKubernetesVersion = "v1.32.0"
@@ -243,6 +279,10 @@ const testWireKubernetesVersion = "v1.32.0"
 // testWireInstallerImage is the installer reference the upgrade assertion
 // below expects on the wire.
 const testWireInstallerImage = "ghcr.io/siderolabs/installer:v1.13.0"
+
+// testWirePatchedAPIServerImage is the image the component patch moves
+// seedMachineConfig's own apiserver to.
+const testWirePatchedAPIServerImage = "registry.k8s.io/kube-apiserver:v1.33.0"
 
 func (s *fakeBootstrapMachineServer) Version(
 	context.Context, *emptypb.Empty,
@@ -353,7 +393,7 @@ func TestTalosBootstrapperWireCompat(t *testing.T) {
 
 	inmemBuilder := inmem.NewStateWithOptions()
 	coreState := namespaced.NewState(func(ns resource.Namespace) state.CoreState { return inmemBuilder(ns) })
-	seedKubeletSpec(t, coreState)
+	seedCOSIState(t, coreState)
 
 	grpcServer := grpc.NewServer(grpc.Creds(credentials.NewTLS(pki.serverTLSConfig(t))))
 	cosiv1alpha1.RegisterStateServer(grpcServer, cosiserver.NewState(coreState))
@@ -422,8 +462,8 @@ func assertUpgradeWireCompat(
 
 	require.NoError(t, bootstrapper.UpgradeTalos(ctx, "127.0.0.1", "test-node", talosCfg, testWireInstallerImage))
 
-	configBytes := []byte("version: v1alpha1\n")
-	require.NoError(t, bootstrapper.UpgradeConfiguration(ctx, "127.0.0.1", "test-node", talosCfg, configBytes))
+	require.NoError(t, bootstrapper.PatchKubernetesComponent(
+		ctx, "127.0.0.1", "test-node", talosCfg, "kube-apiserver", testWirePatchedAPIServerImage))
 
 	upgradeReq, applyReq := machineServer.recorded()
 
@@ -435,7 +475,10 @@ func assertUpgradeWireCompat(
 	assert.False(t, upgradeReq.GetForce(), "talos's own pre-upgrade checks must not be skipped by a reconciler")
 
 	require.NotNil(t, applyReq)
-	assert.Equal(t, configBytes, applyReq.GetData())
-	assert.Equal(t, machineapi.ApplyConfigurationRequest_AUTO, applyReq.GetMode(),
-		"a kubernetes version bump must only reboot the node if talos itself decides it has to")
+	assert.Equal(t, machineapi.ApplyConfigurationRequest_NO_REBOOT, applyReq.GetMode(),
+		"patching a component image must never reboot a control-plane member")
+	assert.Contains(t, string(applyReq.GetData()), testWirePatchedAPIServerImage,
+		"the applied config carries the patched apiserver image")
+	assert.NotContains(t, string(applyReq.GetData()), "kube-apiserver:"+testWireKubernetesVersion,
+		"the old apiserver image must be gone from the applied config")
 }

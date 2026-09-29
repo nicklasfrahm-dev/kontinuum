@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/siderolabs/talos/pkg/machinery/client/config"
-	"github.com/siderolabs/talos/pkg/machinery/config/generate"
 	talossecrets "github.com/siderolabs/talos/pkg/machinery/config/generate/secrets"
 	"github.com/siderolabs/talos/pkg/machinery/config/machine"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -115,7 +114,7 @@ func (r *Reconciler) reconcileUpgrades(
 
 	controlPlaneAddr := dialAddress(*members[0].instance)
 
-	input, talosCfg, err := generateConfigs(bundle, cluster, controlPlaneAddr)
+	_, talosCfg, err := generateConfigs(bundle, cluster, controlPlaneAddr)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to generate upgrade config for %q: %w", cluster.Name, err)
 	}
@@ -124,7 +123,6 @@ func (r *Reconciler) reconcileUpgrades(
 
 	return r.applyUpgradePlan(ctx, cluster, members, upgradeContext{
 		controlPlaneAddr: controlPlaneAddr,
-		input:            input,
 		talosCfg:         talosCfg,
 		steady:           steady,
 	})
@@ -135,7 +133,6 @@ func (r *Reconciler) reconcileUpgrades(
 // list short, not because they mean anything together.
 type upgradeContext struct {
 	controlPlaneAddr string
-	input            *generate.Input
 	talosCfg         *config.Config
 	steady           ctrl.Result
 }
@@ -175,8 +172,12 @@ func (r *Reconciler) applyUpgradePlan(
 		return r.upgradeTalosMember(ctx, cluster, observed, stale, desiredTalos, upgradeCtx)
 	}
 
+	// The kubelet is the last component the Kubernetes plan moves, so
+	// every member already reporting the pinned version means the whole
+	// plan finished — and lets a converged cluster skip the per-component
+	// probing below entirely, which is most passes.
 	if stale := staleMembers(members, desiredKubernetes, kubernetesVersionOf); len(stale) > 0 {
-		return r.upgradeKubernetesMember(ctx, cluster, observed, stale, desiredKubernetes, upgradeCtx)
+		return r.upgradeKubernetesComponent(ctx, cluster, observed, members, desiredKubernetes, upgradeCtx)
 	}
 
 	return r.setUpToDateCondition(ctx, cluster, observed, metav1.ConditionTrue, reasonUpToDate,
@@ -213,41 +214,75 @@ func (r *Reconciler) upgradeTalosMember(
 		ctrl.Result{RequeueAfter: r.RetryInterval})
 }
 
-// upgradeKubernetesMember re-applies stale's first member's own machine
-// config, regenerated from the spec's pinned Kubernetes version. Talos's
-// own controllers pick the new component image tags up from that config and
-// roll the static control-plane pods, the kubelet, and the bootstrap
-// manifests — this deliberately doesn't reimplement `talosctl upgrade-k8s`'
-// per-component sequencing, which lives in the main talos module this repo
-// doesn't depend on (see docs/workflows/cluster-upgrade.md).
-func (r *Reconciler) upgradeKubernetesMember(
-	ctx context.Context, cluster *v1alpha2.TalosCluster, observed clusterVersions, stale []upgradeMember,
+// upgradeKubernetesComponent takes the next step of the cluster's
+// Kubernetes rollout — see planKubernetesUpgrade for what "next" means,
+// and k8scomponent.go for the component order itself.
+//
+// One step per pass: a patch, or a wait for the component the previous
+// pass patched. Either way the cluster is left not-UpToDate and requeued,
+// so the rollout advances one component-member at a time for as long as it
+// takes, with the cluster's own health check gating each pass on top.
+func (r *Reconciler) upgradeKubernetesComponent(
+	ctx context.Context, cluster *v1alpha2.TalosCluster, observed clusterVersions, members []upgradeMember,
 	desired string, upgradeCtx upgradeContext,
 ) (ctrl.Result, error) {
-	target := stale[0]
-
-	data, err := configBytes(upgradeCtx.input, target.machineType, target.instance.Name)
+	plan, err := r.planKubernetesUpgrade(ctx, members, desired, upgradeCtx)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to generate upgrade config for %q: %w", target.instance.Name, err)
-	}
-
-	r.Logger.Info("Upgrading kubernetes on cluster member",
-		"cluster", cluster.Name, "instance", target.instance.Name, "version", desired, "remaining", len(stale))
-
-	err = r.Bootstrapper.UpgradeConfiguration(
-		ctx, upgradeCtx.controlPlaneAddr, dialAddress(*target.instance), upgradeCtx.talosCfg, data)
-	if err != nil {
-		r.Logger.Warn("Failed to apply kubernetes upgrade configuration",
-			"cluster", cluster.Name, "instance", target.instance.Name, "version", desired, "error", err)
+		r.Logger.Warn("Failed to plan kubernetes upgrade",
+			"cluster", cluster.Name, "version", desired, "error", err)
 
 		return r.setUpToDateCondition(ctx, cluster, observed, metav1.ConditionFalse, reasonUpgradeFailed,
-			fmt.Sprintf("failed to apply kubernetes %s configuration to %s: %s", desired, target.instance.Name, err),
+			fmt.Sprintf("failed to plan kubernetes %s upgrade: %s", desired, err),
+			ctrl.Result{RequeueAfter: r.RetryInterval})
+	}
+
+	// Converged here but not by staleMembers' own reckoning: every
+	// component is where it should be, yet some member's kubelet has not
+	// reported the new version back through its own spec resource yet.
+	// Requeue rather than claim completion.
+	if plan.converged() {
+		return r.setUpToDateCondition(ctx, cluster, observed, metav1.ConditionFalse, reasonUpgradingKubernetes,
+			fmt.Sprintf("kubernetes %s applied to every component, waiting for members to report it", desired),
+			ctrl.Result{RequeueAfter: r.RetryInterval})
+	}
+
+	if plan.waitingFor != "" {
+		r.Logger.Info("Waiting for kubernetes component rollout",
+			"cluster", cluster.Name, "component", plan.waitingFor, "version", desired)
+
+		return r.setUpToDateCondition(ctx, cluster, observed, metav1.ConditionFalse, reasonUpgradingKubernetes,
+			fmt.Sprintf("upgrading to kubernetes %s, waiting for %s", desired, plan.waitingFor),
+			ctrl.Result{RequeueAfter: r.RetryInterval})
+	}
+
+	return r.patchKubernetesComponent(ctx, cluster, observed, *plan.step, desired, upgradeCtx)
+}
+
+// patchKubernetesComponent applies one step of the plan.
+func (r *Reconciler) patchKubernetesComponent(
+	ctx context.Context, cluster *v1alpha2.TalosCluster, observed clusterVersions, step k8sUpgradeStep,
+	desired string, upgradeCtx upgradeContext,
+) (ctrl.Result, error) {
+	r.Logger.Info("Upgrading kubernetes component on cluster member",
+		"cluster", cluster.Name, "instance", step.member.instance.Name,
+		"component", step.component.name, "image", step.image)
+
+	err := r.Bootstrapper.PatchKubernetesComponent(ctx, upgradeCtx.controlPlaneAddr,
+		dialAddress(*step.member.instance), upgradeCtx.talosCfg, step.component.name, step.image)
+	if err != nil {
+		r.Logger.Warn("Failed to patch kubernetes component",
+			"cluster", cluster.Name, "instance", step.member.instance.Name,
+			"component", step.component.name, "error", err)
+
+		return r.setUpToDateCondition(ctx, cluster, observed, metav1.ConditionFalse, reasonUpgradeFailed,
+			fmt.Sprintf("failed to upgrade %s on %s to kubernetes %s: %s",
+				step.component.name, step.member.instance.Name, desired, err),
 			ctrl.Result{RequeueAfter: r.RetryInterval})
 	}
 
 	return r.setUpToDateCondition(ctx, cluster, observed, metav1.ConditionFalse, reasonUpgradingKubernetes,
-		fmt.Sprintf("upgrading %s to kubernetes %s, %d member(s) still to go",
-			target.instance.Name, desired, len(stale)),
+		fmt.Sprintf("upgrading %s on %s to kubernetes %s",
+			step.component.name, step.member.instance.Name, desired),
 		ctrl.Result{RequeueAfter: r.RetryInterval})
 }
 

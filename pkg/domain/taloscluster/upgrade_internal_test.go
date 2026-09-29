@@ -5,6 +5,7 @@ import (
 
 	"github.com/siderolabs/talos/pkg/machinery/config/machine"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 )
@@ -120,4 +121,54 @@ func TestStaleMembers(t *testing.T) {
 		"an unpinned version must never make any member stale")
 	assert.Empty(t, staleMembers(members, testKubeletImageVersion, kubernetesVersionOf),
 		"a version every member already runs leaves nothing to roll")
+}
+
+// TestImageFlavourSuffix covers the three kubelet image flavours Talos
+// publishes — an upgrade has to keep a node on the one it already runs.
+func TestImageFlavourSuffix(t *testing.T) {
+	t.Parallel()
+
+	assert.Empty(t, imageFlavourSuffix("ghcr.io/siderolabs/kubelet:v1.32.0"))
+	assert.Equal(t, "-slim", imageFlavourSuffix("ghcr.io/siderolabs/kubelet:v1.32.0-slim"))
+	assert.Equal(t, "-fat", imageFlavourSuffix("ghcr.io/siderolabs/kubelet:v1.32.0-fat"))
+}
+
+// TestKubeletVersionFromImage is the other half of the flavour handling:
+// the flavour is part of the image, never part of the version. A node
+// whose reported version kept its suffix could never compare equal to a
+// pinned spec.kubernetes.version, leaving its cluster permanently
+// mid-upgrade.
+func TestKubeletVersionFromImage(t *testing.T) {
+	t.Parallel()
+
+	for _, ref := range []string{
+		"ghcr.io/siderolabs/kubelet:" + testKubeletImageVersion,
+		"ghcr.io/siderolabs/kubelet:" + testKubeletImageVersion + "-slim",
+		"ghcr.io/siderolabs/kubelet:" + testKubeletImageVersion + "-fat",
+	} {
+		assert.Equal(t, testKubeletImageVersion, kubeletVersionFromImage(ref),
+			"every flavour of the same version reports that version")
+	}
+
+	assert.Empty(t, kubeletVersionFromImage("ghcr.io/siderolabs/kubelet"),
+		"an untagged reference reports no version at all")
+}
+
+// TestComponentImage covers the reference each component's step targets,
+// including the kubelet's flavour being carried through.
+func TestComponentImage(t *testing.T) {
+	t.Parallel()
+
+	components := kubernetesComponents()
+	require.Len(t, components, 5, "the plan moves five components")
+
+	assert.Equal(t, componentAPIServer, components[0].name,
+		"the apiserver moves first — everything else talks to it")
+	assert.Equal(t, componentKubelet, components[len(components)-1].name,
+		"the kubelet moves last, which is what lets its version gate the whole plan")
+
+	assert.Equal(t, "registry.k8s.io/kube-apiserver:"+testUpgradeTargetVersion,
+		components[0].image(testUpgradeTargetVersion, ""))
+	assert.Equal(t, "ghcr.io/siderolabs/kubelet:"+testUpgradeTargetVersion+"-slim",
+		components[len(components)-1].image(testUpgradeTargetVersion, "-slim"))
 }
