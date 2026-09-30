@@ -29,13 +29,13 @@ const testHostname = testZone + "." + testRegion + "." + testDomain
 // testGatewayIP is a fake downstream Gateway address, not a real one.
 const testGatewayIP = "203.0.113.10"
 
-// testDNSProviderRoute53 is a stand-in for any provider other than
+// testDNSProviderOther is a stand-in for any provider other than
 // "cloudflare" — used by every test in this file that only cares about
 // reconcileDNS/DNSEndpoint mechanics (provider-agnostic), not
 // reconcileExternalDNSAddon's own cloudflare-specific wiring, so those
 // tests aren't also on the hook for asserting the Cloudflare Addon/Secret
 // never appear.
-const testDNSProviderRoute53 = "route53"
+const testDNSProviderOther = "other-provider"
 
 // dnsEndpointKey is where reconcileDNS's own ensureDNSEndpoint upserts its
 // single DNSEndpoint — "kontinuum" in "kontinuum-system", same fixed naming
@@ -91,7 +91,7 @@ func TestReconcileInstalledWaitsForDNSConfiguration(t *testing.T) {
 func TestReconcileDNSWaitsForGatewayAddress(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderRoute53)
+	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderOther)
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
 		kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)
@@ -119,7 +119,7 @@ func TestReconcileDNSWaitsForGatewayAddress(t *testing.T) {
 func TestReconcileCreatesDNSEndpointOnceGatewayHasIPAddress(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderRoute53)
+	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderOther)
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
 		kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)
@@ -165,7 +165,7 @@ func TestReconcileCreatesDNSEndpointOnceGatewayHasIPAddress(t *testing.T) {
 func TestReconcileCreatesDNSEndpointForHostnameAddress(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderRoute53)
+	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderOther)
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
 		kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)
@@ -200,7 +200,7 @@ func TestReconcileCreatesDNSEndpointForHostnameAddress(t *testing.T) {
 func TestReconcileTeardownDeletesDNSEndpoint(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderRoute53)
+	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderOther)
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
 		kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)
@@ -338,20 +338,21 @@ func TestReconcileWiresExternalDNSAddonFromDNSCredential(t *testing.T) {
 }
 
 // TestReconcileWiresExternalDNSAddonWithMultipleCredentialKeys covers a
-// provider needing more than one credential value — Route53's own
-// AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY pair — proving
+// provider needing more than one credential value, proving
 // parseDNSCredentialKeys' flat-YAML-to-many-keys mapping isn't
-// special-cased to Cloudflare's own single key. Not every multi-value
-// provider fits this env-var-only mechanism, though — see
-// docs/workflows/zone-add.md's own Azure/GCP examples for two that need a
-// mounted credentials file instead, which this mechanism doesn't cover.
+// special-cased to Cloudflare's own single key. The provider/keys below are
+// fictional, not a real external-dns provider — AWS/Azure/GCP are
+// deliberately not wired up or documented yet (see docs/workflows/zone-add.md's
+// own DNS section): kontinuum would rather exchange a short-lived token for
+// each cloud provider's own credentials via a future signing-key endpoint
+// than accept a long-lived static cloud key through `_CREDENTIAL` here.
 func TestReconcileWiresExternalDNSAddonWithMultipleCredentialKeys(t *testing.T) {
 	t.Parallel()
 
 	kontinuum, kontinuumSecret := registeredKontinuum("hub")
-	kontinuum.Status.Config.Server.DNS.Provider = "aws"
+	kontinuum.Status.Config.Server.DNS.Provider = testDNSProviderOther
 	kontinuumSecret.Data["KONTINUUM_SERVER_DNS_CREDENTIAL"] = []byte(
-		"AWS_ACCESS_KEY_ID: AKIAEXAMPLE\nAWS_SECRET_ACCESS_KEY: example-secret-key\n")
+		"API_KEY_ID: example-key-id\nAPI_KEY_SECRET: example-key-secret\n")
 	cluster := readyTalosCluster()
 	hubClient := newHubFakeClient(t, testZoneObject(), cluster, kubeconfigSecret(), kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)
@@ -362,8 +363,8 @@ func TestReconcileWiresExternalDNSAddonWithMultipleCredentialKeys(t *testing.T) 
 
 	var secret corev1.Secret
 	require.NoError(t, downstream.Get(t.Context(), externalDNSCredentialSecretKey(), &secret))
-	assert.Equal(t, "AKIAEXAMPLE", string(secret.Data["AWS_ACCESS_KEY_ID"]))
-	assert.Equal(t, "example-secret-key", string(secret.Data["AWS_SECRET_ACCESS_KEY"]))
+	assert.Equal(t, "example-key-id", string(secret.Data["API_KEY_ID"]))
+	assert.Equal(t, "example-key-secret", string(secret.Data["API_KEY_SECRET"]))
 
 	var addon v1alpha2.Addon
 	require.NoError(t, hubClient.Get(t.Context(), externalDNSAddonKey(), &addon))
@@ -372,9 +373,9 @@ func TestReconcileWiresExternalDNSAddonWithMultipleCredentialKeys(t *testing.T) 
 	require.NoError(t, json.Unmarshal(addon.Spec.Values.Raw, &values))
 	provider, ok := values["provider"].(map[string]any)
 	require.True(t, ok)
-	assert.Equal(t, "aws", provider["name"])
+	assert.Equal(t, testDNSProviderOther, provider["name"])
 
-	for _, envName := range []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"} {
+	for _, envName := range []string{"API_KEY_ID", "API_KEY_SECRET"} {
 		secretName, key := addonEnvSecretKeyRef(t, addon, envName)
 		assert.Equal(t, externalDNSCredentialSecretKey().Name, secretName)
 		assert.Equal(t, envName, key)

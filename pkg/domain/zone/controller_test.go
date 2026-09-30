@@ -544,7 +544,7 @@ func TestReconcileReportsNoStorageSecretFound(t *testing.T) {
 func TestReconcileInstallsDownstreamObjectsAndWaitsForCertificate(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderRoute53)
+	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderOther)
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
 		kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)
@@ -1000,7 +1000,7 @@ func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) 
 func TestReconcileFlipsInstalledOnceCertificateReady(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderRoute53)
+	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderOther)
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
 		kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)
@@ -1051,7 +1051,7 @@ func TestReconcileFlipsInstalledOnceCertificateReady(t *testing.T) {
 func TestReconcileFlipsReadyOnceKontinuumJoinsRegistry(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderRoute53)
+	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderOther)
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
 		kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)
@@ -1109,7 +1109,7 @@ func TestReconcileFlipsReadyOnceKontinuumJoinsRegistry(t *testing.T) {
 func TestReconcileKeepsRequeuingReadyZoneOnFloatingImageTag(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuum("hub")
+	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderOther)
 	kontinuum.Status.Version = testDevVersion
 
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
@@ -1174,7 +1174,7 @@ func TestReconcileKeepsRequeuingReadyZoneOnFloatingImageTag(t *testing.T) {
 func TestReconcileToleratesNoRegisteredKontinuumOnceReady(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuum("hub")
+	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderOther)
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
 		kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)
@@ -1233,7 +1233,7 @@ func TestReconcileToleratesNoRegisteredKontinuumOnceReady(t *testing.T) {
 func TestReconcileFlipsRegistryJoinedFalseOnceKontinuumGoesStale(t *testing.T) {
 	t.Parallel()
 
-	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderRoute53)
+	kontinuum, kontinuumSecret := registeredKontinuumWithDNS(testDNSProviderOther)
 	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
 		kontinuum, kontinuumSecret)
 	downstream := newDownstreamFakeClient(t)

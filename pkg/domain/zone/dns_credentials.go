@@ -56,11 +56,10 @@ var (
 // v1alpha2.KontinuumDNSConfigStatus.Credential's own doc): whatever keys
 // are set here are exactly the environment variable names the operator's
 // chosen external-dns provider implementation expects — CF_API_TOKEN for
-// Cloudflare, AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY for Route53, and so
-// on — see docs/workflows/zone-add.md's own examples, including the
-// providers (Azure DNS, Google Cloud DNS) whose credential is a mounted
-// file rather than plain env vars, which this mechanism doesn't cover. A
-// value that isn't a plain string (a nested mapping/list) fails with
+// Cloudflare being the only one kontinuum documents/tests today (see
+// docs/workflows/zone-add.md's own DNS section for why the cloud providers
+// aren't wired up yet). A value that isn't a plain string (a nested
+// mapping/list) fails with
 // errDNSCredentialNotFlat — "flat" isn't just documentation, yaml.Unmarshal
 // into map[string]string enforces it directly.
 func parseDNSCredentialKeys(credential string) (map[string]string, error) {
@@ -90,12 +89,12 @@ func parseDNSCredentialKeys(credential string) (map[string]string, error) {
 // ensureExternalDNSAddon's own doc). provider is passed through untouched
 // as that Addon's own provider.name — kontinuum has no per-provider Go
 // code of its own to maintain here, so this works for any external-dns
-// provider whose credential is expressed purely as environment variables
-// (Cloudflare, Route53, ...). A provider needing a mounted file instead of
-// env vars (Azure DNS's azure.json, Google Cloud DNS's
-// GOOGLE_APPLICATION_CREDENTIALS, notably) isn't covered by this
-// mechanism — see docs/workflows/zone-add.md's own Azure/GCP examples for
-// the operator-managed alternative.
+// provider whose credential is expressed purely as environment variables.
+// Cloudflare is the only one kontinuum documents/tests today — AWS, Azure,
+// and GCP aren't wired up yet, deliberately: see docs/workflows/zone-add.md's
+// own DNS section for why (a mounted-credentials-file requirement for two of
+// them, and a preference for a future signing-key/token-exchange endpoint
+// over a long-lived static cloud key for all three).
 func (r *Reconciler) reconcileExternalDNSAddon(
 	ctx context.Context, cluster *v1alpha2.TalosCluster, downstream client.Client, provider, credential string,
 ) error {
