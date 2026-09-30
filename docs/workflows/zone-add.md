@@ -169,8 +169,9 @@ would just sit `Provisioning` forever. Until both are set, a Zone with
 Once both are set, the `zone` controller wires up a working
 [external-dns](https://github.com/kubernetes-sigs/external-dns) install for
 you — no `Addon` of your own to write, for any provider whose credential is
-plain environment variables (see the per-provider examples below for which
-providers that covers). `_CREDENTIAL` isn't a single opaque string: it's a
+plain environment variables (Cloudflare is the only one kontinuum
+documents/tests today — see below for why the cloud providers aren't
+included yet). `_CREDENTIAL` isn't a single opaque string: it's a
 **flat YAML mapping**, each key/value pair becoming one key in a Secret
 named `<cluster>-external-dns-credentials` on the zone's own downstream
 cluster, and one environment variable in a seeded `Addon` named
@@ -202,43 +203,33 @@ Use a scoped Cloudflare **API Token** (Zone:DNS:Edit on the relevant
 zone) — external-dns' Cloudflare provider only reads `CF_API_TOKEN`, not
 the legacy Email + Global API Key pair.
 
-**AWS (Route53)** — two keys, the same `AWS_ACCESS_KEY_ID`/
-`AWS_SECRET_ACCESS_KEY` pair the AWS SDK's own environment-variable
-credential provider always accepts, with no separate credentials file
-needed:
+**AWS, Azure, and GCP aren't wired up yet.** Route53's own external-dns
+provider would fit this mechanism mechanically (a plain
+`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` pair), but a long-lived static
+cloud key is exactly the kind of credential kontinuum would rather not ask
+an operator to hand it directly — and Azure DNS/Google Cloud DNS don't fit
+at all, since both authenticate via a *mounted credentials file* rather
+than environment variables (Azure DNS needs an `azure.json`
+service-principal file; Google Cloud DNS needs
+`GOOGLE_APPLICATION_CREDENTIALS` pointing at a service-account JSON file).
+The plan for all three is a signing-key endpoint on the hub that exchanges
+a short-lived token for each provider's own credentials, rather than
+storing a static one in `_CREDENTIAL` at all.
 
-```sh
-export KONTINUUM_SERVER_DNS_PROVIDER=aws
-export KONTINUUM_SERVER_DNS_CREDENTIAL="$(cat <<'EOF'
-AWS_ACCESS_KEY_ID: AKIAEXAMPLE
-AWS_SECRET_ACCESS_KEY: <your-secret-access-key>
-EOF
-)"
-```
-
-IAM Roles for Service Accounts (IRSA) is external-dns' own recommended
-alternative to a static key pair when the downstream cluster runs on
-AWS — this env-var path exists mainly for a downstream cluster that
-doesn't (bare-metal, another cloud), the same case this repo's own
-Hetzner-based dev setup is in.
-
-**Azure and GCP don't fit this mechanism** — both providers authenticate
-via a *mounted credentials file*, not environment variables (Azure DNS
-needs an `azure.json` service-principal file; Google Cloud DNS needs
-`GOOGLE_APPLICATION_CREDENTIALS` pointing at a service-account JSON file),
-so there's no flat set of env vars for `_CREDENTIAL` to populate.
-`_PROVIDER`/`_CREDENTIAL` still unblock `installNetwork` for these — DNS
-being "configured" only means the hub knows a provider is intended, not
-that kontinuum can wire it up itself — but the `external-dns` `Addon`
-itself is left to you: create one named `external-dns` (see
-`pkg/domain/addon/values/external-dns.yaml`, which gets you the
-`crd`-source scaffolding every provider needs in common for free) with
-`spec.values` mounting your own credentials Secret via the chart's own
-`extraVolumes`/`extraVolumeMounts`, following either provider's own
-tutorial linked above. Both providers also support workload identity
-(Azure) / Workload Identity Federation (GCP) as a credential-free
-alternative worth preferring over a static file if the downstream cluster
-runs on that same cloud.
+Until that lands, `_PROVIDER`/`_CREDENTIAL` still unblock `installNetwork`
+for these three — DNS being "configured" only means the hub knows a
+provider is intended, not that kontinuum can wire it up itself — but the
+`external-dns` `Addon` itself is left to you: create one named
+`external-dns` (see `pkg/domain/addon/values/external-dns.yaml`, which
+gets you the `crd`-source scaffolding every provider needs in common for
+free) with `spec.values` supplying your own credentials (a mounted Secret
+via the chart's own `extraVolumes`/`extraVolumeMounts`, or plain env vars
+via `env`), following that provider's own
+[tutorial](https://github.com/kubernetes-sigs/external-dns/tree/master/docs/tutorials).
+Workload identity (Azure) / Workload Identity Federation (GCP) / IRSA (AWS)
+are each provider's own recommended credential-free alternative worth
+preferring over a static key or file if the downstream cluster runs on
+that same cloud.
 
 Either way, once the downstream `Gateway` has an address, the `zone`
 controller creates/updates a `DNSEndpoint` (the CRD external-dns' own `crd`
