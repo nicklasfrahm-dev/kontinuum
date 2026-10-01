@@ -68,14 +68,23 @@ Fans out a new zone's hub-side objects and, once its `TalosCluster` is bootstrap
    `TalosCluster.status.Ready` is true.
 3. **Downstream install** (`pkg/domain/zone`'s `Reconciler`) — once
    `ClusterReady`, builds a client against the zone's own cluster (from the
-   kubeconfig `TalosCluster.status.secretRef` points at) and installs, in
-   order: the `kontinuum-system` namespace; a `kontinuum-env`
-   Secret/ConfigMap; the `kontinuum` Deployment/Service; a cert-manager
-   `ClusterIssuer`; a `Gateway`; a `Certificate`; and an `HTTPRoute` —
-   exposing that zone's own kontinuum-server at
-   `<zone>.<region>.<domain>`. `Installed` only flips `True` once
-   cert-manager's own `Certificate` reports `Ready` — a real signal that
-   TLS issuance actually succeeded, not just that the object was created.
+   kubeconfig `TalosCluster.status.secretRef` points at) and installs the
+   `kontinuum-system` namespace, a `kontinuum-env` Secret/ConfigMap, and the
+   `kontinuum` Deployment/Service unconditionally, then — only once the hub
+   has both a `KONTINUUM_SERVER_DNS_PROVIDER` and `KONTINUUM_SERVER_DNS_CREDENTIAL`
+   configured (see [DNS](#dns-auto-wiring-external-dns-from-a-flat-yaml-credential)
+   below) — a cert-manager `ClusterIssuer`; a `Gateway`; a `Certificate`;
+   and an `HTTPRoute`, exposing that zone's own kontinuum-server at
+   `<zone>.<region>.<domain>`. That gate exists because none of those four
+   objects mean anything without DNS actually resolving: the `Certificate`'s
+   own ACME HTTP-01 challenge can only succeed once `<zone>.<region>.<domain>`
+   points at the `Gateway`'s own address, and nothing makes that happen
+   without a DNS provider configured to eventually pick it up — creating
+   them earlier would just leave the `Certificate` stuck `Provisioning`
+   forever, with no actionable next step. `Installed` only flips `True`
+   once cert-manager's own `Certificate` reports `Ready` — a real signal
+   that TLS issuance actually succeeded, not just that the object was
+   created.
 4. **Registry join** (`pkg/domain/zone`'s `Reconciler`, once `Installed`) —
    the reconciler checks the hub's own registry for a `Kontinuum` matching
    this zone's `region`/`zone` with a non-zero heartbeat (see
@@ -144,6 +153,99 @@ controller. This is an unverified assumption worth checking with `kubectl
 get gatewayclass cilium` against a real added zone; if it's ever missing,
 the `Gateway` simply never reports `Accepted`, which is a visible, easy to
 diagnose failure rather than a silent one.
+
+### DNS: auto-wiring external-dns from a flat-YAML credential
+
+`<zone>.<region>.<domain>` needs to actually resolve to the downstream
+`Gateway`'s own address before the ACME HTTP-01 challenge above can
+succeed, so the `zone` controller requires both `KONTINUUM_SERVER_DNS_PROVIDER`
+and `KONTINUUM_SERVER_DNS_CREDENTIAL` to be configured on the hub before it
+creates the `ClusterIssuer`/`Gateway`/`Certificate`/`HTTPRoute` at all (see
+stage 3 above) — without them, nothing would ever make
+`<zone>.<region>.<domain>` resolve, and a `Certificate` created anyway
+would just sit `Provisioning` forever. Until both are set, a Zone with
+`spec.domain` configured stays `Installed=False/WaitingForDNSConfiguration`.
+
+Once both are set, the `zone` controller wires up a working
+[external-dns](https://github.com/kubernetes-sigs/external-dns) install for
+you — no `Addon` of your own to write, for any provider whose credential is
+plain environment variables (Cloudflare is the only one kontinuum
+documents/tests today — see below for why the cloud providers aren't
+included yet). `_CREDENTIAL` isn't a single opaque string: it's a
+**flat YAML mapping**, each key/value pair becoming one key in a Secret
+named `<cluster>-external-dns-credentials` on the zone's own downstream
+cluster, and one environment variable in a seeded `Addon` named
+`<cluster>-external-dns` (owned by the zone's own `TalosCluster`, so it's
+garbage-collected with everything else on teardown) — `env[].name` is the
+key itself, `env[].valueFrom.secretKeyRef` points at that same Secret/key.
+kontinuum never interprets the keys or their values; whatever you name a
+key becomes the literal environment variable name your chosen external-dns
+provider implementation reads, so the shape of `_CREDENTIAL` is dictated
+entirely by which provider you name in `_PROVIDER` — see
+[external-dns' own per-provider tutorials](https://github.com/kubernetes-sigs/external-dns/tree/master/docs/tutorials)
+for the authoritative list of what each one expects. Both the Secret and
+the Addon's own values are kept continuously in sync with `_PROVIDER`/
+`_CREDENTIAL` — unlike the built-in Cilium/cert-manager/gateway-api-crds
+addons (see `pkg/domain/addon.EnsureBuiltinSeeds`'s own doc), this Addon's
+own values are entirely kontinuum-generated, not something meant for you to
+hand-edit, so a credential rotation or a key added/removed always reaches
+the running `external-dns` pod on the next reconcile.
+
+**Cloudflare** — one key, the token external-dns' own Cloudflare provider
+reads directly as an environment variable:
+
+```sh
+export KONTINUUM_SERVER_DNS_PROVIDER=cloudflare
+export KONTINUUM_SERVER_DNS_CREDENTIAL="CF_API_TOKEN: <your-scoped-api-token>"
+```
+
+Use a scoped Cloudflare **API Token** (Zone:DNS:Edit on the relevant
+zone) — external-dns' Cloudflare provider only reads `CF_API_TOKEN`, not
+the legacy Email + Global API Key pair.
+
+**AWS, Azure, and GCP aren't wired up yet.** Route53's own external-dns
+provider would fit this mechanism mechanically (a plain
+`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` pair), but a long-lived static
+cloud key is exactly the kind of credential kontinuum would rather not ask
+an operator to hand it directly — and Azure DNS/Google Cloud DNS don't fit
+at all, since both authenticate via a *mounted credentials file* rather
+than environment variables (Azure DNS needs an `azure.json`
+service-principal file; Google Cloud DNS needs
+`GOOGLE_APPLICATION_CREDENTIALS` pointing at a service-account JSON file).
+The plan for all three is a signing-key endpoint on the hub that exchanges
+a short-lived token for each provider's own credentials, rather than
+storing a static one in `_CREDENTIAL` at all.
+
+Until that lands, `_PROVIDER`/`_CREDENTIAL` still unblock `installNetwork`
+for these three — DNS being "configured" only means the hub knows a
+provider is intended, not that kontinuum can wire it up itself — but the
+`external-dns` `Addon` itself is left to you: create one named
+`external-dns` (see `pkg/domain/addon/values/external-dns.yaml`, which
+gets you the `crd`-source scaffolding every provider needs in common for
+free) with `spec.values` supplying your own credentials (a mounted Secret
+via the chart's own `extraVolumes`/`extraVolumeMounts`, or plain env vars
+via `env`), following that provider's own
+[tutorial](https://github.com/kubernetes-sigs/external-dns/tree/master/docs/tutorials).
+Workload identity (Azure) / Workload Identity Federation (GCP) / IRSA (AWS)
+are each provider's own recommended credential-free alternative worth
+preferring over a static key or file if the downstream cluster runs on
+that same cloud.
+
+Either way, once the downstream `Gateway` has an address, the `zone`
+controller creates/updates a `DNSEndpoint` (the CRD external-dns' own `crd`
+source watches) requesting an A/AAAA/CNAME record — whichever matches the
+`Gateway`'s own address shape — for the zone's hostname. This part stays
+provider-agnostic even for the auto-wiring above: kontinuum itself never
+talks to Route53/Azure DNS/Cloudflare/etc. directly, it just makes sure
+*some* external-dns instance is running and watching that `DNSEndpoint`.
+`Zone`'s own `DNSRecord` status condition tracks this independently of
+`Installed` — see `DNSRecordConditionType`'s own doc in
+`pkg/domain/zone/controller.go`.
+
+`KONTINUUM_SERVER_DNS_DOMAIN`/`_PROVIDER` are non-confidential and show up
+on a registered `Kontinuum`'s own `status.config.server.dns`;
+`KONTINUUM_SERVER_DNS_CREDENTIAL` is redacted from status the same way
+storage is, and instead stored in the Secret `status.secretRef` points to.
 
 ### Cluster bootstrap details
 

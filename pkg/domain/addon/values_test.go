@@ -21,13 +21,33 @@ func TestLoadAddonDefaultsReturnsErrorOnMissingFile(t *testing.T) {
 func TestLoadAddonDefaultsBuiltins(t *testing.T) {
 	t.Parallel()
 
-	for _, name := range builtinAddonNames() {
+	for _, name := range addonNamesWithDefaults() {
 		def, err := loadAddonDefaults(name)
 		require.NoError(t, err)
 		assert.True(t, def.Chart.Repo != "" || def.Chart.Name != "",
 			"%s: chart repo or name (for an OCI ref) must be set", name)
 		assert.NotEmpty(t, def.Namespace.Name)
 	}
+}
+
+func TestExternalDNSAddonNotAutoSeeded(t *testing.T) {
+	t.Parallel()
+
+	assert.NotContains(t, builtinAddonNames(), externalDNSAddonName,
+		"external-dns must stay opt-in, not auto-seeded onto every zone")
+	assert.Contains(t, addonNamesWithDefaults(), externalDNSAddonName,
+		"external-dns must still resolve via its own embedded defaults when an operator creates it")
+}
+
+func TestExternalDNSAddonDefaultsUseCRDSource(t *testing.T) {
+	t.Parallel()
+
+	def, err := loadAddonDefaults(externalDNSAddonName)
+	require.NoError(t, err)
+
+	sources, ok := def.Values["sources"].([]any)
+	require.True(t, ok, "external-dns defaults must set values.sources")
+	assert.Contains(t, sources, "crd")
 }
 
 func TestResolveAddonChartOCIReferenceNeedsNoRepo(t *testing.T) {
