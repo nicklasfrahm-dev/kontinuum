@@ -1,0 +1,520 @@
+package taloscluster
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/siderolabs/talos/pkg/machinery/client/config"
+	talossecrets "github.com/siderolabs/talos/pkg/machinery/config/generate/secrets"
+	"github.com/siderolabs/talos/pkg/machinery/config/machine"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
+
+	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
+)
+
+const (
+	// UpToDateConditionType reports whether every member of this cluster
+	// runs the Talos and Kubernetes versions its spec asks for. Unlike
+	// BootstrappedConditionType, it isn't append-only: it's kept live for
+	// the cluster's whole lifetime, going false the moment either spec
+	// version is edited to something the members don't run yet and back
+	// true once the roll finishes. An empty spec version is "unmanaged",
+	// not "upgrade to the reconciler's own default" (see resolveVersions'
+	// defaults, which exist purely so config generation has something to
+	// work with) — a cluster with neither pinned is trivially up to date,
+	// reported with reasonVersionsUnmanaged rather than left conditionless.
+	UpToDateConditionType = "UpToDate"
+
+	reasonUpToDate            = "UpToDate"
+	reasonVersionsUnmanaged   = "VersionsUnmanaged"
+	reasonUpgradingTalos      = "UpgradingTalos"
+	reasonUpgradingKubernetes = "UpgradingKubernetes"
+	reasonUpgradeFailed       = "UpgradeFailed"
+
+	// installerImageRepository is the repository the Talos upgrade
+	// installer image is built from — <repo>:<version> is exactly what
+	// `talosctl upgrade --image` takes, and what Talos's own docs use.
+	// Machinery exports no constant for it (the generated machine config's
+	// own machine.install.image is left empty by generate.NewInput, letting
+	// the running Talos pick its own matching installer at install time),
+	// so an upgrade — which by definition targets a *different* version
+	// than the one running — has to name it explicitly.
+	installerImageRepository = "ghcr.io/siderolabs/installer"
+)
+
+// upgradeMember pairs one of this cluster's members with the machine type
+// its regenerated config has to be generated as — a worker and a
+// control-plane node take different configs, and reconcileUpgrades walks
+// one flat, ordered list of both rather than two parallel ones.
+type upgradeMember struct {
+	// instance is the member itself. A pointer, not a copy: refreshVersions
+	// persists onto it and reconcileUpgrades reads those same values back.
+	instance *v1alpha2.Instance
+	// machineType is machine.TypeControlPlane or machine.TypeWorker — see
+	// configBytes, which needs it to generate this member's own config.
+	machineType machine.Type
+	// reachable is whether this member answered refreshMemberVersions'
+	// own Version RPC on this pass. A member that did not is either
+	// rebooting into an upgrade it was already given or down for some
+	// unrelated reason, and either way must not be given another one —
+	// see upgradeTalosMember, which parks the roll on it rather than
+	// re-issuing an RPC that cannot succeed.
+	reachable bool
+}
+
+// installerImage is the installer image reference for version — see
+// installerImageRepository's own doc.
+func installerImage(version string) string {
+	return installerImageRepository + ":" + normalizeVersion(version)
+}
+
+// normalizeVersion returns version with a leading "v", so a Kubernetes
+// version written either way in the spec ("1.32.0" and "v1.32.0" are both
+// natural, and resolveVersions itself strips the prefix back off for
+// Talos's own generator) compares equal to the "v"-prefixed form Talos
+// reports back from a Version RPC or a kubelet image tag. An empty version
+// stays empty — it means "unmanaged" (see UpToDateConditionType's own
+// doc), never "v".
+func normalizeVersion(version string) string {
+	if version == "" || strings.HasPrefix(version, "v") {
+		return version
+	}
+
+	return "v" + version
+}
+
+// reconcileUpgrades converges every member onto the Talos and Kubernetes
+// versions cluster's spec pins, one node at a time, and reports the result
+// on UpToDateConditionType. Only ever called from Reconcile's steady-state
+// branch — after ControlPlaneReady and Ready are both true *and* the
+// periodic health recheck this pass just ran actually passed. That gate is
+// the whole rolling mechanism: a node that is mid-upgrade is rebooting and
+// therefore unreachable, which fails the next pass's health check, which
+// stops this from touching a second node until the first one is back and
+// the cluster is healthy again. It's also what makes a freshly added zone
+// safe: `kontinuum zone add --talos-version` puts the requested version on
+// the TalosCluster at creation time, but nothing here runs until that
+// cluster has bootstrapped and converged on whatever version its seed node
+// booted — the zone is created first, then upgraded, never both at once.
+//
+// Talos takes precedence over Kubernetes: the cluster's Talos version
+// gates which Kubernetes versions are supported at all, so an edit that
+// moves both is rolled out as a complete Talos roll first and only then a
+// Kubernetes one. steady is Reconcile's own steady-state result, returned
+// unchanged when there's nothing to upgrade, so this never shortens the
+// health-recheck cadence just by being on the path.
+func (r *Reconciler) reconcileUpgrades(
+	ctx context.Context, cluster *v1alpha2.TalosCluster, bundle *talossecrets.Bundle, steady ctrl.Result,
+) (ctrl.Result, error) {
+	members, err := r.collectUpgradeMembers(ctx, cluster)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if len(members) == 0 {
+		return steady, nil
+	}
+
+	controlPlaneAddr := dialAddress(*members[0].instance)
+
+	_, talosCfg, err := generateConfigs(bundle, cluster, controlPlaneAddr)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to generate upgrade config for %q: %w", cluster.Name, err)
+	}
+
+	r.refreshMemberVersions(ctx, cluster, members, controlPlaneAddr, talosCfg)
+
+	return r.applyUpgradePlan(ctx, cluster, members, upgradeContext{
+		controlPlaneAddr: controlPlaneAddr,
+		talosCfg:         talosCfg,
+		steady:           steady,
+	})
+}
+
+// upgradeContext carries applyUpgradePlan's per-pass Talos-side inputs —
+// grouped into one struct purely to keep that function's own parameter
+// list short, not because they mean anything together.
+type upgradeContext struct {
+	controlPlaneAddr string
+	talosCfg         *config.Config
+	steady           ctrl.Result
+}
+
+// clusterVersions is the pair of cluster-wide observed versions
+// setUpToDateCondition writes onto TalosClusterStatus — see
+// v1alpha2.TalosClusterVersionStatus' own doc.
+type clusterVersions struct {
+	talos      string
+	kubernetes string
+}
+
+// applyUpgradePlan records the cluster-wide observed versions, then acts on
+// the first member (in collectUpgradeMembers' control-plane-first order)
+// that still disagrees with a pinned spec version — Talos first, Kubernetes
+// only once every member already runs the pinned Talos version. See
+// reconcileUpgrades' own doc for the precedence rule and the one-node-at-a-
+// time gate.
+func (r *Reconciler) applyUpgradePlan(
+	ctx context.Context, cluster *v1alpha2.TalosCluster, members []upgradeMember, upgradeCtx upgradeContext,
+) (ctrl.Result, error) {
+	desiredTalos := normalizeVersion(cluster.Spec.Talos.Version)
+	desiredKubernetes := normalizeVersion(cluster.Spec.Kubernetes.Version)
+
+	observed := clusterVersions{
+		talos:      agreedVersion(members, talosVersionOf),
+		kubernetes: agreedVersion(members, kubernetesVersionOf),
+	}
+
+	if desiredTalos == "" && desiredKubernetes == "" {
+		return r.setUpToDateCondition(ctx, cluster, observed, metav1.ConditionTrue, reasonVersionsUnmanaged,
+			"no talos or kubernetes version pinned, so neither is managed by this controller",
+			upgradeCtx.steady)
+	}
+
+	if stale := staleMembers(members, desiredTalos, talosVersionOf); len(stale) > 0 {
+		return r.upgradeTalosMember(ctx, cluster, observed, stale, desiredTalos, upgradeCtx)
+	}
+
+	// The kubelet is the last component the Kubernetes plan moves, so
+	// every member already reporting the pinned version means the whole
+	// plan finished — and lets a converged cluster skip the per-component
+	// probing below entirely, which is most passes.
+	if stale := staleMembers(members, desiredKubernetes, kubernetesVersionOf); len(stale) > 0 {
+		return r.upgradeKubernetesComponent(ctx, cluster, observed, members, desiredKubernetes, upgradeCtx)
+	}
+
+	return r.setUpToDateCondition(ctx, cluster, observed, metav1.ConditionTrue, reasonUpToDate,
+		upToDateMessage(desiredTalos, desiredKubernetes), upgradeCtx.steady)
+}
+
+// upgradeTalosMember starts a Talos upgrade of stale's first member — see
+// ClusterBootstrapper.UpgradeTalos' own doc for why the RPC returning
+// doesn't mean the upgrade finished, and reconcileUpgrades' for why only
+// one member is ever touched per pass.
+func (r *Reconciler) upgradeTalosMember(
+	ctx context.Context, cluster *v1alpha2.TalosCluster, observed clusterVersions, stale []upgradeMember,
+	desired string, upgradeCtx upgradeContext,
+) (ctrl.Result, error) {
+	target := stale[0].instance
+	image := installerImage(desired)
+
+	// A stale member that did not answer this pass's own Version probe is
+	// already doing what we would ask it to: a Talos upgrade reboots the
+	// node, so the member at the head of the roll goes unreachable for the
+	// duration and only reappears once it is back on the new version.
+	// Re-issuing the RPC at it cannot succeed — it would report
+	// UpgradeFailed on a member that is upgrading perfectly well — so the
+	// roll parks here instead, exactly as the Kubernetes plan parks on a
+	// component that has not finished rolling out. This is also what keeps
+	// workers to one at a time: the control-plane health check upstream
+	// covers control-plane members, but it is built from
+	// ClusterInfo.ControlPlaneNodes alone and never sees a worker.
+	if !stale[0].reachable {
+		r.Logger.Info("Waiting for cluster member to come back from its talos upgrade",
+			"cluster", cluster.Name, "instance", target.Name, "version", desired)
+
+		return r.setUpToDateCondition(ctx, cluster, observed, metav1.ConditionFalse, reasonUpgradingTalos,
+			fmt.Sprintf("upgrading to talos %s, waiting for %s to come back", desired, target.Name),
+			ctrl.Result{RequeueAfter: r.RetryInterval})
+	}
+
+	r.Logger.Info("Upgrading talos on cluster member",
+		"cluster", cluster.Name, "instance", target.Name, "image", image, "remaining", len(stale))
+
+	err := r.Bootstrapper.UpgradeTalos(
+		ctx, upgradeCtx.controlPlaneAddr, dialAddress(*target), upgradeCtx.talosCfg, image)
+	if err != nil {
+		r.Logger.Warn("Failed to start talos upgrade",
+			"cluster", cluster.Name, "instance", target.Name, "image", image, "error", err)
+
+		return r.setUpToDateCondition(ctx, cluster, observed, metav1.ConditionFalse, reasonUpgradeFailed,
+			fmt.Sprintf("failed to start talos upgrade of %s to %s: %s", target.Name, desired, err),
+			ctrl.Result{RequeueAfter: r.RetryInterval})
+	}
+
+	return r.setUpToDateCondition(ctx, cluster, observed, metav1.ConditionFalse, reasonUpgradingTalos,
+		fmt.Sprintf("upgrading %s to talos %s, %d member(s) still to go", target.Name, desired, len(stale)),
+		ctrl.Result{RequeueAfter: r.RetryInterval})
+}
+
+// upgradeKubernetesComponent takes the next step of the cluster's
+// Kubernetes rollout — see planKubernetesUpgrade for what "next" means,
+// and k8scomponent.go for the component order itself.
+//
+// One step per pass: a patch, or a wait for the component the previous
+// pass patched. Either way the cluster is left not-UpToDate and requeued,
+// so the rollout advances one component-member at a time for as long as it
+// takes, with the cluster's own health check gating each pass on top.
+func (r *Reconciler) upgradeKubernetesComponent(
+	ctx context.Context, cluster *v1alpha2.TalosCluster, observed clusterVersions, members []upgradeMember,
+	desired string, upgradeCtx upgradeContext,
+) (ctrl.Result, error) {
+	plan, err := r.planKubernetesUpgrade(ctx, members, desired, upgradeCtx)
+	if err != nil {
+		r.Logger.Warn("Failed to plan kubernetes upgrade",
+			"cluster", cluster.Name, "version", desired, "error", err)
+
+		return r.setUpToDateCondition(ctx, cluster, observed, metav1.ConditionFalse, reasonUpgradeFailed,
+			fmt.Sprintf("failed to plan kubernetes %s upgrade: %s", desired, err),
+			ctrl.Result{RequeueAfter: r.RetryInterval})
+	}
+
+	// Converged here but not by staleMembers' own reckoning: every
+	// component is where it should be, yet some member's kubelet has not
+	// reported the new version back through its own spec resource yet.
+	// Requeue rather than claim completion.
+	if plan.converged() {
+		return r.setUpToDateCondition(ctx, cluster, observed, metav1.ConditionFalse, reasonUpgradingKubernetes,
+			fmt.Sprintf("kubernetes %s applied to every component, waiting for members to report it", desired),
+			ctrl.Result{RequeueAfter: r.RetryInterval})
+	}
+
+	if plan.waitingFor != "" {
+		r.Logger.Info("Waiting for kubernetes component rollout",
+			"cluster", cluster.Name, "component", plan.waitingFor, "version", desired)
+
+		return r.setUpToDateCondition(ctx, cluster, observed, metav1.ConditionFalse, reasonUpgradingKubernetes,
+			fmt.Sprintf("upgrading to kubernetes %s, waiting for %s", desired, plan.waitingFor),
+			ctrl.Result{RequeueAfter: r.RetryInterval})
+	}
+
+	return r.patchKubernetesComponent(ctx, cluster, observed, *plan.step, desired, upgradeCtx)
+}
+
+// patchKubernetesComponent applies one step of the plan.
+func (r *Reconciler) patchKubernetesComponent(
+	ctx context.Context, cluster *v1alpha2.TalosCluster, observed clusterVersions, step k8sUpgradeStep,
+	desired string, upgradeCtx upgradeContext,
+) (ctrl.Result, error) {
+	r.Logger.Info("Upgrading kubernetes component on cluster member",
+		"cluster", cluster.Name, "instance", step.member.instance.Name,
+		"component", step.component.name, "image", step.image)
+
+	err := r.Bootstrapper.PatchKubernetesComponent(ctx, upgradeCtx.controlPlaneAddr,
+		dialAddress(*step.member.instance), upgradeCtx.talosCfg, step.component.name, step.image)
+	if err != nil {
+		r.Logger.Warn("Failed to patch kubernetes component",
+			"cluster", cluster.Name, "instance", step.member.instance.Name,
+			"component", step.component.name, "error", err)
+
+		return r.setUpToDateCondition(ctx, cluster, observed, metav1.ConditionFalse, reasonUpgradeFailed,
+			fmt.Sprintf("failed to upgrade %s on %s to kubernetes %s: %s",
+				step.component.name, step.member.instance.Name, desired, err),
+			ctrl.Result{RequeueAfter: r.RetryInterval})
+	}
+
+	return r.setUpToDateCondition(ctx, cluster, observed, metav1.ConditionFalse, reasonUpgradingKubernetes,
+		fmt.Sprintf("upgrading %s on %s to kubernetes %s",
+			step.component.name, step.member.instance.Name, desired),
+		ctrl.Result{RequeueAfter: r.RetryInterval})
+}
+
+// upToDateMessage describes which of the two versions this cluster is
+// actually holding itself to — an unpinned one is unmanaged, not converged,
+// so claiming both were up to date when only one is pinned would overstate
+// what was checked.
+func upToDateMessage(desiredTalos, desiredKubernetes string) string {
+	var parts []string
+
+	if desiredTalos != "" {
+		parts = append(parts, "talos "+desiredTalos)
+	}
+
+	if desiredKubernetes != "" {
+		parts = append(parts, "kubernetes "+desiredKubernetes)
+	}
+
+	return "every member runs " + strings.Join(parts, " and ")
+}
+
+// collectUpgradeMembers returns every member of this cluster — the
+// control-plane pool's first, then each worker pool's in spec order, each
+// pool's own members sorted by name so the roll is deterministic across
+// reconciles rather than following whatever order the API server happened
+// to list them in. That order is the roll order, and it puts the control
+// plane first for the same reason Reconcile itself does: a worker joining
+// or restarting against a control plane that hasn't moved yet is fine,
+// the reverse is not.
+func (r *Reconciler) collectUpgradeMembers(
+	ctx context.Context, cluster *v1alpha2.TalosCluster,
+) ([]upgradeMember, error) {
+	controlPlane, err := resolveMembers(ctx, r.Client, cluster.Namespace, cluster.Spec.ControlPlane.PoolRef)
+	if err != nil {
+		return nil, err
+	}
+
+	members := appendUpgradeMembers(nil, controlPlane, machine.TypeControlPlane)
+
+	for _, worker := range cluster.Spec.Workers {
+		workers, err := resolveMembers(ctx, r.Client, cluster.Namespace, worker.PoolRef)
+		if err != nil {
+			return nil, err
+		}
+
+		members = appendUpgradeMembers(members, workers, machine.TypeWorker)
+	}
+
+	return members, nil
+}
+
+// appendUpgradeMembers sorts pool by name and appends each of its members
+// to members, tagged with machineType — see collectUpgradeMembers' own doc
+// for why the order matters. pool is indexed, not ranged over by value, so
+// every upgradeMember points at the slice's own element rather than a loop
+// copy: refreshMemberVersions writes the freshly probed versions onto
+// exactly the objects applyUpgradePlan then reads back.
+func appendUpgradeMembers(
+	members []upgradeMember, pool []v1alpha2.Instance, machineType machine.Type,
+) []upgradeMember {
+	sort.Slice(pool, func(i, j int) bool { return pool[i].Name < pool[j].Name })
+
+	for i := range pool {
+		members = append(members, upgradeMember{instance: &pool[i], machineType: machineType})
+	}
+
+	return members
+}
+
+// refreshMemberVersions re-probes every member's real Talos and Kubernetes
+// version and persists whatever changed onto its own Instance status.
+// Unlike recordTalosVersions — which deliberately skips any member already
+// marked Joined, since it's only ever establishing that a member first came
+// up — this always re-reads: an upgraded node reports a new version without
+// ever leaving Joined, so a cached value is exactly what would make a
+// finished upgrade look like it never happened. Best-effort throughout: a
+// member that's mid-reboot answers nothing, which leaves its last known
+// version in place and simply defers the decision to the next pass.
+func (r *Reconciler) refreshMemberVersions(
+	ctx context.Context, cluster *v1alpha2.TalosCluster, members []upgradeMember, controlPlaneAddr string,
+	talosCfg *config.Config,
+) {
+	for idx := range members {
+		instance := members[idx].instance
+		addr := dialAddress(*instance)
+		updated := false
+
+		// The Version RPC doubles as this pass's liveness probe — the
+		// same signal MemberLiveConditionType is built on — so the roll
+		// below gets its "is this member up right now?" answer for free
+		// rather than dialing every member a second time to ask.
+		talosVersion, _, err := r.Bootstrapper.Version(ctx, controlPlaneAddr, addr, talosCfg)
+		members[idx].reachable = err == nil
+
+		if err != nil {
+			r.Logger.Warn("Failed to refresh talos version for member, it may be mid-upgrade",
+				"cluster", cluster.Name, "instance", instance.Name, "error", err)
+		} else if talosVersion != "" && talosVersion != instance.Status.Talos.Version {
+			instance.Status.Talos.Version = talosVersion
+			updated = true
+		}
+
+		kubernetesVersion, err := r.Bootstrapper.KubeletVersion(ctx, controlPlaneAddr, addr, talosCfg)
+		if err != nil {
+			r.Logger.Warn("Failed to refresh kubernetes version for member, it may be mid-upgrade",
+				"cluster", cluster.Name, "instance", instance.Name, "error", err)
+		} else if kubernetesVersion != "" && kubernetesVersion != instance.Status.Kubernetes.Version {
+			instance.Status.Kubernetes.Version = kubernetesVersion
+			updated = true
+		}
+
+		if !updated {
+			continue
+		}
+
+		err = r.Client.Status().Update(ctx, instance)
+		if err != nil {
+			r.Logger.Warn("Failed to persist refreshed member versions",
+				"cluster", cluster.Name, "instance", instance.Name, "error", err)
+		}
+	}
+}
+
+// talosVersionOf and kubernetesVersionOf are the two version accessors
+// agreedVersion and staleMembers are parameterized over, so neither has to
+// exist twice over near-identical bodies.
+func talosVersionOf(member upgradeMember) string {
+	return normalizeVersion(member.instance.Status.Talos.Version)
+}
+
+func kubernetesVersionOf(member upgradeMember) string {
+	return normalizeVersion(member.instance.Status.Kubernetes.Version)
+}
+
+// agreedVersion returns the version every member reports, or an empty
+// string if any of them reports nothing or a different one — see
+// v1alpha2.TalosClusterVersionStatus' own doc for why a split cluster
+// reports no version rather than an arbitrary member's.
+func agreedVersion(members []upgradeMember, versionOf func(upgradeMember) string) string {
+	agreed := versionOf(members[0])
+
+	for _, member := range members[1:] {
+		if versionOf(member) != agreed {
+			return ""
+		}
+	}
+
+	return agreed
+}
+
+// staleMembers returns every member whose own version doesn't match
+// desired, in members' own roll order. An empty desired means unmanaged
+// (see UpToDateConditionType's own doc) and matches nothing, so no member
+// is ever upgraded toward a version nobody asked for.
+func staleMembers(
+	members []upgradeMember, desired string, versionOf func(upgradeMember) string,
+) []upgradeMember {
+	if desired == "" {
+		return nil
+	}
+
+	stale := make([]upgradeMember, 0, len(members))
+
+	for _, member := range members {
+		if versionOf(member) != desired {
+			stale = append(stale, member)
+		}
+	}
+
+	return stale
+}
+
+// setUpToDateCondition records observed on cluster's status, sets
+// UpToDateConditionType, persists both if either actually changed, and
+// returns result — its own caller's requeue decision, not one derived from
+// the condition's status the way persistStatus does: a converged cluster
+// still wants the steady-state health-recheck cadence, and an in-flight
+// upgrade wants the much shorter retry interval, neither of which is
+// expressible as "true means no requeue". The observed versions are part
+// of the change check for the same reason the condition is: a member
+// finishing its upgrade moves them without necessarily flipping the
+// condition, and skipping the write on an unchanged condition alone would
+// strand them at a stale value forever.
+func (r *Reconciler) setUpToDateCondition(
+	ctx context.Context, cluster *v1alpha2.TalosCluster, observed clusterVersions,
+	status metav1.ConditionStatus, reason, message string, result ctrl.Result,
+) (ctrl.Result, error) {
+	versionsChanged := cluster.Status.Talos.Version != observed.talos ||
+		cluster.Status.Kubernetes.Version != observed.kubernetes
+
+	cluster.Status.Talos.Version = observed.talos
+	cluster.Status.Kubernetes.Version = observed.kubernetes
+
+	conditionChanged := meta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+		Type: UpToDateConditionType, Status: status, Reason: reason, Message: message,
+	})
+
+	if !versionsChanged && !conditionChanged {
+		return result, nil
+	}
+
+	err := r.Client.Status().Update(ctx, cluster)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to update talos cluster %q status: %w", cluster.Name, err)
+	}
+
+	return result, nil
+}

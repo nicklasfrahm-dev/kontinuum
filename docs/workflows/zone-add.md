@@ -235,6 +235,17 @@ a slow chart fetch could block a reconcile indefinitely. A bounded failure
 is just another retry on the next tick — safe and expected — where an
 unbounded hang is not.
 
+### Upgrading a cluster
+
+`--talos-version`/`--kubernetes-version` pin what the new zone's cluster
+should run, but they don't change what its seed node *boots* — the zone is
+created and bootstrapped at whatever version that node came up on, and only
+upgraded once the cluster reports ready. Editing either version on an
+existing `TalosCluster` later rolls its members onto the new one the same
+way. See [Upgrade a cluster](cluster-upgrade.md) for the precedence rule
+(Talos before Kubernetes), what an empty version means, and the `UpToDate`
+condition that reports progress.
+
 ### Removing a zone
 
 Deleting a `Zone` tears down its downstream footprint and resets its seed
