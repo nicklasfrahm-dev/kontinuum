@@ -31,3 +31,8 @@ updates:
       # Bumps break the build until kine and the k8s 0.32.x pin can move.
       - dependency-name: "go.etcd.io/etcd/*"
       - dependency-name: "github.com/testcontainers/testcontainers-go*"
+      # Bumps pull grpc-gateway v2.30+, whose otel contrib v0.70+ breaks
+      # k8s.io/apiserver 0.32.x. Talos machinery also pulls docker/cli v29,
+      # which breaks oras-go v1 via helm.
+      - dependency-name: "github.com/siderolabs/talos/pkg/machinery"
+      - dependency-name: "github.com/cosi-project/runtime"
