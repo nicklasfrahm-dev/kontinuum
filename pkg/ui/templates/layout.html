@@ -254,13 +254,99 @@
             toast.classList.add('opacity-0');
             window.setTimeout(function () { toast.remove(); }, 200);
         }
+
+        // Page-loading feedback for hx-boost navigations. Every page
+        // renders server-side against the database, so on a slow round
+        // trip a clicked link otherwise looks like it did nothing until
+        // the whole response arrives. While a boosted GET (a link click,
+        // or a history restore that missed htmx's cache) is in flight,
+        // #page-progress (hx-preserve'd, so it survives the body swap and
+        // can animate to completion) creeps toward the right edge and
+        // <main> is marked aria-busy, which dims the current content and
+        // shows #page-loading-spinner via Tailwind's group-aria-busy
+        // variant. Both only appear after pageLoadingDelay, so a fast
+        // navigation never flashes them. Boosted form submits are left
+        // alone: their own buttons already carry a spinner (see
+        // AGENTS.md's UI policy), and polling requests aren't boosted.
+        var pageLoadingDelay = 150;
+
+        function startPageLoading() {
+            window.clearTimeout(window.pageLoadingTimer);
+            window.pageLoadingTimer = window.setTimeout(function () {
+                var bar = document.getElementById('page-progress');
+                var main = document.querySelector('main');
+
+                bar.style.transition = 'none';
+                bar.style.width = '0%';
+                bar.style.opacity = '1';
+                // Force a reflow so the creep below animates from 0%.
+                void bar.offsetWidth;
+                bar.style.transition = 'width 8s cubic-bezier(0.1, 0.6, 0.3, 1)';
+                bar.style.width = '85%';
+
+                main.setAttribute('aria-busy', 'true');
+            }, pageLoadingDelay);
+        }
+
+        function stopPageLoading() {
+            window.clearTimeout(window.pageLoadingTimer);
+
+            var bar = document.getElementById('page-progress');
+            var main = document.querySelector('main');
+
+            // A successful swap already replaced <main> with a fresh,
+            // non-busy one; this only matters after an error, where the
+            // old page stays put and must become interactive again.
+            main.removeAttribute('aria-busy');
+
+            if (bar.style.opacity !== '1') {
+                return;
+            }
+
+            bar.style.transition = 'width 200ms ease-out, opacity 300ms ease 200ms';
+            bar.style.width = '100%';
+            bar.style.opacity = '0';
+        }
+
+        function isBoostedNavigation(evt) {
+            return evt.detail.boosted && evt.detail.requestConfig && evt.detail.requestConfig.verb === 'get';
+        }
+
+        // hx-boost swaps the whole <body>, re-running this script on every
+        // navigation, so the document-level listeners are only attached
+        // once.
+        if (!window.pageLoadingWired) {
+            window.pageLoadingWired = true;
+
+            document.addEventListener('htmx:beforeRequest', function (evt) {
+                if (isBoostedNavigation(evt)) {
+                    startPageLoading();
+                }
+            });
+            document.addEventListener('htmx:afterRequest', function (evt) {
+                if (isBoostedNavigation(evt)) {
+                    stopPageLoading();
+                }
+            });
+            document.addEventListener('htmx:historyCacheMiss', startPageLoading);
+            document.addEventListener('htmx:historyCacheMissLoad', stopPageLoading);
+            document.addEventListener('htmx:historyCacheMissLoadError', stopPageLoading);
+        }
     </script>
+
+    <div id="page-progress" hx-preserve="true" role="presentation"
+         class="fixed top-0 left-0 z-[60] h-0.5 bg-accent shadow-[0_0_8px_#E0924F] pointer-events-none"
+         style="width: 0%; opacity: 0;"></div>
 
     {{template "nav" .}}
 
-    <main class="pt-20 lg:pt-8 lg:ml-64 min-h-screen px-4 pb-6 lg:px-8 lg:pb-8">
-        <div class="max-w-screen-2xl mx-auto w-full">
+    <main class="group pt-20 lg:pt-8 lg:ml-64 min-h-screen px-4 pb-6 lg:px-8 lg:pb-8 aria-busy:pointer-events-none">
+        <div class="max-w-screen-2xl mx-auto w-full transition-opacity duration-200 group-aria-busy:opacity-40">
             {{block "content" .}}{{end}}
+        </div>
+        <div id="page-loading-spinner" aria-hidden="true"
+             class="fixed inset-0 lg:left-64 z-20 flex items-center justify-center pointer-events-none opacity-0 transition-opacity duration-200 group-aria-busy:opacity-100">
+            <span class="text-accent animate-spin motion-reduce:animate-none [&>svg]:h-8 [&>svg]:w-8">{{template "icon-loader-circle"}}</span>
         </div>
     </main>
 

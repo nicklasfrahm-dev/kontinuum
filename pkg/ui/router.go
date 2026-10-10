@@ -202,7 +202,6 @@ func talosClusterPage() *template.Template {
 		"templates/components/icon_key.html", "templates/components/icon_download.html",
 		"templates/components/icon_eye.html", "templates/components/icon_eye_off.html",
 		"templates/components/icon_copy.html", "templates/components/icon_trash.html",
-		"templates/components/icon_loader_circle.html",
 		"templates/components/reveal_panel.html", "templates/components/reveal_panel_script.html",
 		"templates/components/copy_snippet.html", "templates/components/conditions_table.html")
 }
@@ -239,6 +238,10 @@ func mustParsePage(content ...string) *template.Template {
 		// buildCopyChip) — every page needs it, same reasoning as
 		// icon_check.html above.
 		"templates/components/copy_chip.html",
+		// icon_loader_circle.html is used by layout.html's own
+		// page-loading spinner (see startPageLoading) — every page needs
+		// it, same reasoning as icon_check.html above.
+		"templates/components/icon_loader_circle.html",
 	}
 
 	files := make([]string, 0, len(shared)+len(content))
@@ -299,7 +302,7 @@ func buildPages() map[string]*template.Template {
 	return map[string]*template.Template{
 		pageRegistry: mustParsePage("templates/registry_content.html",
 			"templates/components/icon_trash.html", "templates/components/icon_globe.html",
-			"templates/components/icon_loader_circle.html", "templates/components/icon_x.html",
+			"templates/components/icon_x.html",
 			"templates/components/modal_close_button.html",
 			"templates/components/zone_add_modal.html", "templates/components/zone_leave_modal.html"),
 		pageKontinuum: mustParsePage("templates/kontinuum_content.html",
@@ -309,13 +312,13 @@ func buildPages() map[string]*template.Template {
 			"templates/components/icon_info.html", "templates/components/icon_download.html",
 			"templates/components/reveal_panel.html", "templates/components/reveal_panel_script.html"),
 		pageInstances: mustParsePage("templates/instances_content.html",
-			"templates/components/icon_server_plus.html", "templates/components/icon_loader_circle.html",
+			"templates/components/icon_server_plus.html",
 			"templates/components/icon_x.html", "templates/components/modal_close_button.html",
 			"templates/components/instance_add_modal.html", "templates/components/icon_trash.html"),
 		pageInstanceDetail: mustParsePage("templates/instance_detail_content.html",
 			"templates/components/icon_chevron_left.html", "templates/components/icon_info.html",
 			"templates/components/icon_ethernet_port.html", "templates/components/icon_list_checks.html",
-			"templates/components/icon_trash.html", "templates/components/icon_loader_circle.html",
+			"templates/components/icon_trash.html",
 			"templates/components/icon_cpu.html", "templates/components/icon_memory_stick.html",
 			"templates/components/icon_hard_drive.html", "templates/components/conditions_table.html"),
 		pageTalosClusters: mustParsePage("templates/talosclusters_content.html",
@@ -325,20 +328,20 @@ func buildPages() map[string]*template.Template {
 			"templates/components/icon_chevron_left.html", "templates/components/icon_info.html",
 			"templates/components/icon_kubernetes.html", "templates/components/icon_server.html",
 			"templates/components/icon_list_checks.html", "templates/components/icon_trash.html",
-			"templates/components/icon_key.html", "templates/components/icon_loader_circle.html",
+			"templates/components/icon_key.html",
 			"templates/components/conditions_table.html"),
 		pageIAMNamespace: mustParsePage("templates/iam_namespace_content.html",
 			"templates/components/icon_info.html", "templates/components/icon_shield_user.html",
 			"templates/components/icon_user_shield.html",
 			"templates/components/icon_x.html", "templates/components/modal_close_button.html",
-			"templates/components/icon_loader_circle.html", "templates/components/icon_trash.html",
+			"templates/components/icon_trash.html",
 			"templates/components/role_rows.html", "templates/components/iam_delete_modal.html",
 			"templates/components/role_add_modal.html", "templates/components/rolebinding_add_modal.html"),
 		pageIAMCluster: mustParsePage("templates/iam_cluster_content.html",
 			"templates/components/icon_info.html", "templates/components/icon_shield_user.html",
 			"templates/components/icon_user_shield.html",
 			"templates/components/icon_x.html", "templates/components/modal_close_button.html",
-			"templates/components/icon_loader_circle.html", "templates/components/icon_trash.html",
+			"templates/components/icon_trash.html",
 			"templates/components/role_rows.html", "templates/components/iam_delete_modal.html",
 			"templates/components/role_add_modal.html", "templates/components/rolebinding_add_modal.html"),
 		pageConnect: mustParsePage("templates/connect_content.html",

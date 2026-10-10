@@ -1322,6 +1322,42 @@ func TestHandleConnectShowsNoAuthKubeconfigWhenOIDCDisabled(t *testing.T) {
 // confirms the kubectl access card it now owns no longer renders on the
 // registry page it used to live on (see TestHandleRegistryRendersInstances
 // for that page's own remaining content).
+// TestLayoutRendersPageLoadingIndicator covers the global loading feedback
+// every page shares via layout.html: a progress bar that survives hx-boost's
+// body swap (hx-preserve) so it can animate to completion, and a spinner
+// keyed off <main>'s aria-busy state, which the layout's own script sets
+// while a boosted navigation is in flight.
+func TestLayoutRendersPageLoadingIndicator(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/connect"))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), `id="page-progress" hx-preserve="true"`)
+	assert.Contains(t, string(body), `id="page-loading-spinner"`)
+	assert.Contains(t, string(body), "group-aria-busy:opacity-100")
+	assert.Contains(t, string(body), "htmx:beforeRequest")
+	assert.Contains(t, string(body), "htmx:historyCacheMiss")
+}
+
 func TestHandleConnectHighlightsConnectNavItem(t *testing.T) {
 	t.Parallel()
 
