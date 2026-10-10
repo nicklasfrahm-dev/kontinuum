@@ -35,6 +35,14 @@ values:
     enabled: true
   nodeIPAM:
     enabled: true
+  # Node IPAM only serves Services with loadBalancerClass io.cilium/node
+  # unless it's the default. The Gateway API Service Cilium creates for a
+  # zone's Gateway sets no class, so without this it never gets an address
+  # (and the zone's DNS record and certificate never follow). With it, a
+  # LoadBalancer Service gets its nodes' own IPs — the taloscluster
+  # controller removes Talos's exclude-from-external-load-balancers label
+  # from control planes so a control-plane-only cluster still qualifies.
+  defaultLBServiceIPAM: nodeipam
   operator:
     # A second replica could never even schedule on a single-node cluster
     # (hostNetwork: true means a port collision) — scale up only once

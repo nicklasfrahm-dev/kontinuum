@@ -63,6 +63,9 @@ type Config struct {
 	// CRDChecker checks whether an installed addon's own CRDs are
 	// Established and discoverable. Defaults to NewCRDChecker() when nil.
 	CRDChecker CRDChecker
+	// SecretSyncer copies an addon's spec.secrets onto its cluster before
+	// installing. Defaults to ClusterSecretSyncer when nil.
+	SecretSyncer SecretSyncer
 	// RetryInterval is how long Reconcile waits before retrying a step
 	// that hasn't converged yet. Defaults to fifteen seconds when zero.
 	RetryInterval time.Duration
@@ -97,6 +100,10 @@ func NewController(cfg Config) *Controller {
 		cfg.CRDChecker = NewCRDChecker()
 	}
 
+	if cfg.SecretSyncer == nil {
+		cfg.SecretSyncer = ClusterSecretSyncer{}
+	}
+
 	if cfg.RetryInterval == 0 {
 		cfg.RetryInterval = defaultRetryInterval
 	}
@@ -122,6 +129,7 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		Installer:      c.Config.Installer,
 		PodProber:      c.Config.PodProber,
 		CRDChecker:     c.Config.CRDChecker,
+		SecretSyncer:   c.Config.SecretSyncer,
 		RetryInterval:  c.Config.RetryInterval,
 		ResyncInterval: c.Config.ResyncInterval,
 		Locker: zonelease.NewLocker(
@@ -147,6 +155,7 @@ type Reconciler struct {
 	Installer      Installer
 	PodProber      PodProber
 	CRDChecker     CRDChecker
+	SecretSyncer   SecretSyncer
 	RetryInterval  time.Duration
 	ResyncInterval time.Duration
 	// Locker gates every write below against zonelease — see
@@ -225,7 +234,14 @@ func (r *Reconciler) installAndVerify(
 	installCtx, cancel := context.WithTimeout(ctx, addonInstallTimeout)
 	defer cancel()
 
-	err := r.Installer.Install(installCtx, kubeconfig, installReq)
+	err := r.syncSecrets(installCtx, addon, kubeconfig, installReq.Namespace)
+	if err != nil {
+		r.Logger.Warn("Failed to copy addon secrets", "addon", addon.Name, "error", err)
+
+		return r.setReady(ctx, addon, metav1.ConditionFalse, "SecretSyncFailed", err.Error())
+	}
+
+	err = r.Installer.Install(installCtx, kubeconfig, installReq)
 	if err != nil {
 		r.Logger.Warn("failed to install addon", "addon", addon.Name, "error", err)
 
@@ -436,4 +452,28 @@ func (r *Reconciler) setReady(
 	}
 
 	return ctrl.Result{RequeueAfter: r.RetryInterval}, nil
+}
+
+// syncSecrets copies addon's spec.secrets from the hub onto its cluster, into
+// the release's namespace, before every install — so the chart's pods never
+// start without the Secrets their values reference, and a rotated hub Secret
+// reaches the cluster on the next reconcile.
+func (r *Reconciler) syncSecrets(
+	ctx context.Context, addon *v1alpha2.Addon, kubeconfig []byte, namespace string,
+) error {
+	if len(addon.Spec.Secrets) == 0 {
+		return nil
+	}
+
+	secrets, err := fetchAddonSecrets(ctx, r.Client, addon)
+	if err != nil {
+		return err
+	}
+
+	err = r.SecretSyncer.SyncSecrets(ctx, kubeconfig, namespace, secrets)
+	if err != nil {
+		return fmt.Errorf("failed to copy secrets to cluster: %w", err)
+	}
+
+	return nil
 }

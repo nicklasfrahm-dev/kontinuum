@@ -30,7 +30,12 @@ const (
 	ciliumAddonName         = "cilium"
 	certManagerAddonName    = "cert-manager"
 	gatewayAPICRDsAddonName = "gateway-api-crds"
-	defaultAddonPriority    = int32(100)
+	// externalDNSAddonName has its own embedded defaults (see
+	// values/external-dns.yaml) but isn't one of builtinAddonNames: it's
+	// only seeded when the hub has DNS configured, and its values are
+	// generated from that config — see EnsureExternalDNSSeed.
+	externalDNSAddonName = "external-dns"
+	defaultAddonPriority = int32(100)
 )
 
 //go:embed values/*.yaml
@@ -201,6 +206,17 @@ func builtinAddonNames() []string {
 	return []string{gatewayAPICRDsAddonName, ciliumAddonName, certManagerAddonName}
 }
 
+// addonNamesWithDefaults lists every ReleaseName with an embedded
+// values/<name>.yaml to fall back on — builtinAddonNames' own three names
+// (auto-seeded, see EnsureBuiltinSeeds) plus externalDNSAddonName, which has
+// defaults of its own (see values/external-dns.yaml) but is only seeded when
+// the hub has DNS configured (see EnsureExternalDNSSeed). resolveAddon and EffectivePriority
+// both use this broader list — builtinAddonNames itself stays scoped to just
+// EnsureBuiltinSeeds' own auto-creation set.
+func addonNamesWithDefaults() []string {
+	return append(builtinAddonNames(), externalDNSAddonName)
+}
+
 // resolveAddonChart resolves repo/chartName/version against def.Chart
 // (empty for a non-built-in addon), each overridden by the matching
 // spec.Chart field when set. repo is required only when chartName isn't
@@ -236,17 +252,17 @@ func resolveAddonChart(spec v1alpha2.AddonSpec, def addonDefaults) (string, stri
 
 // EffectivePriority resolves addon's own install-ordering priority (see
 // AddonLifecycleSpec.Priority's own doc): its spec value when set, this
-// addon's built-in default otherwise (see values/*.yaml's own priority
-// field), or the global default (100) for anything else — including a
-// non-built-in ReleaseName, which has no default of its own to fall back
-// on.
+// addon's own embedded default otherwise (see addonNamesWithDefaults and
+// values/*.yaml's own priority field), or the global default (100) for
+// anything else — including a ReleaseName with no embedded defaults of its
+// own to fall back on.
 func EffectivePriority(addon *v1alpha2.Addon) (int32, error) {
 	if addon.Spec.Lifecycle.Priority != nil {
 		return *addon.Spec.Lifecycle.Priority, nil
 	}
 
 	releaseName := ReleaseName(addon)
-	if !slices.Contains(builtinAddonNames(), releaseName) {
+	if !slices.Contains(addonNamesWithDefaults(), releaseName) {
 		return defaultAddonPriority, nil
 	}
 
@@ -263,16 +279,16 @@ func EffectivePriority(addon *v1alpha2.Addon) (int32, error) {
 }
 
 // resolveAddon resolves one addon's chart/namespace/values into an
-// install request. spec.ReleaseName matching a built-in name (see
-// builtinAddonNames) falls back to that addon's own embedded defaults for
-// whatever Chart/Namespace/Values spec itself leaves unset; any other
-// ReleaseName has no fallback — Chart/Namespace become required, or this
-// returns a descriptive error rather than installing something
+// install request. spec.ReleaseName matching a name with embedded defaults
+// (see addonNamesWithDefaults) falls back to that addon's own embedded
+// defaults for whatever Chart/Namespace/Values spec itself leaves unset; any
+// other ReleaseName has no fallback — Chart/Namespace become required, or
+// this returns a descriptive error rather than installing something
 // half-configured.
 func resolveAddon(spec v1alpha2.AddonSpec, celCtx map[string]any) (InstallRequest, error) {
 	var def addonDefaults
 
-	if slices.Contains(builtinAddonNames(), spec.ReleaseName) {
+	if slices.Contains(addonNamesWithDefaults(), spec.ReleaseName) {
 		var err error
 
 		def, err = loadAddonDefaults(spec.ReleaseName)

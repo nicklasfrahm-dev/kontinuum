@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"testing"
 	"time"
 
@@ -252,6 +253,7 @@ func newDownstreamFakeClient(t *testing.T) client.Client {
 	require.NoError(t, rbacv1.AddToScheme(scheme))
 	require.NoError(t, gatewayv1.Install(scheme))
 	require.NoError(t, certmanagerv1.AddToScheme(scheme))
+	zone.AddExternalDNSToScheme(scheme)
 
 	// Wrapped the same way newHubFakeClient is (see secretAdmissionClient's
 	// own doc) — ensureEtcdIdentity's own re-reconcile path (see auth.go)
@@ -335,6 +337,16 @@ func joinedKontinuum() (*v1alpha2.Kontinuum, *corev1.Secret) {
 	return kontinuum, secret
 }
 
+// testDNSCredentialValue is a fake Cloudflare API token, not a real one.
+const testDNSCredentialValue = "example-cloudflare-token"
+
+// testDNSCredential is the flat YAML KONTINUUM_SERVER_DNS_CREDENTIAL is
+// always expected to hold (see addon.ParseDNSCredentialKeys) — one key,
+// CF_API_TOKEN, matching Cloudflare's own expected env var name. Every DNS
+// test in this file that isn't specifically about addon-wiring only cares
+// that this parses successfully, not its specific key/value.
+const testDNSCredential = "CF_API_TOKEN: " + testDNSCredentialValue + "\n"
+
 // testHubConfig is newReconciler's own Reconciler.HubConfig — a hub
 // configured with anonymous access (not OIDC) and a real ACME/GRPC
 // setup, mirroring what a real hub's KONTINUUM_-prefixed env vars would
@@ -351,13 +363,22 @@ func testHubConfig() *config.Config {
 			Format: "console",
 		},
 		ACME: v1alpha2.KontinuumACMEConfigStatus{
-			Email:  "ops@example.com",
-			Server: "https://acme-v02.api.letsencrypt.org/directory",
+			Email:              "ops@example.com",
+			Server:             "https://acme-v02.api.letsencrypt.org/directory",
+			InsecureSkipVerify: "false",
 		},
 		Server: v1alpha2.KontinuumServerConfigStatus{
 			GRPC: v1alpha2.KontinuumGRPCConfigStatus{
 				Endpoint:              testGRPCEndpoint,
 				InsecureTLSSkipVerify: "true",
+			},
+			// DNS.Credential (like Storage) is tagged `secret:"true"` — see
+			// assertDownstreamFootprintInstalled/assertDownstreamEnvConfigMap,
+			// which confirm ensureEnv actually routes it into the Secret,
+			// never the broadly-readable ConfigMap.
+			DNS: v1alpha2.KontinuumDNSConfigStatus{
+				Provider:   testDNSProviderOther,
+				Credential: testDNSCredential,
 			},
 		},
 	}
@@ -503,6 +524,30 @@ func TestReconcileReportsNoStorageSecretFound(t *testing.T) {
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, "NoStorageSecretFound", cond.Reason)
+}
+
+// TestReconcileClusterIssuerSkipsTLSVerifyWhenConfigured covers
+// KONTINUUM_ACME_INSECURE_SKIP_VERIFY: the local dev stack's Pebble ACME
+// server presents a certificate from its own throwaway test CA, so the
+// zone's ClusterIssuer must be told to skip verifying it.
+func TestReconcileClusterIssuerSkipsTLSVerifyWhenConfigured(t *testing.T) {
+	t.Parallel()
+
+	kontinuum, kontinuumSecret := registeredKontinuum("hub")
+	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret(),
+		kontinuum, kontinuumSecret)
+	downstream := newDownstreamFakeClient(t)
+	reconciler := newReconciler(hubClient, fakeDownstreamClientBuilder{client: downstream})
+	reconciler.HubConfig.ACME.Server = "https://pebble:14000/dir"
+	reconciler.HubConfig.ACME.InsecureSkipVerify = strconv.FormatBool(true)
+
+	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	var issuer certmanagerv1.ClusterIssuer
+	require.NoError(t, downstream.Get(t.Context(), client.ObjectKey{Name: testDownstreamResourceName}, &issuer))
+	assert.Equal(t, "https://pebble:14000/dir", issuer.Spec.ACME.Server)
+	assert.True(t, issuer.Spec.ACME.SkipTLSVerify)
 }
 
 func TestReconcileInstallsDownstreamObjectsAndWaitsForCertificate(t *testing.T) {
@@ -826,6 +871,10 @@ func assertDownstreamEnvConfigMap(t *testing.T, configMap corev1.ConfigMap) {
 	// — ensureEnv must route it into the Secret only, never duplicate it
 	// into the broadly-readable ConfigMap.
 	assert.NotContains(t, configMap.Data, "KONTINUUM_SERVER_STORAGE")
+	// DNS.Credential is tagged `secret:"true"` too (see
+	// api/v1alpha2.KontinuumDNSConfigStatus) — same rationale as Storage
+	// above.
+	assert.NotContains(t, configMap.Data, "KONTINUUM_SERVER_DNS_CREDENTIAL")
 }
 
 // assertDownstreamFootprintInstalled asserts every object a single
@@ -893,6 +942,11 @@ func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) 
 	require.True(t, ok, "KONTINUUM_SERVER_STORAGE must be a valid etcdproxy relay DSN")
 	assert.Equal(t, testZoneName, zoneName)
 	assert.Equal(t, testGRPCEndpoint, hubEndpoint)
+	// DNS.Credential (like Storage) is tagged `secret:"true"` (see
+	// api/v1alpha2.KontinuumDNSConfigStatus) — ensureEnv must route it into
+	// the Secret only, never the broadly-readable ConfigMap (see
+	// assertDownstreamEnvConfigMap's own matching assertion).
+	assert.Equal(t, testDNSCredential, string(secret.Data["KONTINUUM_SERVER_DNS_CREDENTIAL"]))
 
 	var identitySecret corev1.Secret
 	require.NoError(t, downstream.Get(t.Context(),
@@ -923,7 +977,8 @@ func assertDownstreamFootprintInstalled(t *testing.T, downstream client.Client) 
 
 	var issuer certmanagerv1.ClusterIssuer
 	require.NoError(t, downstream.Get(t.Context(), client.ObjectKey{Name: testDownstreamResourceName}, &issuer))
-	assert.Equal(t, "ops@example.com", issuer.Spec.ACME.Email)
+	assert.Equal(t, testHubConfig().ACME.Email, issuer.Spec.ACME.Email)
+	assert.False(t, issuer.Spec.ACME.SkipTLSVerify, "TLS verification against the ACME server must stay on by default")
 
 	var gateway gatewayv1.Gateway
 	require.NoError(t, downstream.Get(t.Context(),

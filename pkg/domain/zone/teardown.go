@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -13,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/addon"
 )
 
 // reconcileTeardown runs a Zone's deletion sequence — see issue #49's own
@@ -106,13 +108,13 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, zoneObj *v1alpha2.Zo
 
 // teardownDownstream connects to zoneObj's own downstream cluster and
 // deletes everything reconcileInstall ever created there, in exactly the
-// reverse of installWorkload/installNetwork's own order: HTTPRoute,
-// Certificate, Gateway, ClusterIssuer (network.go), then Deployment,
-// Service, the kontinuum-env Secret/ConfigMap, and finally the
-// kontinuum-system namespace itself (workload.go) — deleting the namespace
-// last cascades away anything not explicitly listed here too (e.g.
-// cert-manager's own Certificate-issued TLS Secret, or any ACME challenge
-// objects it left behind).
+// reverse of installWorkload/installNetwork/reconcileDNS's own order:
+// DNSEndpoint, HTTPRoute, Certificate, Gateway, ClusterIssuer (network.go),
+// then Deployment, Service, the kontinuum-env Secret/ConfigMap, and finally
+// the kontinuum-system namespace itself (workload.go) — deleting the
+// namespace last cascades away anything not explicitly listed here too
+// (e.g. cert-manager's own Certificate-issued TLS Secret, or any ACME
+// challenge objects it left behind).
 //
 // A missing kubeconfig (cluster.Status.SecretRef never populated, or its
 // Secret already gone) means the downstream cluster never got far enough to
@@ -138,7 +140,7 @@ func (r *Reconciler) teardownDownstream(
 		return fmt.Errorf("failed to build downstream client for %q: %w", zoneObj.Name, err)
 	}
 
-	err = uninstallNetwork(ctx, downstream)
+	err = uninstallNetwork(ctx, downstream, cluster.Name)
 	if err != nil {
 		return err
 	}
@@ -146,11 +148,24 @@ func (r *Reconciler) teardownDownstream(
 	return uninstallWorkload(ctx, downstream)
 }
 
-// uninstallNetwork deletes the ClusterIssuer, Gateway, Certificate, and
-// HTTPRoute installNetwork installs — see teardownDownstream's own doc for
-// ordering.
-func uninstallNetwork(ctx context.Context, downstream client.Client) error {
-	err := deleteHTTPRoute(ctx, downstream, downstreamNamespace, httpRouteName)
+// uninstallNetwork deletes the DNSEndpoint (if reconcileDNS ever created
+// one), the external-dns credential Secret (if the addon controller ever
+// copied one — see deleteExternalDNSCredentialSecret's own doc for why this
+// is unconditional), ClusterIssuer, Gateway, Certificate, and
+// HTTPRoute installNetwork/reconcileDNS install — see teardownDownstream's
+// own doc for ordering.
+func uninstallNetwork(ctx context.Context, downstream client.Client, clusterName string) error {
+	err := deleteDNSEndpoint(ctx, downstream, downstreamNamespace, dnsEndpointName)
+	if err != nil {
+		return err
+	}
+
+	err = deleteExternalDNSCredentialSecret(ctx, downstream, downstreamNamespace, clusterName)
+	if err != nil {
+		return err
+	}
+
+	err = deleteHTTPRoute(ctx, downstream, downstreamNamespace, httpRouteName)
 	if err != nil {
 		return err
 	}
@@ -261,4 +276,26 @@ func (r *Reconciler) removeFinalizer(ctx context.Context, zoneObj *v1alpha2.Zone
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// deleteExternalDNSCredentialSecret deletes the external-dns credential
+// Secret the addon controller copies onto the downstream cluster (see
+// addon.EnsureExternalDNSSeed), tolerating NotFound. Called unconditionally
+// during teardown, not just when DNS was ever configured: it's idempotent,
+// and a credential shouldn't outlive the zone on a cluster that might not
+// get reset.
+func deleteExternalDNSCredentialSecret(
+	ctx context.Context, downstream client.Client, namespace, clusterName string,
+) error {
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name:      addon.ExternalDNSCredentialSecretName(clusterName),
+		Namespace: namespace,
+	}}
+
+	err := client.IgnoreNotFound(downstream.Delete(ctx, secret))
+	if err != nil {
+		return fmt.Errorf("failed to delete %q secret: %w", secret.Name, err)
+	}
+
+	return nil
 }

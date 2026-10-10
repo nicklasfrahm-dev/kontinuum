@@ -1,0 +1,25 @@
+# Default external-dns install — chart identity/version, namespace, and Helm
+# values all live together here — see cilium.yaml's own doc for why. Unlike
+# cilium/cert-manager/gateway-api-crds, this addon isn't seeded onto every
+# cluster: the taloscluster controller seeds it alongside them only when the
+# hub has KONTINUUM_SERVER_DNS_PROVIDER/_CREDENTIAL configured, adding
+# provider.name and the credential's env wiring to these values (see
+# EnsureExternalDNSSeed in externaldns.go). This file only supplies what
+# every provider needs in common: the crd source, which picks up the
+# DNSEndpoint the zone controller creates for each zone (see
+# pkg/domain/zone/network.go's ensureDNSEndpoint).
+chart:
+  repo: https://kubernetes-sigs.github.io/external-dns/
+  name: external-dns
+  version: 1.21.1
+namespace:
+  name: kontinuum-system
+lifecycle:
+  priority: 100
+values:
+  # crd, not the chart's own default (service/ingress): the only source
+  # kontinuum's own Zone controller ever populates is a DNSEndpoint object
+  # (see ensureDNSEndpoint) — not a Service/Ingress annotation.
+  sources:
+    - crd
+  registry: txt

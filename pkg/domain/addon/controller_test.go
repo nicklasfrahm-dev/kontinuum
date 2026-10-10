@@ -34,12 +34,39 @@ const (
 type fakeAddonInstaller struct {
 	calls []addon.InstallRequest
 	err   error
+	// events, when set, records "install" in call order, shared with a
+	// fakeSecretSyncer so a test can assert which ran first.
+	events *[]string
 }
 
 func (f *fakeAddonInstaller) Install(_ context.Context, _ []byte, req addon.InstallRequest) error {
 	f.calls = append(f.calls, req)
 
+	if f.events != nil {
+		*f.events = append(*f.events, "install")
+	}
+
 	return f.err
+}
+
+type secretSyncCall struct {
+	namespace string
+	secrets   []corev1.Secret
+}
+
+type fakeSecretSyncer struct {
+	calls  []secretSyncCall
+	events *[]string
+}
+
+func (f *fakeSecretSyncer) SyncSecrets(_ context.Context, _ []byte, namespace string, secrets []corev1.Secret) error {
+	f.calls = append(f.calls, secretSyncCall{namespace: namespace, secrets: secrets})
+
+	if f.events != nil {
+		*f.events = append(*f.events, "sync-secrets")
+	}
+
+	return nil
 }
 
 // namespaceHealthResult is one PodProber.NamespaceHealthy fake result.
@@ -136,6 +163,7 @@ func newReconciler(fakeClient client.Client, installer *fakeAddonInstaller, prob
 		Installer:     installer,
 		PodProber:     prober,
 		CRDChecker:    &fakeCRDChecker{ready: true},
+		SecretSyncer:  &fakeSecretSyncer{},
 		RetryInterval: testRetryInterval,
 		Locker:        zonelease.NewLocker(fakeClient, fakeClient, "test-hub", "", 0),
 		Logger:        slog.Default(),
@@ -168,6 +196,8 @@ const (
 	customReleaseName       = "my-addon"
 	ciliumAddonResourceName = testClusterName + "-cilium"
 	customAddonResourceName = testClusterName + "-" + customReleaseName
+	customAddonNamespace    = "my-addon-ns"
+	customChartVersion      = "1.0.0"
 )
 
 // readyCluster builds a TalosCluster fixture that's already bootstrapped
@@ -295,8 +325,8 @@ func TestReconcileCustomAddonWithChartInstalls(t *testing.T) {
 		Spec: v1alpha2.AddonSpec{
 			TalosClusterRef: v1alpha2.TalosClusterReference{Name: testClusterName},
 			ReleaseName:     customReleaseName,
-			Namespace:       v1alpha2.AddonNamespaceSpec{Name: "my-addon-ns"},
-			Chart:           &v1alpha2.AddonChartSpec{Repo: "https://example.com/charts", Name: "my-chart", Version: "1.0.0"},
+			Namespace:       v1alpha2.AddonNamespaceSpec{Name: customAddonNamespace},
+			Chart:           customChart(),
 		},
 	}
 
@@ -315,8 +345,8 @@ func TestReconcileCustomAddonWithChartInstalls(t *testing.T) {
 	req := installer.calls[0]
 	assert.Equal(t, "https://example.com/charts", req.RepoURL)
 	assert.Equal(t, "my-chart", req.ChartName)
-	assert.Equal(t, "1.0.0", req.Version)
-	assert.Equal(t, "my-addon-ns", req.Namespace)
+	assert.Equal(t, customChartVersion, req.Version)
+	assert.Equal(t, customAddonNamespace, req.Namespace)
 }
 
 func TestReconcileCustomAddonWithoutChartFails(t *testing.T) {
@@ -668,8 +698,8 @@ func TestReconcileNoPodsIsVacuouslyHealthy(t *testing.T) {
 		Spec: v1alpha2.AddonSpec{
 			TalosClusterRef: v1alpha2.TalosClusterReference{Name: testClusterName},
 			ReleaseName:     customReleaseName,
-			Namespace:       v1alpha2.AddonNamespaceSpec{Name: "my-addon-ns"},
-			Chart:           &v1alpha2.AddonChartSpec{Repo: "https://example.com/charts", Name: "my-chart", Version: "1.0.0"},
+			Namespace:       v1alpha2.AddonNamespaceSpec{Name: customAddonNamespace},
+			Chart:           customChart(),
 		},
 	}
 
@@ -728,4 +758,88 @@ func TestReconcileReadyAddonRequeuesForResync(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, testResyncInterval, result.RequeueAfter)
 	assert.Len(t, installer.calls, 2)
+}
+
+// customChart is the chart every custom-addon test installs.
+func customChart() *v1alpha2.AddonChartSpec {
+	return &v1alpha2.AddonChartSpec{Repo: "https://example.com/charts", Name: "my-chart", Version: customChartVersion}
+}
+
+// addonWithSecret is a custom Addon listing one hub Secret under
+// spec.secrets.
+func addonWithSecret() *v1alpha2.Addon {
+	return &v1alpha2.Addon{
+		ObjectMeta: metav1.ObjectMeta{Name: customAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace},
+		Spec: v1alpha2.AddonSpec{
+			TalosClusterRef: v1alpha2.TalosClusterReference{Name: testClusterName},
+			ReleaseName:     customReleaseName,
+			Namespace:       v1alpha2.AddonNamespaceSpec{Name: customAddonNamespace},
+			Chart:           customChart(),
+			Secrets:         []v1alpha2.AddonSecretReference{{Name: "my-credentials"}},
+		},
+	}
+}
+
+// TestReconcileCopiesAddonSecretsBeforeInstall covers spec.secrets: the hub
+// Secret is copied into the release's namespace on the cluster before the
+// chart is installed, so its pods never start without it.
+func TestReconcileCopiesAddonSecretsBeforeInstall(t *testing.T) {
+	t.Parallel()
+
+	cluster, kubeconfig := readyCluster()
+	credentials := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-credentials", Namespace: v1alpha2.KontinuumSystemNamespace},
+		Data:       map[string][]byte{"TOKEN": []byte("example-token")},
+	}
+
+	fakeClient := newFakeClient(t, cluster, kubeconfig, claimedDiscoveredInstance("cp-node-1"), addonWithSecret(),
+		credentials)
+
+	var events []string
+
+	installer := &fakeAddonInstaller{events: &events}
+	syncer := &fakeSecretSyncer{events: &events}
+	reconciler := newReconciler(fakeClient, installer, &fakePodProber{})
+	reconciler.SecretSyncer = syncer
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: customAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"sync-secrets", "install"}, events)
+	require.Len(t, syncer.calls, 1)
+	assert.Equal(t, customAddonNamespace, syncer.calls[0].namespace)
+	require.Len(t, syncer.calls[0].secrets, 1)
+	assert.Equal(t, "my-credentials", syncer.calls[0].secrets[0].Name)
+	assert.Equal(t, []byte("example-token"), syncer.calls[0].secrets[0].Data["TOKEN"])
+}
+
+// TestReconcileAddonWithMissingSecretFails covers a spec.secrets entry with
+// no matching hub Secret: the addon reports Ready=False/SecretSyncFailed and
+// its chart is never installed.
+func TestReconcileAddonWithMissingSecretFails(t *testing.T) {
+	t.Parallel()
+
+	cluster, kubeconfig := readyCluster()
+	fakeClient := newFakeClient(t, cluster, kubeconfig, claimedDiscoveredInstance("cp-node-1"), addonWithSecret())
+
+	installer := &fakeAddonInstaller{}
+	reconciler := newReconciler(fakeClient, installer, &fakePodProber{})
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: customAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, installer.calls)
+
+	var got v1alpha2.Addon
+
+	require.NoError(t, fakeClient.Get(context.Background(),
+		types.NamespacedName{Name: customAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace}, &got))
+
+	ready := meta.FindStatusCondition(got.Status.Conditions, "Ready")
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, "SecretSyncFailed", ready.Reason)
 }

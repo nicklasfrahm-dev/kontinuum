@@ -194,6 +194,15 @@ spec:
                           Email is the ACME account email used when creating a zone's
                           cert-manager ClusterIssuer.
                         type: string
+                      insecureSkipVerify:
+                        description: |-
+                          InsecureSkipVerify skips TLS certificate verification on the
+                          connection a zone's cert-manager ClusterIssuer makes to Server — for
+                          local development only, where Server is a Pebble test ACME server
+                          presenting a certificate from its own throwaway test CA (see
+                          compose.yaml's pebble service). Never set this against a real ACME
+                          server: it would let anyone on the network path impersonate it.
+                        type: string
                       server:
                         description: |-
                           Server is the ACME directory URL. Defaults to Let's Encrypt
@@ -267,6 +276,17 @@ spec:
                           namespace, room to grow beyond just Domain later without crowding
                           KontinuumServerConfigStatus itself.
                         properties:
+                          credential:
+                            description: |-
+                              Credential is a flat YAML mapping of the environment variables
+                              Provider's external-dns implementation reads (e.g. CF_API_TOKEN) —
+                              see addon.ParseDNSCredentialKeys. Confidential: unlike
+                              Domain/Provider, this is never populated here — Config.Redact always
+                              strips it before a value reaches status.config. Tagged `secret:"true"`
+                              for the same reason as Storage's own identical tag (see that field's
+                              own doc) — without it, pkg/domain/zone's ensureEnv would copy this
+                              into a joined zone's broadly-readable ConfigMap instead of its Secret.
+                            type: string
                           domain:
                             description: |-
                               Domain is the base domain a zone's own kontinuum-server is published
@@ -276,6 +296,17 @@ spec:
                               pkg/domain/zone's Add fan-out infers a new zone's own domain from
                               this same field on any already-registered Kontinuum, exactly
                               mirroring how it infers Storage from that Secret.
+                            type: string
+                          provider:
+                            description: |-
+                              Provider selects the external-dns provider a zone's own DNS record is
+                              managed through (e.g. "route53", "azure", "cloudflare") — passed
+                              through untouched to whatever external-dns Addon the operator
+                              configures for it (see pkg/domain/addon/values/external-dns.yaml's own
+                              doc for why kontinuum doesn't wire this in itself). Not confidential,
+                              so — like Domain — it's published here directly. Empty means no DNS
+                              provider is configured; see pkg/domain/zone's own doc for what that
+                              means for a Zone's own DNSEndpoint management.
                             type: string
                         type: object
                       grpc:

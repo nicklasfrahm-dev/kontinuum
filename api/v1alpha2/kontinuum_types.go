@@ -149,6 +149,26 @@ type KontinuumDNSConfigStatus struct {
 	// mirroring how it infers Storage from that Secret.
 	// +optional
 	Domain string `default:"" json:"domain"`
+	// Provider selects the external-dns provider a zone's own DNS record is
+	// managed through (e.g. "route53", "azure", "cloudflare") — passed
+	// through untouched to whatever external-dns Addon the operator
+	// configures for it (see pkg/domain/addon/values/external-dns.yaml's own
+	// doc for why kontinuum doesn't wire this in itself). Not confidential,
+	// so — like Domain — it's published here directly. Empty means no DNS
+	// provider is configured; see pkg/domain/zone's own doc for what that
+	// means for a Zone's own DNSEndpoint management.
+	// +optional
+	Provider string `default:"" json:"provider"`
+	// Credential is a flat YAML mapping of the environment variables
+	// Provider's external-dns implementation reads (e.g. CF_API_TOKEN) —
+	// see addon.ParseDNSCredentialKeys. Confidential: unlike
+	// Domain/Provider, this is never populated here — Config.Redact always
+	// strips it before a value reaches status.config. Tagged `secret:"true"`
+	// for the same reason as Storage's own identical tag (see that field's
+	// own doc) — without it, pkg/domain/zone's ensureEnv would copy this
+	// into a joined zone's broadly-readable ConfigMap instead of its Secret.
+	// +optional
+	Credential string `default:"" json:"credential" secret:"true"`
 }
 
 // KontinuumGRPCConfigStatus groups this process's own etcd gRPC proxy
@@ -233,6 +253,14 @@ type KontinuumACMEConfigStatus struct {
 	// production, not staging.
 	// +optional
 	Server string `default:"https://acme-v02.api.letsencrypt.org/directory" json:"server"`
+	// InsecureSkipVerify skips TLS certificate verification on the
+	// connection a zone's cert-manager ClusterIssuer makes to Server — for
+	// local development only, where Server is a Pebble test ACME server
+	// presenting a certificate from its own throwaway test CA (see
+	// compose.yaml's pebble service). Never set this against a real ACME
+	// server: it would let anyone on the network path impersonate it.
+	// +optional
+	InsecureSkipVerify string `default:"false" json:"insecureSkipVerify"`
 }
 
 // KontinuumSecretReference points to the Secret holding a Kontinuum's

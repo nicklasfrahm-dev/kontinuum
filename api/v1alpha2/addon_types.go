@@ -127,6 +127,21 @@ type AddonSpec struct {
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	Values *apiextensionsv1.JSON `json:"values,omitempty"`
+	// Secrets are copied from this Addon's own namespace on the hub into
+	// Namespace on the cluster, under the same names, before every install.
+	// Values can then reference them (e.g. env[].valueFrom.secretKeyRef)
+	// without the confidential data ever appearing in Values itself.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Secrets []AddonSecretReference `json:"secrets,omitempty"`
+}
+
+// AddonSecretReference names a Secret in the Addon's own namespace on the
+// hub.
+type AddonSecretReference struct {
+	// Name is the Secret's name, on the hub and on the cluster alike.
+	Name string `json:"name"`
 }
 
 // AddonStatus reports one addon's install/health state.

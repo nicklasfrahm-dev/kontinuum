@@ -137,6 +137,7 @@ func configBytes(input *generate.Input, machineType machine.Type, hostname strin
 	}
 
 	applyAutoInstallDiskSelector(provider)
+	removeExternalLoadBalancerExclusion(provider)
 
 	hostnameDoc := network.NewHostnameConfigV1Alpha1()
 	hostnameDoc.ConfigHostname = hostname
@@ -172,4 +173,15 @@ func configBytes(input *generate.Input, machineType machine.Type, hostname strin
 // workaround.
 func applyAutoInstallDiskSelector(provider talosconfig.Provider) {
 	provider.RawV1Alpha1().MachineConfig.MachineInstall.InstallDiskSelector = &v1alpha1.InstallDiskSelector{}
+}
+
+// removeExternalLoadBalancerExclusion drops the
+// node.kubernetes.io/exclude-from-external-load-balancers label Talos's
+// generator adds to every control-plane node (for Talos 1.8+ contracts).
+// Control planes here run regular workloads (see generateConfigs'
+// AllowSchedulingOnControlPlanes), and Cilium's node IPAM honours that
+// label: on a cluster made only of control-plane nodes, nothing would be
+// left to give a zone's Gateway its LoadBalancer address.
+func removeExternalLoadBalancerExclusion(provider talosconfig.Provider) {
+	delete(provider.RawV1Alpha1().MachineConfig.MachineNodeLabels, constants.LabelExcludeFromExternalLB)
 }

@@ -144,6 +144,28 @@ spec:
                   Chart must be set.
                 maxLength: 63
                 type: string
+              secrets:
+                description: |-
+                  Secrets are copied from this Addon's own namespace on the hub into
+                  Namespace on the cluster, under the same names, before every install.
+                  Values can then reference them (e.g. env[].valueFrom.secretKeyRef)
+                  without the confidential data ever appearing in Values itself.
+                items:
+                  description: |-
+                    AddonSecretReference names a Secret in the Addon's own namespace on the
+                    hub.
+                  properties:
+                    name:
+                      description: Name is the Secret's name, on the hub and on the
+                        cluster alike.
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               talosClusterRef:
                 description: TalosClusterRef names the TalosCluster this addon belongs
                   to.

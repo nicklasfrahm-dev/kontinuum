@@ -137,6 +137,27 @@ echo "talos: bridged guest onto ${HOST_IP_CIDR} via gateway ${GATEWAY_IP}" >&2
 # compose stack already relies on. 127.0.0.11 still forwards on to the
 # host's own real upstream for internet names, so this doesn't cost the
 # guest anything the previous 1.1.1.1/8.8.8.8 setup had.
+#
+# DNS_FORWARD_DOMAIN/DNS_FORWARD_HOST optionally send one domain's queries
+# to a different server: compose.yaml points the zones' DNS domain at its
+# pdns service, so cert-manager's HTTP-01 self-check (and anything else in
+# the cluster) can resolve the records external-dns publishes there. Docker's
+# embedded DNS can't answer for that domain itself. dnsmasq only accepts an
+# IP here, so the host is resolved once at startup — recreating pdns alone
+# (new IP) needs this container restarted too.
+dnsmasq_servers=(--server=127.0.0.11)
+
+if [[ -n "${DNS_FORWARD_DOMAIN:-}" && -n "${DNS_FORWARD_HOST:-}" ]]; then
+	forward_ip="$(getent ahostsv4 "${DNS_FORWARD_HOST}" | awk 'NR == 1 { print $1 }')"
+	if [[ -z "${forward_ip}" ]]; then
+		echo "talos: failed to resolve DNS_FORWARD_HOST ${DNS_FORWARD_HOST}" >&2
+		exit 1
+	fi
+
+	dnsmasq_servers+=("--server=/${DNS_FORWARD_DOMAIN}/${forward_ip}")
+	echo "talos: forwarding ${DNS_FORWARD_DOMAIN} DNS queries to ${DNS_FORWARD_HOST} (${forward_ip})" >&2
+fi
+
 dnsmasq \
 	--no-daemon \
 	--bind-dynamic \
@@ -145,7 +166,7 @@ dnsmasq \
 	--dhcp-host="${GUEST_MAC},${HOST_IP}" \
 	--dhcp-option="option:router,${GATEWAY_IP}" \
 	--dhcp-option="option:dns-server,${BRIDGE_IDENTITY_IP}" \
-	--server=127.0.0.11 \
+	"${dnsmasq_servers[@]}" \
 	--no-resolv \
 	--no-hosts \
 	--log-dhcp &
