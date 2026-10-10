@@ -242,6 +242,12 @@ func mustParsePage(content ...string) *template.Template {
 		// page-loading spinner (see startPageLoading) — every page needs
 		// it, same reasoning as icon_check.html above.
 		"templates/components/icon_loader_circle.html",
+		// icon_menu.html, icon_x.html and modal_close_button.html are used
+		// by nav.html's own mobile nav drawer — every page needs them, same
+		// reasoning as icon_check.html above.
+		"templates/components/icon_menu.html",
+		"templates/components/icon_x.html",
+		"templates/components/modal_close_button.html",
 	}
 
 	files := make([]string, 0, len(shared)+len(content))
@@ -302,8 +308,6 @@ func buildPages() map[string]*template.Template {
 	return map[string]*template.Template{
 		pageRegistry: mustParsePage("templates/registry_content.html",
 			"templates/components/icon_trash.html", "templates/components/icon_globe.html",
-			"templates/components/icon_x.html",
-			"templates/components/modal_close_button.html",
 			"templates/components/zone_add_modal.html", "templates/components/zone_leave_modal.html"),
 		pageKontinuum: mustParsePage("templates/kontinuum_content.html",
 			"templates/components/icon_chevron_left.html", "templates/components/icon_eye.html",
@@ -313,7 +317,6 @@ func buildPages() map[string]*template.Template {
 			"templates/components/reveal_panel.html", "templates/components/reveal_panel_script.html"),
 		pageInstances: mustParsePage("templates/instances_content.html",
 			"templates/components/icon_server_plus.html",
-			"templates/components/icon_x.html", "templates/components/modal_close_button.html",
 			"templates/components/instance_add_modal.html", "templates/components/icon_trash.html"),
 		pageInstanceDetail: mustParsePage("templates/instance_detail_content.html",
 			"templates/components/icon_chevron_left.html", "templates/components/icon_info.html",
@@ -333,14 +336,12 @@ func buildPages() map[string]*template.Template {
 		pageIAMNamespace: mustParsePage("templates/iam_namespace_content.html",
 			"templates/components/icon_info.html", "templates/components/icon_shield_user.html",
 			"templates/components/icon_user_shield.html",
-			"templates/components/icon_x.html", "templates/components/modal_close_button.html",
 			"templates/components/icon_trash.html",
 			"templates/components/role_rows.html", "templates/components/iam_delete_modal.html",
 			"templates/components/role_add_modal.html", "templates/components/rolebinding_add_modal.html"),
 		pageIAMCluster: mustParsePage("templates/iam_cluster_content.html",
 			"templates/components/icon_info.html", "templates/components/icon_shield_user.html",
 			"templates/components/icon_user_shield.html",
-			"templates/components/icon_x.html", "templates/components/modal_close_button.html",
 			"templates/components/icon_trash.html",
 			"templates/components/role_rows.html", "templates/components/iam_delete_modal.html",
 			"templates/components/role_add_modal.html", "templates/components/rolebinding_add_modal.html"),

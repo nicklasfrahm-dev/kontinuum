@@ -1360,6 +1360,44 @@ func TestLayoutRendersPageLoadingIndicator(t *testing.T) {
 	assert.Contains(t, string(body), "htmx:historyCacheMiss")
 }
 
+// TestLayoutRendersMobileNavDrawer covers the mobile top bar: the full nav
+// doesn't fit across a phone's width, so it is a hamburger button opening a
+// native <dialog> drawer that renders the same nav-panel as the desktop
+// sidebar, rather than a row of icons.
+func TestLayoutRendersMobileNavDrawer(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/connect"))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	page := string(body)
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, page, `aria-label="Open menu"`)
+	assert.Contains(t, page, `<dialog id="nav-drawer"`)
+	assert.Contains(t, page, `id="tenant-switcher-mobile"`)
+	assert.Contains(t, page, `id="tenant-switcher-desktop"`)
+	assert.Equal(t, 2, strings.Count(page, `href="/app/connect"`),
+		"the drawer and the desktop sidebar each render the nav once; the mobile top bar no longer has its own icon row")
+}
+
 func TestHandleConnectHighlightsConnectNavItem(t *testing.T) {
 	t.Parallel()
 
