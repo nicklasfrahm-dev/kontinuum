@@ -65,7 +65,9 @@ Fans out a new zone's hub-side objects and, once its `TalosCluster` is bootstrap
    [cluster bootstrap flow chart](#cluster-bootstrap) for the full state
    machine. All three built-in addons (Cilium, the standard Gateway API
    CRDs, and cert-manager) are guaranteed present by the time
-   `TalosCluster.status.Ready` is true.
+   `TalosCluster.status.Ready` is true — and so is external-dns, seeded in
+   the same pass, whenever the hub has DNS configured (see
+   [DNS](#dns-auto-wiring-external-dns-from-a-flat-yaml-credential) below).
 3. **Downstream install** (`pkg/domain/zone`'s `Reconciler`) — once
    `ClusterReady`, builds a client against the zone's own cluster (from the
    kubeconfig `TalosCluster.status.secretRef` points at) and installs the
@@ -166,30 +168,38 @@ stage 3 above) — without them, nothing would ever make
 would just sit `Provisioning` forever. Until both are set, a Zone with
 `spec.domain` configured stays `Installed=False/WaitingForDNSConfiguration`.
 
-Once both are set, the `zone` controller wires up a working
-[external-dns](https://github.com/kubernetes-sigs/external-dns) install for
-you — no `Addon` of your own to write, for any provider whose credential is
-plain environment variables (Cloudflare is the only one kontinuum
-documents/tests today — see below for why the cloud providers aren't
-included yet). `_CREDENTIAL` isn't a single opaque string: it's a
-**flat YAML mapping**, each key/value pair becoming one key in a Secret
-named `<cluster>-external-dns-credentials` on the zone's own downstream
-cluster, and one environment variable in a seeded `Addon` named
-`<cluster>-external-dns` (owned by the zone's own `TalosCluster`, so it's
-garbage-collected with everything else on teardown) — `env[].name` is the
-key itself, `env[].valueFrom.secretKeyRef` points at that same Secret/key.
-kontinuum never interprets the keys or their values; whatever you name a
+Once both are set, every cluster gets a working
+[external-dns](https://github.com/kubernetes-sigs/external-dns) install,
+with no `Addon` of your own to write, for any provider whose credential is
+plain environment variables (kontinuum documents and tests Cloudflare and
+PowerDNS today — see below for why the cloud providers aren't included
+yet). The `taloscluster` controller seeds it alongside the built-in addons,
+so it installs in the same wave as Cilium and cert-manager, and the cluster
+isn't `Ready` until it's healthy.
+
+`_CREDENTIAL` isn't a single opaque string: it's a **flat YAML mapping**.
+Each key/value pair becomes one key in a Secret named
+`<cluster>-external-dns-credentials` next to the `TalosCluster` on the hub,
+and one environment variable in a seeded `Addon` named
+`<cluster>-external-dns` — `env[].name` is the key itself,
+`env[].valueFrom.secretKeyRef` points at that same Secret/key. The `Addon`
+lists the Secret under `spec.secrets`, so the `addon` controller copies it
+into the release's namespace on the zone's cluster right before installing
+the chart; the credential itself never appears in the `Addon`'s values.
+Both are owned by the `TalosCluster`, so they're garbage-collected with it.
+kontinuum never interprets the keys or their values: whatever you name a
 key becomes the literal environment variable name your chosen external-dns
 provider implementation reads, so the shape of `_CREDENTIAL` is dictated
 entirely by which provider you name in `_PROVIDER` — see
 [external-dns' own per-provider tutorials](https://github.com/kubernetes-sigs/external-dns/tree/master/docs/tutorials)
-for the authoritative list of what each one expects. Both the Secret and
-the Addon's own values are kept continuously in sync with `_PROVIDER`/
-`_CREDENTIAL` — unlike the built-in Cilium/cert-manager/gateway-api-crds
-addons (see `pkg/domain/addon.EnsureBuiltinSeeds`'s own doc), this Addon's
-own values are entirely kontinuum-generated, not something meant for you to
-hand-edit, so a credential rotation or a key added/removed always reaches
-the running `external-dns` pod on the next reconcile.
+for the authoritative list of what each one expects. Unlike the built-in
+addons (see `pkg/domain/addon.EnsureBuiltinSeeds`'s own doc), both the
+Secret and this `Addon` are kept continuously in sync with `_PROVIDER`/
+`_CREDENTIAL` — they're entirely kontinuum-generated, not something meant
+for you to hand-edit — so a credential rotation or a key added/removed
+reaches the running `external-dns` pod on the next reconcile. A credential
+that isn't flat YAML is reported on the `Zone` as
+`Installed=False/InstallFailed`, and no external-dns `Addon` is seeded.
 
 **Cloudflare** — one key, the token external-dns' own Cloudflare provider
 reads directly as an environment variable:
@@ -202,6 +212,25 @@ export KONTINUUM_SERVER_DNS_CREDENTIAL="CF_API_TOKEN: <your-scoped-api-token>"
 Use a scoped Cloudflare **API Token** (Zone:DNS:Edit on the relevant
 zone) — external-dns' Cloudflare provider only reads `CF_API_TOKEN`, not
 the legacy Email + Global API Key pair.
+
+**PowerDNS** — two keys. external-dns accepts every one of its flags as an
+`EXTERNAL_DNS_<FLAG>` environment variable, so these set its
+`--pdns-server`/`--pdns-api-key` flags. The URL must be reachable from the
+zone's own cluster:
+
+```sh
+export KONTINUUM_SERVER_DNS_PROVIDER=pdns
+export KONTINUUM_SERVER_DNS_CREDENTIAL="$(cat <<'EOF'
+EXTERNAL_DNS_PDNS_SERVER: http://pdns.example.com:8081
+EXTERNAL_DNS_PDNS_API_KEY: <your-pdns-api-key>
+EOF
+)"
+```
+
+The zone (`KONTINUUM_SERVER_DNS_DOMAIN`) must already exist on the PowerDNS
+server; external-dns only manages records inside it. The local development
+stack uses exactly this setup — see
+[Local setup](../local-setup.md#trying-the-full-zone-flow-locally).
 
 **AWS, Azure, and GCP aren't wired up yet.** Route53's own external-dns
 provider would fit this mechanism mechanically (a plain
@@ -216,22 +245,9 @@ The plan for all three is a signing-key endpoint on the hub that exchanges
 a short-lived token for each provider's own credentials, rather than
 storing a static one in `_CREDENTIAL` at all.
 
-Until that lands, `_PROVIDER`/`_CREDENTIAL` still unblock `installNetwork`
-for these three — DNS being "configured" only means the hub knows a
-provider is intended, not that kontinuum can wire it up itself — but the
-`external-dns` `Addon` itself is left to you: create one named
-`external-dns` (see `pkg/domain/addon/values/external-dns.yaml`, which
-gets you the `crd`-source scaffolding every provider needs in common for
-free) with `spec.values` supplying your own credentials (a mounted Secret
-via the chart's own `extraVolumes`/`extraVolumeMounts`, or plain env vars
-via `env`), following that provider's own
-[tutorial](https://github.com/kubernetes-sigs/external-dns/tree/master/docs/tutorials).
-Workload identity (Azure) / Workload Identity Federation (GCP) / IRSA (AWS)
-are each provider's own recommended credential-free alternative worth
-preferring over a static key or file if the downstream cluster runs on
-that same cloud.
-
-Either way, once the downstream `Gateway` has an address, the `zone`
+Once the downstream `Gateway` has an address (its nodes' own
+IPs, via Cilium's node IPAM — see
+[Cilium values](#cilium-values-follow-taloss-own-guide-not-just-the-charts-defaults)), the `zone`
 controller creates/updates a `DNSEndpoint` (the CRD external-dns' own `crd`
 source watches) requesting an A/AAAA/CNAME record — whichever matches the
 `Gateway`'s own address shape — for the zone's hostname. This part stays
@@ -306,6 +322,17 @@ values chosen ad hoc:
   unnecessary and another likely source of the same capability failure.
 - `ipam.mode` is set to `kubernetes`, so Cilium reads pod CIDRs from each
   Node's own spec instead of running its own allocator.
+- `defaultLBServiceIPAM` is set to `nodeipam`, so a `LoadBalancer` Service
+  gets its nodes' own IPs as its address. This isn't from Talos's guide:
+  it's what gives a zone's `Gateway` an address on bare metal, where there's
+  no cloud load balancer or IP pool. Without it, Cilium's node IPAM only
+  serves Services that opt in with `loadBalancerClass: io.cilium/node`, and
+  the Service Cilium creates for a `Gateway` doesn't. Node IPAM also skips
+  nodes labelled `node.kubernetes.io/exclude-from-external-load-balancers`,
+  which Talos adds to every control-plane node by default, so the
+  `taloscluster` controller removes that label from the machine config it
+  generates. Otherwise a cluster made only of control-plane nodes would have
+  no node left to take the address.
 
 #### Pod health is probed separately from the Helm apply
 

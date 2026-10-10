@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
 
 	acmev1 "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
 	certmanagerv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
@@ -61,7 +62,7 @@ const (
 func (r *Reconciler) installNetwork(
 	ctx context.Context, downstream client.Client, hostname string,
 ) (bool, error) {
-	err := ensureClusterIssuer(ctx, downstream, clusterIssuerName, r.HubConfig.ACME.Email, r.HubConfig.ACME.Server)
+	err := ensureClusterIssuer(ctx, downstream, clusterIssuerName, r.HubConfig.ACME)
 	if err != nil {
 		return false, err
 	}
@@ -89,14 +90,22 @@ func (r *Reconciler) installNetwork(
 // HTTP-01 challenges via the Gateway API solver, attached to gatewayName's
 // own HTTP listener (see ensureGateway) — cert-manager creates an ephemeral
 // HTTPRoute there for each challenge.
-func ensureClusterIssuer(ctx context.Context, downstream client.Client, name, email, server string) error {
+func ensureClusterIssuer(
+	ctx context.Context, downstream client.Client, name string, acme v1alpha2.KontinuumACMEConfigStatus,
+) error {
+	skipTLSVerify, err := strconv.ParseBool(acme.InsecureSkipVerify)
+	if err != nil {
+		return fmt.Errorf("failed to parse KONTINUUM_ACME_INSECURE_SKIP_VERIFY: %w", err)
+	}
+
 	issuer := &certmanagerv1.ClusterIssuer{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: certmanagerv1.IssuerSpec{
 			IssuerConfig: certmanagerv1.IssuerConfig{
 				ACME: &acmev1.ACMEIssuer{
-					Email:  email,
-					Server: server,
+					Email:         acme.Email,
+					Server:        acme.Server,
+					SkipTLSVerify: skipTLSVerify,
 					PrivateKey: cmmeta.SecretKeySelector{
 						LocalObjectReference: cmmeta.LocalObjectReference{Name: name + "-account-key"},
 					},
@@ -112,7 +121,7 @@ func ensureClusterIssuer(ctx context.Context, downstream client.Client, name, em
 		},
 	}
 
-	err := downstream.Create(ctx, issuer)
+	err = downstream.Create(ctx, issuer)
 	if apierrors.IsAlreadyExists(err) {
 		var existing certmanagerv1.ClusterIssuer
 
@@ -501,7 +510,7 @@ func deleteDNSEndpoint(ctx context.Context, downstream client.Client, namespace,
 // caller (reconcileInstall) persists it together with InstalledConditionType
 // in a single Status().Update, same as installWorkload/installNetwork's own
 // errors already share that call. Only ever reached once
-// finishInstallWithDomain's own findKontinuumDNSConfig check has already
+// finishInstallWithDomain's own DNS config check has already
 // confirmed a DNS provider and credential are configured — see that
 // function's own doc — so unlike before that gate existed, there's no
 // "credentials not configured" outcome to record here. Returns a non-nil

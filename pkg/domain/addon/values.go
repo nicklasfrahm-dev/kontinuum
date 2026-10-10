@@ -31,10 +31,9 @@ const (
 	certManagerAddonName    = "cert-manager"
 	gatewayAPICRDsAddonName = "gateway-api-crds"
 	// externalDNSAddonName has its own embedded defaults (see
-	// values/external-dns.yaml) but is deliberately not one of
-	// builtinAddonNames — see that function's own doc for why it isn't
-	// auto-seeded onto every joined zone the way cilium/cert-manager/
-	// gateway-api-crds are.
+	// values/external-dns.yaml) but isn't one of builtinAddonNames: it's
+	// only seeded when the hub has DNS configured, and its values are
+	// generated from that config — see EnsureExternalDNSSeed.
 	externalDNSAddonName = "external-dns"
 	defaultAddonPriority = int32(100)
 )
@@ -210,10 +209,8 @@ func builtinAddonNames() []string {
 // addonNamesWithDefaults lists every ReleaseName with an embedded
 // values/<name>.yaml to fall back on — builtinAddonNames' own three names
 // (auto-seeded, see EnsureBuiltinSeeds) plus externalDNSAddonName, which has
-// defaults of its own (see values/external-dns.yaml) but is opt-in: an
-// operator creates that Addon themselves, once DNS credentials are
-// configured, rather than kontinuum seeding it onto every zone regardless
-// (see externalDNSAddonName's own doc). resolveAddon and EffectivePriority
+// defaults of its own (see values/external-dns.yaml) but is only seeded when
+// the hub has DNS configured (see EnsureExternalDNSSeed). resolveAddon and EffectivePriority
 // both use this broader list — builtinAddonNames itself stays scoped to just
 // EnsureBuiltinSeeds' own auto-creation set.
 func addonNamesWithDefaults() []string {

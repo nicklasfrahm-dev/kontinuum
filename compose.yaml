@@ -54,6 +54,25 @@ services:
       # terminates TLS with a certificate the zone's own root CA set
       # already trusts.
       KONTINUUM_SERVER_GRPC_INSECURE_TLS_SKIP_VERIFY: "true"
+      # Zones are published under this domain, hosted by the pdns service
+      # below. Overridable from .env, but pdns creates whatever zone this
+      # resolves to, so the two always agree.
+      KONTINUUM_SERVER_DNS_DOMAIN: ${KONTINUUM_SERVER_DNS_DOMAIN:-kontinuum.test}
+      # Each zone's external-dns publishes its records to pdns. The
+      # credential is flat YAML whose keys become external-dns env vars (see
+      # docs/workflows/zone-add.md); external-dns reads every flag from an
+      # EXTERNAL_DNS_<FLAG> env var, so these set --pdns-server/--pdns-api-key.
+      KONTINUUM_SERVER_DNS_PROVIDER: pdns
+      KONTINUUM_SERVER_DNS_CREDENTIAL: |
+        EXTERNAL_DNS_PDNS_SERVER: http://pdns:8081
+        EXTERNAL_DNS_PDNS_API_KEY: kontinuum
+      # Each zone's cert-manager requests its certificate from pebble below
+      # instead of Let's Encrypt, which could never validate a zone on this
+      # private network. Pebble's API certificate comes from its own test CA,
+      # which cert-manager doesn't trust — hence skipping verification. Real
+      # deployments never set this.
+      KONTINUUM_ACME_SERVER: https://pebble:14000/dir
+      KONTINUUM_ACME_INSECURE_SKIP_VERIFY: "true"
       GOTOOLCHAIN: auto
     depends_on:
       postgres:
@@ -78,8 +97,61 @@ services:
       context: hack/talos-qemu
       dockerfile: Containerfile
     privileged: true
+    # Lets the cluster resolve the zone hostnames external-dns publishes to
+    # pdns — cert-manager's HTTP-01 self-check needs that before it asks
+    # pebble to issue (see hack/talos-qemu/entrypoint.sh).
+    environment:
+      DNS_FORWARD_DOMAIN: ${KONTINUUM_SERVER_DNS_DOMAIN:-kontinuum.test}
+      DNS_FORWARD_HOST: pdns
     volumes:
       - talos_disk:/data
+    depends_on:
+      - pdns
+
+  # Authoritative DNS for the zones' domain, with the HTTP API each zone's
+  # external-dns writes records through. Records aren't persisted: the
+  # zones' DNSEndpoints are the source of truth, and external-dns republishes
+  # them within a minute of pdns restarting. The zone's SOA sets a 30s
+  # negative-caching TTL instead of PowerDNS's default 3600s: a zone's
+  # hostname is looked up (by cert-manager's HTTP-01 self-check) before
+  # external-dns has published it, and resolvers would otherwise keep that
+  # "doesn't exist" answer for an hour. Query it from the host with
+  # `dig @127.0.0.1 -p 1053 <zone>.<region>.kontinuum.test`.
+  pdns:
+    profiles: ["dev"]
+    image: powerdns/pdns-auth-51:5.1.4
+    environment:
+      PDNS_AUTH_API_KEY: kontinuum
+      DNS_DOMAIN: ${KONTINUUM_SERVER_DNS_DOMAIN:-kontinuum.test}
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        echo "default-soa-content=ns1.@ hostmaster.@ 0 10800 3600 604800 30"
+        > /etc/powerdns/pdns.d/zz-soa.conf
+        && { pdnsutil zone list "$$DNS_DOMAIN" >/dev/null 2>&1
+        || pdnsutil zone create "$$DNS_DOMAIN" "ns1.$$DNS_DOMAIN"; }
+        && exec /usr/bin/tini -- /usr/local/sbin/pdns_server-startup
+    ports:
+      - "1053:53/udp"
+      - "1053:53/tcp"
+
+  # Pebble, Let's Encrypt's ACME test server, issuing each zone's
+  # certificate. PEBBLE_VA_ALWAYS_VALID skips challenge validation (so it
+  # never has to reach into the zone's network); the other two turn off
+  # Pebble's deliberate nonce rejection and random delays, which only add
+  # noise here. Pebble generates a new root CA on every start, so browsers
+  # won't trust a zone's certificate unless you import the current one:
+  # `curl -k https://localhost:15000/roots/0`.
+  pebble:
+    profiles: ["dev"]
+    image: ghcr.io/letsencrypt/pebble:2.10.1
+    environment:
+      PEBBLE_VA_ALWAYS_VALID: "1"
+      PEBBLE_VA_NOSLEEP: "1"
+      PEBBLE_WFE_NONCEREJECT: "0"
+    ports:
+      - "15000:15000"
 
   # Self-signed TLS termination in front of kontinuum-dev. kubectl (via
   # client-go) refuses to send the bearer token that the oidc-login exec

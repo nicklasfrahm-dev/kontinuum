@@ -402,6 +402,85 @@ func TestReconcileTreatsAlreadyExistsAsBootstrapped(t *testing.T) {
 	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, taloscluster.BootstrappedConditionType))
 }
 
+// cloudflareDNSConfig is a hub DNS config for Cloudflare with flatYAML as
+// its credential.
+func cloudflareDNSConfig(flatYAML string) v1alpha2.KontinuumDNSConfigStatus {
+	dns := v1alpha2.KontinuumDNSConfigStatus{Provider: "cloudflare"}
+	dns.Credential = flatYAML
+
+	return dns
+}
+
+// reconcileOnceWithDNS runs a single Reconcile for a fresh cluster with the
+// hub's DNS config set to dns, returning the fake client to inspect.
+func reconcileOnceWithDNS(t *testing.T, dns v1alpha2.KontinuumDNSConfigStatus) client.Client {
+	t.Helper()
+
+	cluster := testCluster()
+	cpInstance := claimedDiscoveredInstance("cp-node-1", "cp-pool", controlPlaneInstanceAddress)
+	fakeClient := newFakeClient(t, cluster, cpInstance)
+
+	reconciler := newReconciler(fakeClient, &fakeBootstrapper{kubeconfig: []byte("fake-kubeconfig")})
+	reconciler.DNS = dns
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: testClusterName},
+	})
+	require.NoError(t, err)
+
+	return fakeClient
+}
+
+// TestReconcileSeedsExternalDNSWithBuiltinAddons covers external-dns being
+// seeded in the same pass as the built-in addons when the hub has DNS
+// configured, so it installs in the same wave instead of after the cluster
+// is already Ready.
+func TestReconcileSeedsExternalDNSWithBuiltinAddons(t *testing.T) {
+	t.Parallel()
+
+	fakeClient := reconcileOnceWithDNS(t, cloudflareDNSConfig("CF_API_TOKEN: example-token\n"))
+
+	require.NoError(t, fakeClient.Get(context.Background(),
+		types.NamespacedName{Name: ciliumAddonResourceName}, &v1alpha2.Addon{}))
+
+	var externalDNS v1alpha2.Addon
+
+	require.NoError(t, fakeClient.Get(context.Background(),
+		types.NamespacedName{Name: testClusterName + "-external-dns"}, &externalDNS))
+	assert.Equal(t, "external-dns", externalDNS.Spec.ReleaseName)
+	assert.Equal(t, []v1alpha2.AddonSecretReference{{Name: testClusterName + "-external-dns-credentials"}},
+		externalDNS.Spec.Secrets)
+}
+
+// TestReconcileSkipsExternalDNSWithoutDNSConfig covers a hub with no DNS
+// provider/credential: there's nothing for external-dns to talk to, so it
+// isn't seeded at all.
+func TestReconcileSkipsExternalDNSWithoutDNSConfig(t *testing.T) {
+	t.Parallel()
+
+	fakeClient := reconcileOnceWithDNS(t, v1alpha2.KontinuumDNSConfigStatus{})
+
+	err := fakeClient.Get(context.Background(),
+		types.NamespacedName{Name: testClusterName + "-external-dns"}, &v1alpha2.Addon{})
+	assert.True(t, apierrors.IsNotFound(err), "external-dns must not be seeded without dns config")
+}
+
+// TestReconcileSkipsExternalDNSOnInvalidCredential covers a credential that
+// isn't flat YAML: seeding is skipped, but the cluster's own reconcile (and
+// its built-in addons) carry on — the Zone reports the bad credential.
+func TestReconcileSkipsExternalDNSOnInvalidCredential(t *testing.T) {
+	t.Parallel()
+
+	fakeClient := reconcileOnceWithDNS(t, cloudflareDNSConfig("CF_API_TOKEN:\n  nested: not-a-string\n"))
+
+	require.NoError(t, fakeClient.Get(context.Background(),
+		types.NamespacedName{Name: ciliumAddonResourceName}, &v1alpha2.Addon{}))
+
+	err := fakeClient.Get(context.Background(),
+		types.NamespacedName{Name: testClusterName + "-external-dns"}, &v1alpha2.Addon{})
+	assert.True(t, apierrors.IsNotFound(err), "external-dns must not be seeded from an invalid credential")
+}
+
 // TestReconcileSeedsBuiltinAddonsOnlyWhenMissing covers
 // addon.EnsureBuiltinSeeds' own create-only contract: on the first
 // reconcile, with no Addons at all yet, both cilium's and cert-manager's
@@ -876,6 +955,9 @@ func TestReconcileGeneratesInstallableConfigs(t *testing.T) {
 		require.NotNil(t, install, "applied config %d", index)
 		assert.Empty(t, install.InstallDisk, "applied config %d", index)
 		assert.NotNil(t, install.InstallDiskSelector, "applied config %d", index)
+		assert.NotContains(t, provider.RawV1Alpha1().MachineConfig.MachineNodeLabels,
+			"node.kubernetes.io/exclude-from-external-load-balancers",
+			"applied config %d: control planes must stay eligible for Cilium node IPAM", index)
 	}
 }
 

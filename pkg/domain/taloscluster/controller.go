@@ -12,6 +12,7 @@ package taloscluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -133,6 +134,11 @@ type Config struct {
 	// zonelease.Identity's own doc. Reconcile refuses to mutate a
 	// TalosCluster it doesn't hold its own zone lease for.
 	ZoneLease zonelease.Identity
+	// DNS is the hub's KONTINUUM_SERVER_DNS_* config. When both Provider
+	// and Credential are set, every cluster gets an external-dns Addon
+	// seeded alongside its built-in addons — see
+	// addon.EnsureExternalDNSSeed.
+	DNS v1alpha2.KontinuumDNSConfigStatus
 }
 
 // Controller wires the TalosCluster bootstrap reconciler onto a
@@ -182,6 +188,7 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		RetryInterval:       c.Config.RetryInterval,
 		HealthCheckInterval: c.Config.HealthCheckInterval,
 		TeardownTimeout:     c.Config.TeardownTimeout,
+		DNS:                 c.Config.DNS,
 		Locker: zonelease.NewLocker(
 			mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
 		Logger: c.Config.Logger,
@@ -207,6 +214,7 @@ type Reconciler struct {
 	RetryInterval       time.Duration
 	HealthCheckInterval time.Duration
 	TeardownTimeout     time.Duration
+	DNS                 v1alpha2.KontinuumDNSConfigStatus
 	// Locker gates every write below against zonelease — see
 	// Config.ZoneLease's own doc.
 	Locker *zonelease.Locker
@@ -624,6 +632,11 @@ func (r *Reconciler) reconcileAddons(ctx context.Context, cluster *v1alpha2.Talo
 		return ctrl.Result{}, fmt.Errorf("failed to seed built-in addons for %q: %w", cluster.Name, err)
 	}
 
+	err = r.seedExternalDNS(ctx, cluster)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	addons, err := addon.ListForCluster(ctx, r.Client, cluster.Namespace, cluster.Name)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to list addons for %q: %w", cluster.Name, err)
@@ -960,4 +973,28 @@ func (r *Reconciler) persistStatus(
 	}
 
 	return ctrl.Result{RequeueAfter: r.RetryInterval}, nil
+}
+
+// seedExternalDNS seeds cluster's external-dns Addon when the hub has a DNS
+// provider and credential configured. An unparseable credential is only
+// logged, not returned: blocking the whole cluster's bootstrap on it would be
+// out of proportion, and the zone controller already reports it on the
+// Zone's Installed condition.
+func (r *Reconciler) seedExternalDNS(ctx context.Context, cluster *v1alpha2.TalosCluster) error {
+	if r.DNS.Provider == "" || r.DNS.Credential == "" {
+		return nil
+	}
+
+	err := addon.EnsureExternalDNSSeed(ctx, r.Client, cluster, r.DNS.Provider, r.DNS.Credential)
+	if errors.Is(err, addon.ErrInvalidDNSCredential) {
+		r.Logger.Warn("Skipping external-dns addon: invalid dns credential", "cluster", cluster.Name, "error", err)
+
+		return nil
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to seed external-dns addon for %q: %w", cluster.Name, err)
+	}
+
+	return nil
 }

@@ -22,6 +22,7 @@ import (
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/addon"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/taloscluster"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/zonelease"
 )
@@ -581,7 +582,7 @@ func (r *Reconciler) reconcileInstall(
 		return r.finishInstallWithoutDomain(ctx, zoneObj)
 	}
 
-	return r.finishInstallWithDomain(ctx, downstream, zoneObj, cluster, hostname)
+	return r.finishInstallWithDomain(ctx, downstream, zoneObj, hostname)
 }
 
 // finishInstallWithDomain installs the network layer (ClusterIssuer,
@@ -590,30 +591,26 @@ func (r *Reconciler) reconcileInstall(
 // Installed True and proceeds to reconcileRegistryJoin — split out of
 // reconcileInstall purely to keep its own cyclomatic complexity down.
 //
-// installNetwork is deliberately never attempted before findKontinuumDNSConfig
-// confirms the hub has both a DNS provider and credential configured:
-// hostname's own ACME HTTP-01 challenge can only ever succeed once hostname
-// actually resolves to the downstream Gateway's own address, and nothing
-// makes that happen without a DNS provider to eventually reconcile the
-// DNSEndpoint reconcileDNS creates (see that function's own doc) — a
-// Certificate created before then would just sit Provisioning forever, with
-// no actionable next step for an operator staring at it. See
-// reconcileExternalDNSAddon's own doc for the one provider (cloudflare)
-// this package can wire up automatically; any other provider still needs
-// its own external-dns Addon, same as before this gate existed — this only
-// changes when installNetwork itself runs, not who's responsible for DNS.
+// installNetwork is deliberately never attempted before the hub has both a
+// DNS provider and credential configured: hostname's ACME HTTP-01 challenge
+// can only succeed once hostname resolves to the downstream Gateway, and
+// nothing makes that happen without external-dns publishing the
+// DNSEndpoint reconcileDNS creates — a Certificate created before then
+// would sit Provisioning forever. The external-dns Addon itself is seeded
+// by the taloscluster controller alongside the built-in addons (see
+// addon.EnsureExternalDNSSeed), from the same hub config read here; this
+// only re-validates the credential so a malformed one shows up on the Zone.
 func (r *Reconciler) finishInstallWithDomain(
-	ctx context.Context, downstream client.Client, zoneObj *v1alpha2.Zone, cluster *v1alpha2.TalosCluster,
-	hostname string,
+	ctx context.Context, downstream client.Client, zoneObj *v1alpha2.Zone, hostname string,
 ) (ctrl.Result, error) {
-	provider, credential, err := findKontinuumDNSConfig(ctx, r.Client)
-	if err != nil {
+	dns := r.HubConfig.Server.DNS
+	if dns.Provider == "" || dns.Credential == "" {
 		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonWaitingForDNSConfiguration,
 			"waiting for a dns provider and credential to be configured on the hub before exposing "+hostname+
 				"; see docs/workflows/zone-add.md", false)
 	}
 
-	err = r.reconcileExternalDNSAddon(ctx, cluster, downstream, provider, credential)
+	_, err := addon.ParseDNSCredentialKeys(dns.Credential)
 	if err != nil {
 		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonInstallFailed, err.Error(), false)
 	}

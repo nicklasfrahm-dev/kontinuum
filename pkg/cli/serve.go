@@ -437,7 +437,7 @@ func buildServer(
 		libkapi.WithSystemNamespace(v1alpha2.KontinuumSystemNamespace),
 		libkapi.WithPostStartHook(ensureCRD),
 	}, authOpts, registryOpts, instanceOptions(logger, zoneLease), instancePoolOptions(logger, zoneLease),
-		talosClusterOptions(logger, zoneLease), addonOptions(logger, zoneLease), zoneOptions(cfg, logger, zoneLease),
+		talosClusterOptions(cfg, logger, zoneLease), addonOptions(logger, zoneLease), zoneOptions(cfg, logger, zoneLease),
 		adminRBACOptions(cfg, logger, zoneLease))
 
 	// Storage is resolved against a background context so the backend
@@ -639,7 +639,6 @@ func registryOptions(
 		Logger:        registryLogger,
 		Version:       version,
 		Storage:       cfg.Server.Storage,
-		DNSCredential: cfg.Server.DNS.Credential,
 		DisplayConfig: displayConfig(cfg),
 		ZoneLease:     zoneLease,
 	})
@@ -698,10 +697,11 @@ func instancePoolOptions(logger *slog.Logger, zoneLease zonelease.Identity) []li
 // top-level *Options function. No WithPostStartHook is needed —
 // talosclusters.kontinuum.sh's and instances.kontinuum.sh's CRDs are
 // already ensured by instanceOptions' own ensureCRDs call.
-func talosClusterOptions(logger *slog.Logger, zoneLease zonelease.Identity) []libkapi.Option {
+func talosClusterOptions(cfg *config.Config, logger *slog.Logger, zoneLease zonelease.Identity) []libkapi.Option {
 	controller := taloscluster.NewController(taloscluster.Config{
 		Logger:    logger.With("component", "taloscluster"),
 		ZoneLease: zoneLease,
+		DNS:       cfg.Server.DNS,
 	})
 	instanceResetController := taloscluster.NewInstanceResetController(
 		taloscluster.InstanceResetConfig{Logger: logger.With("component", "taloscluster-instance-reset")})

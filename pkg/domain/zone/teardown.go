@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -13,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/addon"
 )
 
 // reconcileTeardown runs a Zone's deletion sequence — see issue #49's own
@@ -147,9 +149,9 @@ func (r *Reconciler) teardownDownstream(
 }
 
 // uninstallNetwork deletes the DNSEndpoint (if reconcileDNS ever created
-// one), the external-dns credential Secret (if reconcileExternalDNSAddon
-// ever created one — see deleteExternalDNSCredentialSecret's own doc for
-// why this is unconditional), ClusterIssuer, Gateway, Certificate, and
+// one), the external-dns credential Secret (if the addon controller ever
+// copied one — see deleteExternalDNSCredentialSecret's own doc for why this
+// is unconditional), ClusterIssuer, Gateway, Certificate, and
 // HTTPRoute installNetwork/reconcileDNS install — see teardownDownstream's
 // own doc for ordering.
 func uninstallNetwork(ctx context.Context, downstream client.Client, clusterName string) error {
@@ -274,4 +276,26 @@ func (r *Reconciler) removeFinalizer(ctx context.Context, zoneObj *v1alpha2.Zone
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// deleteExternalDNSCredentialSecret deletes the external-dns credential
+// Secret the addon controller copies onto the downstream cluster (see
+// addon.EnsureExternalDNSSeed), tolerating NotFound. Called unconditionally
+// during teardown, not just when DNS was ever configured: it's idempotent,
+// and a credential shouldn't outlive the zone on a cluster that might not
+// get reset.
+func deleteExternalDNSCredentialSecret(
+	ctx context.Context, downstream client.Client, namespace, clusterName string,
+) error {
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name:      addon.ExternalDNSCredentialSecretName(clusterName),
+		Namespace: namespace,
+	}}
+
+	err := client.IgnoreNotFound(downstream.Delete(ctx, secret))
+	if err != nil {
+		return fmt.Errorf("failed to delete %q secret: %w", secret.Name, err)
+	}
+
+	return nil
 }
