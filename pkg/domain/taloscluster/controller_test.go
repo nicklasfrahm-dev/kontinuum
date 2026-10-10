@@ -70,6 +70,144 @@ type fakeBootstrapper struct {
 	// TestReconcileTeardownRetriesFailedMemberWhileReleasingOthers, which
 	// needs one member's reset to fail without blocking the rest.
 	resetErrForNode string
+	// upgradeCalls records every node UpgradeTalos was asked to upgrade,
+	// paired with upgradeImages' own installer image reference for that
+	// same call — see upgrade_test.go, which asserts on both the roll
+	// order and the exact image each member was sent to.
+	upgradeCalls  []string
+	upgradeImages []string
+	upgradeErr    error
+	// componentImages is the image each member reports for each
+	// Kubernetes component, keyed by componentKey. A member with no entry
+	// for a component reports the default image for whatever version its
+	// kubelet reports, so a fixture only has to name the ones it wants to
+	// differ. PatchKubernetesComponent writes into this map, so a later
+	// pass sees what an earlier one patched — which is what makes the
+	// multi-pass rollout tests possible.
+	componentImages   map[string]string
+	componentImageErr error
+	// componentPatches records every PatchKubernetesComponent in order as
+	// "<node>/<component>=<image>" — the roll order itself, which is what
+	// upgrade_test.go asserts on.
+	componentPatches  []string
+	componentPatchErr error
+	// pendingRollout names the componentKeys that report *not* rolled out,
+	// letting a test park the plan on one component and prove nothing else
+	// moves while it is parked.
+	pendingRollout map[string]bool
+	rolledOutErr   error
+	// kubeletVersionCalls records every node KubeletVersion was asked
+	// about; kubeletVersion is what every one of them reports back, unless
+	// kubeletVersionForNode names an override for that specific node — see
+	// versionForNode, which lets a test model a half-rolled cluster.
+	kubeletVersionCalls   []string
+	kubeletVersion        string
+	kubeletVersionForNode map[string]string
+	kubeletVersionErr     error
+	// versionForNode overrides the shared version field for the named
+	// nodes only, the same way kubeletVersionForNode does for kubelets.
+	versionForNode map[string]string
+	// versionErrForNode fails the Version RPC for the named nodes only —
+	// how a test models one member being unreachable (rebooting into an
+	// upgrade, say) while the rest of the cluster answers normally.
+	versionErrForNode map[string]error
+}
+
+// versionForNode returns the version node should report, preferring an
+// explicit per-node override over the shared fallback — see
+// fakeBootstrapper.versionForNode's own doc.
+func versionForNode(overrides map[string]string, node, fallback string) string {
+	if override, ok := overrides[node]; ok {
+		return override
+	}
+
+	return fallback
+}
+
+func (f *fakeBootstrapper) UpgradeTalos(
+	_ context.Context, _, node string, _ *clientconfig.Config, image string,
+) error {
+	f.upgradeCalls = append(f.upgradeCalls, node)
+	f.upgradeImages = append(f.upgradeImages, image)
+
+	return f.upgradeErr
+}
+
+func (f *fakeBootstrapper) KubernetesComponentImage(
+	_ context.Context, _, node string, _ *clientconfig.Config, component string,
+) (string, error) {
+	if f.componentImageErr != nil {
+		return "", f.componentImageErr
+	}
+
+	if image, ok := f.componentImages[componentKey(node, component)]; ok {
+		return image, nil
+	}
+
+	return defaultComponentImage(component, versionForNode(f.kubeletVersionForNode, node, f.kubeletVersion)), nil
+}
+
+func (f *fakeBootstrapper) PatchKubernetesComponent(
+	_ context.Context, _, node string, _ *clientconfig.Config, component, image string,
+) error {
+	if f.componentPatchErr != nil {
+		return f.componentPatchErr
+	}
+
+	f.componentPatches = append(f.componentPatches, componentKey(node, component)+"="+image)
+
+	if f.componentImages == nil {
+		f.componentImages = map[string]string{}
+	}
+
+	f.componentImages[componentKey(node, component)] = image
+
+	return nil
+}
+
+func (f *fakeBootstrapper) KubernetesComponentRolledOut(
+	_ context.Context, _, node string, _ *clientconfig.Config, component, _ string,
+) (bool, error) {
+	if f.rolledOutErr != nil {
+		return false, f.rolledOutErr
+	}
+
+	return !f.pendingRollout[componentKey(node, component)], nil
+}
+
+// componentKey identifies one component on one member, the key
+// fakeBootstrapper's own component maps and patch log are built from.
+func componentKey(node, component string) string {
+	return node + "/" + component
+}
+
+// defaultComponentImage is the image a member reports for component when a
+// fixture has not said otherwise: the real repository Talos pins, at the
+// version that member's kubelet reports. Spelled out here rather than
+// taken from the package under test so the tests assert the actual
+// repositories rather than agreeing with whatever the code says.
+func defaultComponentImage(component, version string) string {
+	repositories := map[string]string{
+		"kube-apiserver":          "registry.k8s.io/kube-apiserver",
+		"kube-controller-manager": "registry.k8s.io/kube-controller-manager",
+		"kube-scheduler":          "registry.k8s.io/kube-scheduler",
+		"kube-proxy":              "registry.k8s.io/kube-proxy",
+		"kubelet":                 "ghcr.io/siderolabs/kubelet",
+	}
+
+	return repositories[component] + ":" + version
+}
+
+func (f *fakeBootstrapper) KubeletVersion(
+	_ context.Context, _, node string, _ *clientconfig.Config,
+) (string, error) {
+	f.kubeletVersionCalls = append(f.kubeletVersionCalls, node)
+
+	if f.kubeletVersionErr != nil {
+		return "", f.kubeletVersionErr
+	}
+
+	return versionForNode(f.kubeletVersionForNode, node, f.kubeletVersion), nil
 }
 
 func (f *fakeBootstrapper) ApplyConfiguration(_ context.Context, addr string, data []byte) error {
@@ -106,7 +244,11 @@ func (f *fakeBootstrapper) Version(_ context.Context, _, node string, _ *clientc
 		return "", "", f.versionErr
 	}
 
-	return f.version, f.arch, nil
+	if err, ok := f.versionErrForNode[node]; ok {
+		return "", "", err
+	}
+
+	return versionForNode(f.versionForNode, node, f.version), f.arch, nil
 }
 
 func (f *fakeBootstrapper) CPUTopology(

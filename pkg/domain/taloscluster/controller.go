@@ -218,7 +218,13 @@ type Reconciler struct {
 // recheckControlPlaneHealth rather than returning a bare ctrl.Result{} —
 // see that method's own doc for why a one-shot health check would
 // otherwise leave every control-plane member's MemberReadyConditionType
-// stale forever.
+// stale forever — and then, only if that recheck actually passed, to
+// reconcileUpgrades. That ordering is deliberate and is the whole reason
+// version upgrades live here rather than anywhere earlier: a cluster still
+// bootstrapping, or one that just failed its health check (including
+// because a node this very reconciler rebooted mid-upgrade hasn't come
+// back yet), must never have another node taken down under it. See
+// reconcileUpgrades' own doc.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	cluster, found, err := r.fetchCluster(ctx, req.NamespacedName)
 	if !found {
@@ -259,7 +265,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return r.reconcileAddons(ctx, &cluster)
 	}
 
-	return r.recheckControlPlaneHealth(ctx, &cluster, bundle)
+	return r.reconcileSteadyState(ctx, &cluster, bundle)
+}
+
+// reconcileSteadyState is Reconcile's tail for an already-converged
+// cluster: re-probe control-plane health (see recheckControlPlaneHealth),
+// and only if that recheck actually passed, converge the cluster's pinned
+// Talos/Kubernetes versions (see reconcileUpgrades). Split out of Reconcile
+// itself purely to keep its own cyclomatic complexity down; the ordering
+// here is the interesting part, and Reconcile's own doc explains it.
+func (r *Reconciler) reconcileSteadyState(
+	ctx context.Context, cluster *v1alpha2.TalosCluster, bundle *talossecrets.Bundle,
+) (ctrl.Result, error) {
+	result, healthy, err := r.recheckControlPlaneHealth(ctx, cluster, bundle)
+	if err != nil || !healthy {
+		return result, err
+	}
+
+	return r.reconcileUpgrades(ctx, cluster, bundle, result)
 }
 
 // fetchCluster fetches the TalosCluster named by key, folding NotFound and
@@ -508,23 +531,28 @@ func (r *Reconciler) bootstrapAndCheckHealth(
 // cluster-wide health concept of their own to recheck, only reachability,
 // so there's no reason for that to run on a different schedule than the
 // control plane's own steady-state recheck.
+//
+// The bool reports whether the health check actually passed — Reconcile
+// gates reconcileUpgrades on it, and a cluster with no resolvable
+// control-plane members counts as not-healthy for that purpose too: there
+// was nothing to check, which is not the same as a pass.
 func (r *Reconciler) recheckControlPlaneHealth(
 	ctx context.Context, cluster *v1alpha2.TalosCluster, bundle *talossecrets.Bundle,
-) (ctrl.Result, error) {
+) (ctrl.Result, bool, error) {
 	members, err := resolveMembers(ctx, r.Client, cluster.Namespace, cluster.Spec.ControlPlane.PoolRef)
 	if err != nil {
-		return ctrl.Result{}, err
+		return ctrl.Result{}, false, err
 	}
 
 	if len(members) == 0 {
-		return ctrl.Result{RequeueAfter: r.HealthCheckInterval}, nil
+		return ctrl.Result{RequeueAfter: r.HealthCheckInterval}, false, nil
 	}
 
 	controlPlaneAddr := dialAddress(members[0])
 
 	_, talosCfg, err := generateConfigs(bundle, cluster, controlPlaneAddr)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to generate control plane config for %q: %w", cluster.Name, err)
+		return ctrl.Result{}, false, fmt.Errorf("failed to generate control plane config for %q: %w", cluster.Name, err)
 	}
 
 	controlPlaneNodes := make([]string, 0, len(members))
@@ -564,10 +592,10 @@ func (r *Reconciler) recheckControlPlaneHealth(
 		// plane is an expected, handled outcome — already logged and
 		// reflected in MemberReadyConditionType above — not a
 		// Reconcile-machinery failure worth returning as an error.
-		return ctrl.Result{RequeueAfter: r.RetryInterval}, nil //nolint:nilerr
+		return ctrl.Result{RequeueAfter: r.RetryInterval}, false, nil //nolint:nilerr
 	}
 
-	return ctrl.Result{RequeueAfter: r.HealthCheckInterval}, nil
+	return ctrl.Result{RequeueAfter: r.HealthCheckInterval}, true, nil
 }
 
 // recheckWorkerLiveness dials every worker pool's claimed, Discovered
