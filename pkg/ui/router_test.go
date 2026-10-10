@@ -1351,7 +1351,9 @@ func TestLayoutRendersPageLoadingIndicator(t *testing.T) {
 	require.NoError(t, resp.Body.Close())
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Contains(t, string(body), `id="page-progress" hx-preserve="true"`)
+	assert.Contains(t, string(body), `id="page-progress-track" hx-preserve="true"`)
+	assert.Contains(t, string(body), "top-14 left-0 right-0 lg:top-0 lg:left-64",
+		"the progress bar must span only the content area, never the nav")
 	assert.Contains(t, string(body), `id="page-loading-spinner"`)
 	assert.Contains(t, string(body), "group-aria-busy:opacity-100")
 	assert.Contains(t, string(body), "htmx:beforeRequest")

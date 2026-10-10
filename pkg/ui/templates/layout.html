@@ -260,9 +260,10 @@
         // trip a clicked link otherwise looks like it did nothing until
         // the whole response arrives. While a boosted GET (a link click,
         // or a history restore that missed htmx's cache) is in flight,
-        // #page-progress (hx-preserve'd, so it survives the body swap and
-        // can animate to completion) creeps toward the right edge and
-        // <main> is marked aria-busy, which dims the current content and
+        // #page-progress (its track is hx-preserve'd, so it survives the
+        // body swap and can animate to completion) creeps toward the
+        // content area's right edge and <main> is marked aria-busy, which
+        // dims the current content and
         // shows #page-loading-spinner via Tailwind's group-aria-busy
         // variant. Both only appear after pageLoadingDelay, so a fast
         // navigation never flashes them. Boosted form submits are left
@@ -334,9 +335,16 @@
         }
     </script>
 
-    <div id="page-progress" hx-preserve="true" role="presentation"
-         class="fixed top-0 left-0 z-[60] h-0.5 bg-accent shadow-[0_0_8px_#E0924F] pointer-events-none"
-         style="width: 0%; opacity: 0;"></div>
+    <!-- Spans only the content area, never the nav: below the mobile top
+         bar, right of the desktop sidebar (the same offsets <main> uses
+         below), so #page-progress's percentage width is relative to the
+         content, not the viewport. overflow-hidden keeps the bar's glow
+         from bleeding onto the nav. -->
+    <div id="page-progress-track" hx-preserve="true" role="presentation"
+         class="fixed top-14 left-0 right-0 lg:top-0 lg:left-64 z-[60] h-3 overflow-hidden pointer-events-none">
+        <div id="page-progress" class="h-0.5 bg-accent shadow-[0_0_8px_#E0924F]"
+             style="width: 0%; opacity: 0;"></div>
+    </div>
 
     {{template "nav" .}}
 
