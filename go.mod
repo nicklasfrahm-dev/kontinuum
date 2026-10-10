@@ -19,25 +19,25 @@ replace k8s.io/cri-client => k8s.io/cri-client v0.32.6
 require (
 	github.com/cert-manager/cert-manager v1.18.2
 	github.com/charmbracelet/huh v1.0.0
-	github.com/coreos/go-oidc/v3 v3.20.0
+	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/cosi-project/runtime v1.16.2
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/cel-go v0.27.0
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
-	github.com/kommodity-io/kommodity v0.166.0
+	github.com/kommodity-io/kommodity v0.170.0
 	github.com/lmittmann/tint v1.2.0
-	github.com/moby/moby/api v1.55.0
+	github.com/moby/moby/api v1.56.0
 	github.com/siderolabs/kms-client v0.2.0
 	github.com/siderolabs/talos/pkg/machinery v1.13.8
 	github.com/spf13/cobra v1.10.2
-	github.com/stretchr/testify v1.12.0
+	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.43.0
 	go.etcd.io/etcd/api/v3 v3.6.8
-	golang.org/x/mod v0.40.0
-	golang.org/x/oauth2 v0.36.0
-	google.golang.org/grpc v1.83.0
+	golang.org/x/mod v0.41.0
+	golang.org/x/oauth2 v0.37.0
+	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
 	helm.sh/helm/v3 v3.17.3
 	k8s.io/api v0.32.7
@@ -445,7 +445,7 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.28.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
-	go.yaml.in/yaml/v3 v3.0.4 // indirect
+	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.4 // indirect
 	golang.org/x/crypto v0.55.0 // indirect
 	golang.org/x/exp v0.0.0-20251219203646-944ab1f22d93 // indirect
