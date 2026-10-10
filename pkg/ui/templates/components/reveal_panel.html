@@ -110,12 +110,18 @@ not just the ones that would have shown the download link. */}} {{define
         never gets that class (Prism only tags code's *direct* parent and
         code itself, confirmed the same way), so its own py-2 is real —
         matching the masked pre's own py-2 exactly.
+
+        The masked pre clips its own overflow: a pre never wraps, so on a
+        narrow (mobile) box its fixed run of "*" glyphs is wider than the
+        space pr-24 leaves it and would otherwise run underneath the
+        actions. It's a placeholder, not content, so clipping loses
+        nothing — unlike the revealed side, which scrolls instead.
     -->
   <div
     id="{{.ID}}-masked"
     class="{{if .Open}}hidden {{end}}relative min-h-16 bg-neutral-950 rounded-lg p-4 pr-24"
   >
-    <pre class="m-0 py-2 text-xs text-neutral-500">
+    <pre class="m-0 py-2 text-xs text-neutral-500 overflow-hidden">
 ********************************</pre
     >
     {{template "reveal-panel-actions" .}}

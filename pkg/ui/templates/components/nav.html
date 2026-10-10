@@ -4,67 +4,100 @@
      defaultTenantNamespace when the current page isn't itself
      namespace-scoped, so the switcher and the Instances link below always
      have a real value to point at. */}}
-<!-- Mobile top bar -->
-<div class="lg:hidden fixed top-0 left-0 right-0 h-14 bg-neutral-900 border-b border-neutral-800 flex items-center justify-between px-4 z-40">
-    <span class="flex items-baseline gap-2">
-        <span class="text-accent font-bold text-lg tracking-tight">KONTINUUM</span>
-        {{if .Version}}<span class="text-[10px] text-neutral-500 tracking-wider">{{.Version}}</span>{{end}}
-    </span>
-    <div class="flex items-center gap-1">
-        <a href="/app/kontinuum.sh/v1alpha2/namespaces/{{.CurrentTenant}}/talosclusters"
-           class="p-2 rounded-lg {{if eq .ActiveMenu "talosclusters"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
-            {{template "icon-kubernetes"}}
-        </a>
-        <a href="/app/kontinuum.sh/v1alpha2/namespaces/{{.CurrentTenant}}/instances"
-           class="p-2 rounded-lg {{if eq .ActiveMenu "instances"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
-            {{template "icon-server"}}
-        </a>
-        {{template "tenant-switcher" dict "ID" "tenant-switcher-mobile" "CurrentTenant" .CurrentTenant "Tenants" .Tenants "Compact" true}}
-        {{if eq .CurrentTenant "kontinuum-system"}}
-        <a href="/app/kontinuum.sh/v1alpha2/namespaces/{{.CurrentTenant}}/kontinuums"
-           class="p-2 rounded-lg {{if eq .ActiveMenu "registry"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
-            {{template "icon-registry"}}
-        </a>
-        {{end}}
-        <a href="/app/rbac.authorization.k8s.io/v1/namespaces/{{.CurrentTenant}}/roles"
-           class="p-2 rounded-lg {{if eq .ActiveMenu "iam-namespace"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
-            {{template "icon-door-closed-lock"}}
-        </a>
-        {{if eq .CurrentTenant "kontinuum-system"}}
-        <a href="/app/rbac.authorization.k8s.io/v1/clusterroles"
-           class="p-2 rounded-lg {{if eq .ActiveMenu "iam-cluster"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
-            {{template "icon-globe-lock"}}
-        </a>
-        {{end}}
-        <a href="/app/connect"
-           class="p-2 rounded-lg {{if eq .ActiveMenu "connect"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
-            {{template "icon-unplug"}}
-        </a>
-        {{if .AuthEnabled}}
-        <a href="/app/logout" hx-boost="false"
-           class="p-2 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800/50 transition-colors">
-            {{template "icon-logout"}}
-        </a>
-        {{end}}
-        <a href="https://docs.kontinuum.sh" target="_blank" rel="noopener noreferrer" hx-boost="false"
-           class="p-2 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800/50 transition-colors">
-            {{template "icon-book-open-text"}}
-        </a>
-    </div>
+<!-- Mobile top bar: the full nav doesn't fit across a phone's width, so
+     it lives in the nav-drawer dialog below, opened by the hamburger. -->
+<div class="lg:hidden fixed top-0 left-0 right-0 h-14 bg-neutral-900 border-b border-neutral-800 flex items-center gap-3 px-4 z-40">
+    <button type="button" onclick="document.getElementById('nav-drawer').showModal()"
+            aria-label="Open menu" aria-haspopup="dialog" aria-controls="nav-drawer"
+            class="-ml-2 p-2 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800/50 transition-colors [&>svg]:h-5 [&>svg]:w-5">
+        {{template "icon-menu"}}
+    </button>
+    {{template "nav-logo" .}}
 </div>
+
+<!-- Mobile nav drawer. A native modal <dialog> (see AGENTS.md's UI
+     policy) for focus trapping, Escape-to-close and the backdrop for free.
+     The open: variants matter: a plain "flex" would override the UA's
+     display:none on a closed dialog. -->
+<dialog id="nav-drawer" aria-label="Navigation"
+        class="lg:hidden m-0 h-dvh max-h-none w-72 max-w-[85vw] p-0 bg-neutral-900 border-r border-neutral-800 text-neutral-100 backdrop:bg-black/60 open:flex open:flex-col open:animate-[nav-drawer-in_200ms_ease-out] motion-reduce:open:animate-none">
+    {{template "nav-panel" dict "Page" . "SwitcherID" "tenant-switcher-mobile" "Closable" true}}
+</dialog>
+<style>
+    @keyframes nav-drawer-in {
+        from { transform: translateX(-100%); }
+        to { transform: translateX(0); }
+    }
+</style>
+<script>
+    (function () {
+        var drawer = document.getElementById('nav-drawer');
+
+        // A click landing on the dialog element itself (rather than on
+        // the panel filling it) can only be on the backdrop.
+        drawer.addEventListener('click', function (evt) {
+            if (evt.target === drawer) {
+                drawer.close();
+            }
+        });
+
+        // Close as soon as a link is picked, rather than when the next
+        // page swaps in, so the page-loading indicator (see layout.html)
+        // isn't hidden behind the drawer during a slow navigation.
+        drawer.addEventListener('click', function (evt) {
+            if (evt.target.closest('a')) {
+                drawer.close();
+            }
+        });
+
+        // hx-boost re-runs this script on every navigation, so the
+        // window-level listener is only attached once. The drawer is
+        // lg:hidden, but a still-open modal would keep the rest of the page
+        // inert after widening past that breakpoint, so close it there.
+        if (!window.navDrawerWired) {
+            window.navDrawerWired = true;
+
+            window.matchMedia('(min-width: 1024px)').addEventListener('change', function (evt) {
+                var current = document.getElementById('nav-drawer');
+
+                if (evt.matches && current && current.open) {
+                    current.close();
+                }
+            });
+        }
+    })();
+</script>
 
 <!-- Desktop sidebar -->
 <aside class="hidden lg:flex fixed top-0 left-0 h-screen w-64 bg-neutral-900 border-r border-neutral-800 flex-col z-30">
-    <div class="h-14 flex items-center px-5 border-b border-neutral-800">
-        <span class="flex items-baseline gap-2">
-            <span class="text-accent font-bold text-lg tracking-tight">KONTINUUM</span>
-            {{if .Version}}<span class="text-[10px] text-neutral-500 tracking-wider">{{.Version}}</span>{{end}}
-        </span>
-    </div>
-    <div class="px-3 py-3 border-b border-neutral-800">
-        {{template "tenant-switcher" dict "ID" "tenant-switcher-desktop" "CurrentTenant" .CurrentTenant "Tenants" .Tenants "Compact" false}}
-    </div>
-    <nav class="flex flex-col gap-1 px-3 py-4 flex-1">
+    {{template "nav-panel" dict "Page" . "SwitcherID" "tenant-switcher-desktop" "Closable" false}}
+</aside>
+{{end}}
+
+{{define "nav-logo"}}
+<span class="flex items-baseline gap-2">
+    <span class="text-accent font-bold text-lg tracking-tight">KONTINUUM</span>
+    {{if .Version}}<span class="text-[10px] text-neutral-500 tracking-wider">{{.Version}}</span>{{end}}
+</span>
+{{end}}
+
+{{/* nav-panel is the full navigation, shared by the desktop sidebar and
+     the mobile nav-drawer so the two can never drift apart. Expects a dict
+     (see templateDict) with:
+       Page       - the page's own data (see "nav" above).
+       SwitcherID - the tenant switcher's own DOM id prefix, unique per
+                    instance (see tenant-switcher's own doc).
+       Closable   - true adds a close button to the header (the drawer). */}}
+{{define "nav-panel"}}
+{{with .Page}}
+<div class="h-14 shrink-0 flex items-center justify-between gap-2 px-5 border-b border-neutral-800">
+    {{template "nav-logo" .}}
+    {{if $.Closable}}{{template "modal-close-button"}}{{end}}
+</div>
+<div class="px-3 py-3 border-b border-neutral-800">
+    {{template "tenant-switcher" dict "ID" $.SwitcherID "CurrentTenant" .CurrentTenant "Tenants" .Tenants}}
+</div>
+    <nav class="flex flex-col gap-1 px-3 py-4 flex-1 overflow-y-auto">
         <span class="px-2 pt-1 pb-1 text-[10px] font-semibold uppercase tracking-wider text-neutral-600">Compute</span>
         <a href="/app/kontinuum.sh/v1alpha2/namespaces/{{.CurrentTenant}}/talosclusters"
            class="flex items-center gap-3 px-2 py-2 text-xs uppercase tracking-wider rounded-lg {{if eq .ActiveMenu "talosclusters"}}text-accent bg-neutral-800{{else}}text-neutral-400 hover:text-white hover:bg-neutral-800/50{{end}} transition-colors">
@@ -117,5 +150,5 @@
             {{template "icon-external-link"}}
         </a>
     </nav>
-</aside>
+{{end}}
 {{end}}

@@ -1256,6 +1256,12 @@ func TestHandleConnectShowsOIDCKubeconfigWhenAuthEnabled(t *testing.T) {
 	assert.Contains(t, string(body), "KUBECONFIG")
 	assert.Contains(t, string(body), "kontinuum config import")
 	assert.Contains(t, string(body), `href="/app/registry/kubeconfig"`)
+	// The masked placeholder never wraps, so it must clip itself rather
+	// than run underneath the Download/Copy actions on a narrow screen.
+	assert.Contains(t, string(body), `<pre class="m-0 py-2 text-xs text-neutral-500 overflow-hidden">`)
+	// Likewise the import command wraps instead of scrolling its Copy
+	// button out of view.
+	assert.Contains(t, string(body), `<pre class="m-0 min-w-0 text-xs whitespace-pre-wrap break-words">`)
 	assert.NotContains(t, string(body), "server: http://example.com",
 		"the kubeconfig's own contents must never be rendered into the initial page")
 
@@ -1322,6 +1328,82 @@ func TestHandleConnectShowsNoAuthKubeconfigWhenOIDCDisabled(t *testing.T) {
 // confirms the kubectl access card it now owns no longer renders on the
 // registry page it used to live on (see TestHandleRegistryRendersInstances
 // for that page's own remaining content).
+// TestLayoutRendersPageLoadingIndicator covers the global loading feedback
+// every page shares via layout.html: a progress bar that survives hx-boost's
+// body swap (hx-preserve) so it can animate to completion, and a spinner
+// keyed off <main>'s aria-busy state, which the layout's own script sets
+// while a boosted navigation is in flight.
+func TestLayoutRendersPageLoadingIndicator(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/connect"))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, string(body), `id="page-progress-track" hx-preserve="true"`)
+	assert.Contains(t, string(body), "top-14 left-0 right-0 lg:top-0 lg:left-64",
+		"the progress bar must span only the content area, never the nav")
+	assert.Contains(t, string(body), `id="page-loading-spinner"`)
+	assert.Contains(t, string(body), "group-aria-busy:opacity-100")
+	assert.Contains(t, string(body), "htmx:beforeRequest")
+	assert.Contains(t, string(body), "htmx:historyCacheMiss")
+}
+
+// TestLayoutRendersMobileNavDrawer covers the mobile top bar: the full nav
+// doesn't fit across a phone's width, so it is a hamburger button opening a
+// native <dialog> drawer that renders the same nav-panel as the desktop
+// sidebar, rather than a row of icons.
+func TestLayoutRendersMobileNavDrawer(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) {
+		return stubNamespaceLister{list: &corev1.NamespaceList{}}, nil
+	}
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zoneFactory, "test-version",
+		config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/connect"))
+
+	resp := recorder.Result()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	page := string(body)
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, page, `aria-label="Open menu"`)
+	assert.Contains(t, page, `<dialog id="nav-drawer"`)
+	assert.Contains(t, page, `id="tenant-switcher-mobile"`)
+	assert.Contains(t, page, `id="tenant-switcher-desktop"`)
+	assert.Equal(t, 2, strings.Count(page, `href="/app/connect"`),
+		"the drawer and the desktop sidebar each render the nav once; the mobile top bar no longer has its own icon row")
+}
+
 func TestHandleConnectHighlightsConnectNavItem(t *testing.T) {
 	t.Parallel()
 
