@@ -9,10 +9,15 @@
                 "copy-snippet-script".
       Command - the command text shown and copied, e.g.
                 "kontinuum config import".
+
+    The command wraps (min-w-0 lets the pre shrink below its unwrapped
+    width) instead of the whole row scrolling horizontally: on a narrow
+    (mobile) screen, a scrolling row carried the Copy button off the
+    visible edge along with the overflowing text.
 */}}
 {{define "copy-snippet"}}
-<div class="flex items-center justify-between gap-3 bg-neutral-950 rounded-lg p-4 overflow-x-auto mb-4">
-    <pre class="m-0 text-xs"><span class="text-neutral-600 select-none">$ </span><code id="{{.ID}}-snippet" class="language-bash">{{.Command}}</code></pre>
+<div class="flex items-center justify-between gap-3 bg-neutral-950 rounded-lg p-4 mb-4">
+    <pre class="m-0 min-w-0 text-xs whitespace-pre-wrap break-words"><span class="text-neutral-600 select-none">$ </span><code id="{{.ID}}-snippet" class="language-bash">{{.Command}}</code></pre>
     <button type="button" data-copy-for="{{.ID}}-snippet" title="Copy to clipboard"
             class="shrink-0 inline-flex items-center gap-1.5 px-2 py-1.5 text-xs font-medium rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white hover:bg-neutral-700 transition-colors">
         <span data-icon-copy>{{template "icon-copy"}}</span>

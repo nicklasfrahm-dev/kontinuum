@@ -1256,6 +1256,12 @@ func TestHandleConnectShowsOIDCKubeconfigWhenAuthEnabled(t *testing.T) {
 	assert.Contains(t, string(body), "KUBECONFIG")
 	assert.Contains(t, string(body), "kontinuum config import")
 	assert.Contains(t, string(body), `href="/app/registry/kubeconfig"`)
+	// The masked placeholder never wraps, so it must clip itself rather
+	// than run underneath the Download/Copy actions on a narrow screen.
+	assert.Contains(t, string(body), `<pre class="m-0 py-2 text-xs text-neutral-500 overflow-hidden">`)
+	// Likewise the import command wraps instead of scrolling its Copy
+	// button out of view.
+	assert.Contains(t, string(body), `<pre class="m-0 min-w-0 text-xs whitespace-pre-wrap break-words">`)
 	assert.NotContains(t, string(body), "server: http://example.com",
 		"the kubeconfig's own contents must never be rendered into the initial page")
 
