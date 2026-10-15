@@ -193,7 +193,7 @@ jobs:
       - name: Run gated end-to-end tests
         run: make test-e2e
 
-  test-setup-kontinuum:
+  test-action:
     name: Test setup-kontinuum action
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
