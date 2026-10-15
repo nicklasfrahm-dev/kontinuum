@@ -193,6 +193,38 @@ jobs:
       - name: Run gated end-to-end tests
         run: make test-e2e
 
+  test-setup-kontinuum:
+    name: Test setup-kontinuum action
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        version:
+          - latest
+          - v0.36.0
+          - 0.36.0
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up kontinuum
+        id: setup
+        uses: ./actions/setup-kontinuum
+        with:
+          version: ${{ matrix.version }}
+
+      - name: Verify installed version
+        env:
+          EXPECTED_VERSION: ${{ steps.setup.outputs.version }}
+        run: |
+          actual=$(kontinuum version)
+          if [[ "${actual}" != "${EXPECTED_VERSION}" ]]; then
+            echo "::error::Expected kontinuum ${EXPECTED_VERSION}, got ${actual}"
+            exit 1
+          fi
+
   containerize:
     name: Containerize
     runs-on: ubuntu-latest

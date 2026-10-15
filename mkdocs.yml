@@ -53,6 +53,7 @@ nav:
       - Authentication: authentication.md
       - Add zone: workflows/zone-add.md
       - Remove zone: workflows/zone-remove.md
+      - GitHub Actions: github-actions.md
   - Developer guide:
       - Contribution guidelines: contributing.md
       - Local setup: local-setup.md
