@@ -194,7 +194,7 @@ jobs:
         run: make test-e2e
 
   test-action:
-    name: Test setup-kontinuum action
+    name: Test action
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
