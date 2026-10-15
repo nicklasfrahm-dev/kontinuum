@@ -1,0 +1,98 @@
+name: Set up kontinuum
+description: Install the kontinuum CLI and add it to the PATH.
+
+inputs:
+  version:
+    description: >-
+      The exact kontinuum version to install (e.g. `v0.36.0` or `0.36.0`), or
+      `latest` for the most recent GitHub release.
+    required: false
+    default: latest
+  image:
+    description: >-
+      The container image to extract the kontinuum binary from. Its tags must
+      match the release tags.
+    required: false
+    default: ghcr.io/nicklasfrahm-dev/kontinuum
+  github-token:
+    description: >-
+      The token used to resolve `latest` via the GitHub API, which avoids the
+      API's unauthenticated rate limit.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  version:
+    description: The kontinuum version that was installed.
+    value: ${{ steps.install.outputs.version }}
+  path:
+    description: The absolute path to the installed kontinuum binary.
+    value: ${{ steps.install.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    # kontinuum doesn't publish standalone binaries as release assets, so
+    # the binary is copied out of the multi-arch release image instead. That
+    # binary is statically linked (CGO_ENABLED=0), so it runs on any Linux
+    # runner, and it is the exact artifact that gets deployed.
+    - name: Install kontinuum
+      id: install
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_IMAGE: ${{ inputs.image }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+
+        if [[ "${RUNNER_OS}" != "Linux" ]]; then
+          echo "::error::setup-kontinuum only supports Linux runners, got: ${RUNNER_OS}"
+          exit 1
+        fi
+
+        case "${RUNNER_ARCH}" in
+          X64)
+            arch=amd64
+            ;;
+          ARM64)
+            arch=arm64
+            ;;
+          *)
+            echo "::error::Unsupported runner architecture: ${RUNNER_ARCH}"
+            exit 1
+            ;;
+        esac
+
+        version="${INPUT_VERSION}"
+        if [[ "${version}" == "latest" ]]; then
+          # The image's own `latest` tag is pushed on every commit to main,
+          # not only on releases, so resolve the latest release tag instead.
+          version=$(curl -fsSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/nicklasfrahm-dev/kontinuum/releases/latest" \
+            | jq -r '.tag_name')
+        elif [[ "${version}" != v* ]]; then
+          # Release tags carry a `v` prefix, so accept `0.36.0` as well.
+          version="v${version}"
+        fi
+        echo "Resolved kontinuum version: ${version}"
+
+        install_dir="${RUNNER_TOOL_CACHE}/kontinuum/${version}/${arch}"
+        binary="${install_dir}/kontinuum"
+        if [[ -x "${binary}" ]]; then
+          echo "Using cached kontinuum binary: ${binary}"
+        else
+          mkdir -p "${install_dir}"
+          container=$(docker create --platform "linux/${arch}" "${INPUT_IMAGE}:${version}")
+          trap 'docker rm "${container}" > /dev/null' EXIT
+          docker cp "${container}:/app/kontinuum" "${binary}"
+          chmod +x "${binary}"
+        fi
+
+        echo "${install_dir}" >> "${GITHUB_PATH}"
+        echo "version=${version}" >> "${GITHUB_OUTPUT}"
+        echo "path=${binary}" >> "${GITHUB_OUTPUT}"
+
+        "${binary}" version

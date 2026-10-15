@@ -185,6 +185,8 @@ docs-lint: $(LYCHEEBIN) ## Build docs strictly and check for broken links (mirro
 	$(DOCSVENV)/bin/mkdocs build --strict
 	$(LYCHEEBIN) --no-progress --exclude-loopback --root-dir $(CURDIR)/site \
 		--remap "https://docs.kontinuum.sh file://$(CURDIR)/site" \
+		--remap "https://github.com/nicklasfrahm-dev/kontinuum/blob/main file://$(CURDIR)" \
+		--remap "https://github.com/nicklasfrahm-dev/kontinuum/tree/main file://$(CURDIR)" \
 		site
 
 .PHONY: docs-clean
