@@ -88,12 +88,16 @@ const (
 	reasonClusterReady           = "ClusterReady"
 	reasonDownstreamNotReady     = "DownstreamNotReady"
 	reasonNoStorageSecret        = "NoStorageSecretFound"
-	reasonNoVersionFound         = "NoVersionFound"
-	reasonInstallFailed          = "InstallFailed"
-	reasonWaitingForCertificate  = "WaitingForCertificate"
-	reasonInstalled              = "Installed"
-	reasonWaitingForRegistry     = "WaitingForRegistry"
-	reasonRegistryJoined         = "RegistryJoined"
+	// reasonStorageModeChanged is Installed's reason for a zone refused
+	// because the fleet's resolved storage mode no longer matches the one
+	// it was installed with — see ErrStorageModeChanged.
+	reasonStorageModeChanged    = "StorageModeChanged"
+	reasonNoVersionFound        = "NoVersionFound"
+	reasonInstallFailed         = "InstallFailed"
+	reasonWaitingForCertificate = "WaitingForCertificate"
+	reasonInstalled             = "Installed"
+	reasonWaitingForRegistry    = "WaitingForRegistry"
+	reasonRegistryJoined        = "RegistryJoined"
 	// reasonWaitingForDNSConfiguration is InstalledConditionType's own
 	// reason while a Zone with spec.domain set is waiting for the hub to
 	// have both a DNS provider and credential configured — see
@@ -175,6 +179,14 @@ type Config struct {
 	// anyway — see teardown.go's own doc. Defaults to fifteen minutes when
 	// zero.
 	TeardownTimeout time.Duration
+	// StorageMode is the storage mode this process resolved for the fleet
+	// at startup (see pkg/config.ResolveStorageMode): Proxy hands a zone
+	// an etcdproxy relay DSN back to this hub and issues its etcd proxy
+	// identity; Direct hands it HubConfig's own storage DSN, with no
+	// identity and no gRPC endpoint needed. A zone installed under one
+	// mode is never moved to another — see ErrStorageModeChanged. Empty
+	// means config.StorageModeProxy.
+	StorageMode config.StorageMode
 	// ZoneLease is this process's own zonelease.Locker identity — see
 	// zonelease.Identity's own doc. Reconcile refuses to mutate a Zone it
 	// doesn't hold this lease for, so the hub and every joined zone sharing
@@ -226,6 +238,7 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		ImageRepo:               c.Config.ImageRepo,
 		RetryInterval:           c.Config.RetryInterval,
 		TeardownTimeout:         c.Config.TeardownTimeout,
+		StorageMode:             c.Config.StorageMode,
 		Locker:                  zonelease.NewLockerFor(mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease),
 		Logger:                  c.Config.Logger,
 	}
@@ -331,6 +344,9 @@ type Reconciler struct {
 	ImageRepo               string
 	RetryInterval           time.Duration
 	TeardownTimeout         time.Duration
+	// StorageMode is the fleet's resolved storage mode — see
+	// Config.StorageMode's own doc. Empty means config.StorageModeProxy.
+	StorageMode config.StorageMode
 	// Locker gates every write below against zonelease — see
 	// Config.ZoneLease's own doc.
 	Locker *zonelease.Locker
@@ -489,27 +505,91 @@ func earliestRequeue(result ctrl.Result, candidate time.Duration) ctrl.Result {
 	return result
 }
 
-// prepareZoneStorage ensures zoneObj's own etcd proxy identity (see
-// ensureEtcdIdentity) and resolves the KONTINUUM_SERVER_STORAGE value that
-// depends on it (see zoneStorageDSN) — split out of reconcileInstall
-// purely to keep its own cyclomatic complexity down; both steps report
-// failure identically to their one caller (Installed=False/
-// NoStorageSecretFound), so collapsing them into a single error return
-// here removes a duplicated branch there.
+// prepareZoneStorage resolves zoneObj's storage mode (see
+// resolveZoneStorageMode), ensures its etcd proxy identity when that mode
+// is Proxy (see ensureEtcdIdentity — the identity only exists to
+// authenticate against the hub's etcd proxy, so no other mode needs one),
+// and resolves the KONTINUUM_SERVER_STORAGE value that depends on both
+// (see zoneStorageDSN) — split out of reconcileInstall purely to keep its
+// own cyclomatic complexity down; every step reports failure identically
+// to its one caller (Installed=False/NoStorageSecretFound), so collapsing
+// them into a single error return here removes a duplicated branch there.
+// statusChanged reports whether zoneObj.Status.StorageMode was changed in
+// memory, error or not, so the caller persists it either way.
 func (r *Reconciler) prepareZoneStorage(
 	ctx context.Context, downstream client.Client, zoneObj *v1alpha2.Zone,
-) (string, bool, error) {
-	rotatedIdentity, err := r.ensureEtcdIdentity(ctx, downstream, zoneObj)
+) (zoneStorage, error) {
+	mode, statusChanged, err := r.resolveZoneStorageMode(ctx, downstream, zoneObj)
 	if err != nil {
-		return "", false, err
+		return zoneStorage{statusChanged: statusChanged}, err
 	}
 
-	storage, err := r.zoneStorageDSN(zoneObj)
-	if err != nil {
-		return "", false, err
+	prepared := zoneStorage{mode: mode, statusChanged: statusChanged}
+
+	if mode == config.StorageModeProxy {
+		prepared.rotatedIdentity, err = r.ensureEtcdIdentity(ctx, downstream, zoneObj)
+		if err != nil {
+			return prepared, err
+		}
 	}
 
-	return storage, rotatedIdentity, nil
+	prepared.dsn, err = r.zoneStorageDSN(zoneObj, mode)
+	if err != nil {
+		return prepared, err
+	}
+
+	return prepared, nil
+}
+
+// installStorage runs prepareZoneStorage for reconcileInstall and records
+// the zone's storage mode — split out of reconcileInstall purely to keep its
+// own cyclomatic complexity down. stop reports that reconcileInstall must
+// return result and err as they are: storage isn't ready, or the zone was
+// refused a storage mode change (see ErrStorageModeChanged).
+func (r *Reconciler) installStorage(
+	ctx context.Context, downstream client.Client, zoneObj *v1alpha2.Zone,
+) (zoneStorage, ctrl.Result, bool, error) {
+	storage, err := r.prepareZoneStorage(ctx, downstream, zoneObj)
+	if errors.Is(err, ErrStorageModeChanged) {
+		r.Logger.Error("Refusing to change a zone's storage mode in place", "zone", zoneObj.Name, "error", err)
+
+		result, err := r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonStorageModeChanged,
+			err.Error(), storage.statusChanged)
+
+		return storage, result, true, err
+	}
+
+	if err != nil {
+		r.Logger.Warn("no storage credentials to propagate yet", "zone", zoneObj.Name, "error", err)
+
+		result, err := r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonNoStorageSecret,
+			err.Error(), storage.statusChanged)
+
+		return storage, result, true, err
+	}
+
+	if storage.statusChanged {
+		err = r.Client.Status().Update(ctx, zoneObj)
+		if err != nil {
+			return storage, ctrl.Result{}, true,
+				fmt.Errorf("failed to record storage mode of zone %q: %w", zoneObj.Name, err)
+		}
+	}
+
+	return storage, ctrl.Result{}, false, nil
+}
+
+// zoneStorage is prepareZoneStorage's result.
+type zoneStorage struct {
+	// mode is the zone's resolved storage mode.
+	mode config.StorageMode
+	// dsn is the KONTINUUM_SERVER_STORAGE value the zone runs with.
+	dsn string
+	// rotatedIdentity reports whether ensureEtcdIdentity minted a new
+	// keypair this pass — always false outside Proxy mode.
+	rotatedIdentity bool
+	// statusChanged reports whether zoneObj.Status.StorageMode changed.
+	statusChanged bool
 }
 
 // reconcileInstall installs kontinuum's downstream footprint onto zoneObj's own
@@ -540,11 +620,9 @@ func (r *Reconciler) reconcileInstall(
 		return ctrl.Result{}, fmt.Errorf("failed to build downstream client for %q: %w", zoneObj.Name, err)
 	}
 
-	storage, rotatedIdentity, err := r.prepareZoneStorage(ctx, downstream, zoneObj)
-	if err != nil {
-		r.Logger.Warn("no storage credentials to propagate yet", "zone", zoneObj.Name, "error", err)
-
-		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonNoStorageSecret, err.Error(), false)
+	storage, result, stop, err := r.installStorage(ctx, downstream, zoneObj)
+	if stop {
+		return result, err
 	}
 
 	image, err := r.resolveImage(ctx)
@@ -570,7 +648,7 @@ func (r *Reconciler) reconcileInstall(
 		hostname = fmt.Sprintf("%s.%s.%s", zoneObj.Spec.Zone, zoneObj.Spec.Region, zoneObj.Spec.Domain)
 	}
 
-	err = r.installWorkload(ctx, downstream, zoneObj, storage, image, hostname)
+	err = r.installWorkload(ctx, downstream, zoneObj, storage.dsn, image, hostname)
 	if err != nil {
 		return r.setInstalledCondition(ctx, zoneObj, metav1.ConditionFalse, reasonInstallFailed, err.Error(), false)
 	}
@@ -578,7 +656,7 @@ func (r *Reconciler) reconcileInstall(
 	// No restart to force here: the zone's own kontinuum-server watches its
 	// identity Secret directly (see etcdproxy.WatchIdentity) and picks up a
 	// rotated key on its own — this is purely an observability log line.
-	if rotatedIdentity {
+	if storage.rotatedIdentity {
 		r.Logger.Info("rotated zone's etcd proxy identity", "zone", zoneObj.Name)
 	}
 
