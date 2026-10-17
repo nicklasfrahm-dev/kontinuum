@@ -106,6 +106,13 @@ func TestDNS01SolverRFC2136(t *testing.T) {
 	}
 	keys[rfc2136KeyEnv] = testAPIValue
 
+	// external-dns exits without an algorithm, so the solver requires one.
+	_, err := addon.DNS01Solver("RFC2136", testSolverStore, keys)
+	require.ErrorIs(t, err, addon.ErrMissingDNSCredentialKey)
+	assert.Contains(t, err.Error(), "EXTERNAL_DNS_RFC2136_TSIG_SECRET_ALG")
+
+	keys["EXTERNAL_DNS_RFC2136_TSIG_SECRET_ALG"] = "hmac-sha256"
+
 	solver, err := addon.DNS01Solver("RFC2136", testSolverStore, keys)
 	require.NoError(t, err)
 	require.NotNil(t, solver.RFC2136)

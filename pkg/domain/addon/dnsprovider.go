@@ -78,15 +78,15 @@ const (
 	envGoogleServiceAccount = "GOOGLE_SERVICE_ACCOUNT_KEY"
 	// DigitalOcean: an API token.
 	envDigitalOceanAPI = "DO_TOKEN"
-	// RFC2136: the nameserver and a TSIG key; port and algorithm are
-	// optional, defaulting to 53 and hmac-sha256.
-	envRFC2136Host             = "EXTERNAL_DNS_RFC2136_HOST"
-	envRFC2136Port             = "EXTERNAL_DNS_RFC2136_PORT"
-	envRFC2136KeyName          = "EXTERNAL_DNS_RFC2136_TSIG_KEYNAME"
-	envRFC2136Key              = "EXTERNAL_DNS_RFC2136_TSIG_SECRET"
-	envRFC2136KeyAlgorithm     = "EXTERNAL_DNS_RFC2136_TSIG_SECRET_ALG"
-	defaultRFC2136Port         = "53"
-	defaultRFC2136KeyAlgorithm = "hmac-sha256"
+	// RFC2136: the nameserver and a TSIG key with its algorithm; the port
+	// is optional, defaulting to 53. external-dns exits on startup without
+	// an algorithm, so unlike cert-manager it has no default to fall back on.
+	envRFC2136Host         = "EXTERNAL_DNS_RFC2136_HOST"
+	envRFC2136Port         = "EXTERNAL_DNS_RFC2136_PORT"
+	envRFC2136KeyName      = "EXTERNAL_DNS_RFC2136_TSIG_KEYNAME"
+	envRFC2136Key          = "EXTERNAL_DNS_RFC2136_TSIG_SECRET"
+	envRFC2136KeyAlgorithm = "EXTERNAL_DNS_RFC2136_TSIG_SECRET_ALG"
+	defaultRFC2136Port     = "53"
 )
 
 // DNS01Solver builds cert-manager's DNS-01 solver for raw (a
@@ -152,7 +152,8 @@ func dns01SolverBuilders() map[config.DNSProvider]dns01SolverBuilder {
 		},
 		config.DNSProviderDigitalOcean: {required: []string{envDigitalOceanAPI}, build: digitalOceanSolver},
 		config.DNSProviderRFC2136: {
-			required: []string{envRFC2136Host, envRFC2136KeyName, envRFC2136Key}, build: rfc2136Solver,
+			required: []string{envRFC2136Host, envRFC2136KeyName, envRFC2136Key, envRFC2136KeyAlgorithm},
+			build:    rfc2136Solver,
 		},
 	}
 }
@@ -230,12 +231,8 @@ func rfc2136Solver(ref secretRefs, keys map[string]string) (*acmev1.ACMEChalleng
 }
 
 // tsigAlgorithm translates external-dns's TSIG algorithm name (e.g.
-// hmac-sha256, its default) into cert-manager's (HMACSHA256).
+// hmac-sha256) into cert-manager's (HMACSHA256).
 func tsigAlgorithm(raw string) (string, error) {
-	if raw == "" {
-		raw = defaultRFC2136KeyAlgorithm
-	}
-
 	algorithms := map[string]string{
 		"hmac-md5":    "HMACMD5",
 		"hmac-sha1":   "HMACSHA1",

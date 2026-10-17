@@ -286,7 +286,8 @@ func newDNS01ZoneReconciler(hubClient client.Client, logger *slog.Logger, bindIP
 	hubConfig.Server.DNS.Domain = e2eDNSDomain
 	hubConfig.Server.DNS.Provider = string(config.DNSProviderRFC2136)
 	hubConfig.Server.DNS.Credential = fmt.Sprintf(
-		"EXTERNAL_DNS_RFC2136_HOST: %s\nEXTERNAL_DNS_RFC2136_TSIG_KEYNAME: %s\nEXTERNAL_DNS_RFC2136_TSIG_SECRET: %s\n",
+		"EXTERNAL_DNS_RFC2136_HOST: %s\nEXTERNAL_DNS_RFC2136_TSIG_KEYNAME: %s\nEXTERNAL_DNS_RFC2136_TSIG_SECRET: %s\n"+
+			"EXTERNAL_DNS_RFC2136_TSIG_SECRET_ALG: hmac-sha256\n",
 		bindIP, e2eTSIGKeyName, e2eTSIGKey)
 	hubConfig.Server.Frontend.Host = "app." + e2eDNSDomain
 	hubConfig.ACME.Email = "ops@" + e2eDNSDomain
