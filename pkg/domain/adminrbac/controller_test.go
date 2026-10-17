@@ -210,3 +210,32 @@ func TestReconcileLeavesUnmanagedBindingAlone(t *testing.T) {
 
 	stopRunnable(t, cancel, done)
 }
+
+// TestReconcileRunsOnHubLessZonePeer proves the admin ClusterRoleBindings —
+// fleet-wide state gated on zonelease.GlobalKey — are reconciled by a zone
+// peer once the fleet is hub-less, rather than silently never.
+func TestReconcileRunsOnHubLessZonePeer(t *testing.T) {
+	t.Parallel()
+
+	fakeClient := newFakeClient(t)
+
+	runnable := &adminrbac.Runnable{
+		Client:      fakeClient,
+		AdminGroups: "platform-admins",
+		Interval:    testInterval,
+		Locker: zonelease.NewLockerFor(fakeClient, fakeClient, zonelease.Identity{
+			HolderIdentity: "zone-eu-hel01", SelfZoneKey: "eu-hel01", HubLess: true,
+		}),
+		Logger: slog.Default(),
+	}
+
+	cancel, done := startRunnable(runnable)
+
+	require.Eventually(t, func() bool {
+		_, found := managedBindingForGroup(t, fakeClient, "platform-admins")
+
+		return found
+	}, time.Second, time.Millisecond, "hub-less zone peer never reconciled the admin bindings")
+
+	stopRunnable(t, cancel, done)
+}
