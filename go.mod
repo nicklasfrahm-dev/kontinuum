@@ -27,7 +27,7 @@ require (
 	github.com/google/cel-go v0.27.0
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
-	github.com/kommodity-io/kommodity v0.180.1-0.20261017223519-764e0fd667c6
+	github.com/kommodity-io/kommodity v0.181.0
 	github.com/lmittmann/tint v1.2.1
 	github.com/moby/moby/api v1.56.1
 	github.com/siderolabs/kms-client v0.2.0
