@@ -82,7 +82,7 @@ func TestEnsureExternalDNSSeedWiresCredentialThroughSecret(t *testing.T) {
 	kubeClient := externalDNSFakeClient(t, cluster)
 
 	require.NoError(t, addon.EnsureExternalDNSSeed(context.Background(), kubeClient, cluster,
-		"cloudflare", "CF_API_TOKEN: example-token\n"))
+		"Cloudflare", "CF_API_TOKEN: example-token\n"))
 
 	seed, secret, values := getExternalDNSSeed(t, kubeClient)
 
@@ -113,7 +113,7 @@ func TestEnsureExternalDNSSeedTracksCredentialKeys(t *testing.T) {
 	cluster := resourcesTestCluster(resourcesTestNamespace)
 	kubeClient := externalDNSFakeClient(t, cluster)
 
-	require.NoError(t, addon.EnsureExternalDNSSeed(context.Background(), kubeClient, cluster, "pdns",
+	require.NoError(t, addon.EnsureExternalDNSSeed(context.Background(), kubeClient, cluster, "PowerDNS",
 		pdnsServerEnv+": http://pdns:8081\n"+pdnsAuthEnv+": example-api-key\n"))
 
 	_, secret, values := getExternalDNSSeed(t, kubeClient)
@@ -123,7 +123,7 @@ func TestEnsureExternalDNSSeedTracksCredentialKeys(t *testing.T) {
 	assert.Equal(t, pdnsAuthEnv, values.Env[0].Name, "env is sorted by name")
 	assert.Equal(t, pdnsServerEnv, values.Env[1].Name)
 
-	require.NoError(t, addon.EnsureExternalDNSSeed(context.Background(), kubeClient, cluster, "pdns",
+	require.NoError(t, addon.EnsureExternalDNSSeed(context.Background(), kubeClient, cluster, "PowerDNS",
 		pdnsServerEnv+": http://pdns:8081\n"))
 
 	_, secret, values = getExternalDNSSeed(t, kubeClient)
@@ -142,7 +142,7 @@ func TestEnsureExternalDNSSeedRejectsNonFlatCredential(t *testing.T) {
 	kubeClient := externalDNSFakeClient(t, cluster)
 
 	err := addon.EnsureExternalDNSSeed(context.Background(), kubeClient, cluster,
-		"cloudflare", "CF_API_TOKEN:\n  nested: not-a-string\n")
+		"Cloudflare", "CF_API_TOKEN:\n  nested: not-a-string\n")
 	require.ErrorIs(t, err, addon.ErrInvalidDNSCredential)
 
 	err = kubeClient.Get(context.Background(),
