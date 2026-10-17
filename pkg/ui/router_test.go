@@ -3284,6 +3284,59 @@ func TestHandleZoneDetailShowsStorageMode(t *testing.T) {
 	assert.NotContains(t, string(body), "Not installed yet")
 }
 
+// TestHandleZoneDetailListsEveryInstance covers a multi-node zone: every
+// Instance labeled with the zone's region/zone is listed with its own
+// status, not just the first, and another zone's Instance isn't.
+func TestHandleZoneDetailListsEveryInstance(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	zoneObj := &v1alpha2.Zone{
+		ObjectMeta: metav1.ObjectMeta{Name: testTalosClusterName, Namespace: v1alpha2.KontinuumSystemNamespace},
+		Spec:       v1alpha2.ZoneSpec{Region: "eu", Zone: testZoneValue},
+	}
+
+	zoneInstance := func(name, address, zoneName string) *v1alpha2.Instance {
+		return &v1alpha2.Instance{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name, Namespace: v1alpha2.KontinuumSystemNamespace,
+				Labels: map[string]string{v1alpha2.LabelRegion: "eu", v1alpha2.LabelZone: zoneName},
+			},
+			Spec: v1alpha2.InstanceSpec{Interfaces: []string{address}},
+		}
+	}
+
+	zoneClient := newTestZoneClient(t, zoneObj,
+		zoneInstance("node-a", "10.0.0.5", testZoneValue),
+		zoneInstance("node-b", "10.0.0.6", testZoneValue),
+		zoneInstance("node-c", "10.0.0.7", testZoneValue),
+		zoneInstance("other-zone-node", "10.0.9.9", "1b"))
+	zonesFactory := func(context.Context) (client.Client, error) { return zoneClient, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/zones/eu-eu-1a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	for _, address := range []string{"10.0.0.5", "10.0.0.6", "10.0.0.7"} {
+		assert.Contains(t, string(body), address)
+	}
+
+	assert.NotContains(t, string(body), "other-zone-node")
+}
+
 // TestHandleZoneDetailRedirectsToParentForUnknownZone: Zone has no
 // dedicated list page of its own (unlike TalosCluster/Instance), so the one
 // notFoundFallback hop this asserts lands on
