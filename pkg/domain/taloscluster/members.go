@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"slices"
+	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -36,7 +39,35 @@ func resolveMembers(
 		}
 	}
 
+	// Sorted by name so members[0] — the control plane's own endpoint, see
+	// reconcileControlPlane — never changes between reconciles of an
+	// unchanged pool.
+	slices.SortFunc(members, func(left, right v1alpha2.Instance) int {
+		return strings.Compare(left.Name, right.Name)
+	})
+
 	return members, nil
+}
+
+// controlPlaneReplicas returns how many members cluster's control-plane
+// InstancePool asks for — at least one. A pool that doesn't exist (yet)
+// counts as one, the smallest control plane there is: nothing can be
+// claimed from it anyway, so resolveMembers comes back empty first.
+func controlPlaneReplicas(ctx context.Context, kubeClient client.Client, cluster *v1alpha2.TalosCluster) (int, error) {
+	var pool v1alpha2.InstancePool
+
+	key := client.ObjectKey{Name: cluster.Spec.ControlPlane.PoolRef.Name, Namespace: cluster.Namespace}
+
+	err := kubeClient.Get(ctx, key, &pool)
+	if apierrors.IsNotFound(err) {
+		return 1, nil
+	}
+
+	if err != nil {
+		return 0, fmt.Errorf("failed to get control-plane instance pool %q: %w", key.Name, err)
+	}
+
+	return max(int(pool.Spec.Replicas), 1), nil
 }
 
 // listClaimedByPool lists every Instance claimed by poolName within

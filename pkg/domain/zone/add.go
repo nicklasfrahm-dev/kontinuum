@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,15 +38,19 @@ type AddOptions struct {
 	// controller.go's reconcileInstall for what that means at reconcile
 	// time.
 	Domain string
-	// TalosAddress is the seed Instance's candidate address (IP or
-	// hostname) — the address the instance discovery controller dials in
-	// Talos maintenance mode. A hostname is resolved before it ever reaches
-	// spec.interfaces[0] — see instancedomain.ResolveAddress and Add's own
-	// doc — exactly like instance.AddOptions.Address's own standalone
-	// registration path, so the two converge on one Instance identity for
-	// a given address regardless of which one resolves the hostname.
-	TalosAddress string
-	// Resolver resolves TalosAddress when it isn't already an IP literal —
+	// TalosAddresses are the seed Instances' candidate addresses (IPs or
+	// hostnames), one Instance per entry — the addresses the instance
+	// discovery controller dials in Talos maintenance mode. Every one of
+	// them joins the zone's control plane and runs etcd, so there must be
+	// 1, 3 or 5 (see ValidateInstanceCount), each distinct once resolved
+	// (see ErrDuplicateInstanceAddress). A hostname is resolved before it
+	// ever reaches spec.interfaces[0] — see instancedomain.ResolveAddress
+	// and Add's own doc — exactly like instance.AddOptions.Address's own
+	// standalone registration path, so the two converge on one Instance
+	// identity for a given address regardless of which one resolves the
+	// hostname.
+	TalosAddresses []string
+	// Resolver resolves TalosAddresses when they aren't already IP literals —
 	// see instancedomain.ResolveAddress. Left nil (always the case for
 	// pkg/cli/zone's flag parse and pkg/ui's own form parse), Add uses
 	// net.DefaultResolver; tests inject a stub instead of making real DNS
@@ -62,13 +68,15 @@ type AddOptions struct {
 	UnregisterInstancesOnDelete bool
 	// ExistingInstanceName, when set, names an already-registered, unclaimed
 	// Instance in v1alpha2.KontinuumSystemNamespace to adopt as this zone's
-	// seed Instance instead of creating a new one from TalosAddress — see
-	// issue #81: the UI's "Add zone" modal sets this when its own
+	// one seed Instance instead of creating a new one from TalosAddresses —
+	// see issue #81: the UI's "Add zone" modal sets this when its own
 	// instance-picker suggestion is chosen, rather than a freshly typed
-	// address. TalosAddress is still shown/submitted alongside it purely for
-	// display; Add itself only ever reads the adopted Instance's own
-	// spec.interfaces once claimed. Left empty (the common case), Add
-	// creates a brand-new Instance from TalosAddress exactly as before.
+	// address. TalosAddresses must then hold exactly that one Instance's
+	// address, submitted alongside it purely for display; Add itself only
+	// ever reads the adopted Instance's own spec.interfaces once claimed.
+	// Adopting several existing Instances isn't supported. Left empty (the
+	// common case), Add creates one brand-new Instance per TalosAddresses
+	// entry.
 	ExistingInstanceName string
 }
 
@@ -87,19 +95,68 @@ var (
 	// — picking an instance-picker suggestion that another zone claimed out
 	// from under it between the modal opening and this submission.
 	errInstanceAlreadyClaimed = errors.New("zone add: instance already claimed")
+	// ErrInvalidInstanceCount is ValidateInstanceCount's sentinel for a
+	// zone with an instance count other than 1, 3 or 5.
+	ErrInvalidInstanceCount = errors.New(
+		"a zone needs 1, 3 or 5 instances: every instance joins the control plane and runs etcd, " +
+			"and an even count adds a node without adding failure tolerance " +
+			"(2 tolerates no failure, like 1, while doubling the chance of one)")
+	// ErrDuplicateInstanceAddress is Add's sentinel for two TalosAddresses
+	// entries that name the same node once resolved.
+	ErrDuplicateInstanceAddress = errors.New("zone add: duplicate instance address")
+	// errExistingInstanceNeedsOneAddress is validateAddOptions' sentinel
+	// for ExistingInstanceName set alongside more than one address.
+	errExistingInstanceNeedsOneAddress = errors.New(
+		"zone add: adopting an existing instance takes exactly one talos address")
 )
+
+// SplitTalosAddresses splits a comma-separated address list — the "Add
+// zone" form's own talos-address field — into its trimmed, non-empty
+// entries, the same way kontinuum zone add's own repeatable
+// --talos-address flag accepts "a,b,c".
+func SplitTalosAddresses(raw string) []string {
+	var addresses []string
+
+	for address := range strings.SplitSeq(raw, ",") {
+		address = strings.TrimSpace(address)
+		if address != "" {
+			addresses = append(addresses, address)
+		}
+	}
+
+	return addresses
+}
+
+// maxInstancesPerZone is the largest instance count ValidateInstanceCount
+// accepts: beyond five, every extra etcd member slows down writes more
+// than it adds availability.
+const maxInstancesPerZone = 5
+
+// ValidateInstanceCount enforces a zone's 1/3/5 instance rule — see
+// ErrInvalidInstanceCount. Exported so kontinuum up's own validation of
+// kontinuum.yml applies exactly the same limit as zone add and the UI.
+func ValidateInstanceCount(count int) error {
+	if count < 1 || count > maxInstancesPerZone || count%2 == 0 {
+		return fmt.Errorf("%w: got %d", ErrInvalidInstanceCount, count)
+	}
+
+	return nil
+}
 
 // validateAddOptions checks that every required field is set and that
 // Region/Zone are valid DNS-1123 label components. Domain is deliberately
 // not checked here — see its own doc for why it's optional at this point,
 // inferred later by Add if still empty.
 func validateAddOptions(opts AddOptions) error {
-	for name, value := range map[string]string{
-		"region": opts.Region, "zone": opts.Zone, "talos-address": opts.TalosAddress,
-	} {
+	for name, value := range map[string]string{"region": opts.Region, "zone": opts.Zone} {
 		if value == "" {
 			return fmt.Errorf("%w: %s", errAddOptionsMissingField, name)
 		}
+	}
+
+	err := validateTalosAddresses(opts)
+	if err != nil {
+		return err
 	}
 
 	for name, value := range map[string]string{"region": opts.Region, "zone": opts.Zone} {
@@ -111,41 +168,57 @@ func validateAddOptions(opts AddOptions) error {
 	return nil
 }
 
+// validateTalosAddresses checks opts.TalosAddresses — see that field's own
+// doc — split out of validateAddOptions purely to keep its own cyclomatic
+// complexity down.
+func validateTalosAddresses(opts AddOptions) error {
+	if len(opts.TalosAddresses) == 0 || slices.Contains(opts.TalosAddresses, "") {
+		return fmt.Errorf("%w: talos-address", errAddOptionsMissingField)
+	}
+
+	if opts.ExistingInstanceName != "" && len(opts.TalosAddresses) != 1 {
+		return errExistingInstanceNeedsOneAddress
+	}
+
+	return ValidateInstanceCount(len(opts.TalosAddresses))
+}
+
 // addObjectName is the shared name every one of BuildAddObjects' four
 // objects gets — see that function's own doc.
 func addObjectName(opts AddOptions) string {
 	return opts.Region + "-" + opts.Zone
 }
 
-// BuildAddObjects builds (without creating) the four hub-side objects
-// zone-add fans out to — see issue #29's architecture: Zone, the seed
-// Instance, a replicas:1 InstancePool selecting it, and a TalosCluster
-// whose control plane references that pool. Zone/InstancePool/TalosCluster
-// all share one name, <region>-<zone> — this is what lets the Zone
-// controller find "its" TalosCluster by name alone (see controller.go's
-// mapTalosClusterToZone), and matches the naming convention Addon's own
-// resourceName already assumes (see pkg/domain/addon/resources.go). The seed
-// Instance instead gets instancedomain.NameFromAddress(opts.TalosAddress) —
-// the exact same name pkg/domain/instance.Add's own standalone registration
-// derives for that same address (see issue #81) — rather than a name of its
-// own scoped under <region>-<zone>, so the two ways of registering an
-// Instance always converge on one shared object identity for a given
-// address instead of each silently creating its own duplicate. This only
-// holds when opts.TalosAddress is already resolved — Add itself is what
-// runs it through instancedomain.ResolveAddress before ever calling this,
-// so BuildAddObjects itself stays a pure, synchronous helper with no DNS
+// BuildAddObjects builds (without creating) the hub-side objects zone-add
+// fans out to — see issue #29's architecture: Zone, one seed Instance per
+// opts.TalosAddresses entry, an InstancePool selecting them with replicas
+// equal to their count, and a TalosCluster whose control plane references
+// that pool. Zone/InstancePool/TalosCluster all share one name,
+// <region>-<zone> — this is what lets the Zone controller find "its"
+// TalosCluster by name alone (see controller.go's mapTalosClusterToZone),
+// and matches the naming convention Addon's own resourceName already
+// assumes (see pkg/domain/addon/resources.go). Each seed Instance instead
+// gets instancedomain.NameFromAddress(address) — the exact same name
+// pkg/domain/instance.Add's own standalone registration derives for that
+// same address (see issue #81) — rather than a name of its own scoped
+// under <region>-<zone>, so the two ways of registering an Instance always
+// converge on one shared object identity for a given address instead of
+// each silently creating its own duplicate. This only holds when
+// opts.TalosAddresses are already resolved — Add itself is what runs them
+// through instancedomain.ResolveAddress before ever calling this, so
+// BuildAddObjects itself stays a pure, synchronous helper with no DNS
 // lookup of its own; called directly (as this package's own tests do) it
-// stores opts.TalosAddress verbatim. It's still labeled
-// v1alpha2.LabelRegion/LabelZone so the InstancePool's selector matches it;
-// ensureSeedInstance's own doc covers what happens when that name already
-// belongs to an Instance created some other way.
-// All four are namespaced into v1alpha2.KontinuumSystemNamespace
+// stores each address verbatim. Every Instance is labeled
+// v1alpha2.LabelRegion/LabelZone so the InstancePool's selector matches
+// it; ensureSeedInstance's own doc covers what happens when that name
+// already belongs to an Instance created some other way.
+// All of them are namespaced into v1alpha2.KontinuumSystemNamespace
 // ("kontinuum-system") — the admin-driven, system-managed namespace issue
 // #63's architecture reserves for zone-join's own objects, as opposed to a
 // tenant's own namespace.
 func BuildAddObjects(
 	opts AddOptions,
-) (*v1alpha2.Zone, *v1alpha2.Instance, *v1alpha2.InstancePool, *v1alpha2.TalosCluster) {
+) (*v1alpha2.Zone, []*v1alpha2.Instance, *v1alpha2.InstancePool, *v1alpha2.TalosCluster) {
 	name := addObjectName(opts)
 	labels := map[string]string{v1alpha2.LabelRegion: opts.Region, v1alpha2.LabelZone: opts.Zone}
 
@@ -154,21 +227,29 @@ func BuildAddObjects(
 		Spec:       v1alpha2.ZoneSpec{Region: opts.Region, Zone: opts.Zone, Domain: opts.Domain},
 	}
 
-	instanceSpec := v1alpha2.InstanceSpec{Interfaces: []string{opts.TalosAddress}}
+	instances := make([]*v1alpha2.Instance, 0, len(opts.TalosAddresses))
 
-	instance := &v1alpha2.Instance{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      instancedomain.NameFromAddress(opts.TalosAddress),
-			Namespace: v1alpha2.KontinuumSystemNamespace, Labels: labels,
-		},
-		Spec: instanceSpec,
+	// Counted rather than converted from len(instances), so no int to
+	// int32 conversion is needed.
+	var replicas int32
+
+	for _, address := range opts.TalosAddresses {
+		replicas++
+
+		instances = append(instances, &v1alpha2.Instance{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      instancedomain.NameFromAddress(address),
+				Namespace: v1alpha2.KontinuumSystemNamespace, Labels: maps.Clone(labels),
+			},
+			Spec: v1alpha2.InstanceSpec{Interfaces: []string{address}},
+		})
 	}
 
 	pool := &v1alpha2.InstancePool{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec: v1alpha2.InstancePoolSpec{
 			Selector: metav1.LabelSelector{MatchLabels: labels},
-			Replicas: 1,
+			Replicas: replicas,
 		},
 	}
 
@@ -182,23 +263,65 @@ func BuildAddObjects(
 		},
 	}
 
-	return zoneObj, instance, pool, cluster
+	return zoneObj, instances, pool, cluster
 }
 
-// resolveTalosAddress resolves opts.TalosAddress via
-// instancedomain.ResolveAddress and returns opts with TalosAddress replaced
-// by the resolved IP, plus the hostname that was typed in (empty when
-// TalosAddress was already an IP literal) — split out of Add itself purely
-// to keep its own cyclomatic complexity down.
-func resolveTalosAddress(ctx context.Context, opts AddOptions) (AddOptions, string, error) {
-	resolvedAddress, hostname, err := instancedomain.ResolveAddress(ctx, opts.Resolver, opts.TalosAddress)
+// resolvedAddress is one TalosAddresses entry after resolution: ip is what
+// lands in spec.interfaces, hostname what was typed in when it wasn't
+// already an IP literal (empty otherwise).
+type resolvedAddress struct {
+	ip       string
+	hostname string
+}
+
+// ResolveTalosAddresses resolves every one of addresses via
+// instancedomain.ResolveAddress — all of them, before anything is
+// created, so one unresolvable address fails the whole zone up front — and
+// rejects two entries that resolve to the same IP with
+// ErrDuplicateInstanceAddress naming both. Exported so kontinuum up can
+// check addresses fleet-wide with exactly the resolution zone add uses.
+func ResolveTalosAddresses(
+	ctx context.Context, resolver instancedomain.Resolver, addresses []string,
+) ([]string, []string, error) {
+	resolved, err := resolveTalosAddresses(ctx, resolver, addresses)
 	if err != nil {
-		return opts, "", fmt.Errorf("failed to resolve talos address: %w", err)
+		return nil, nil, err
 	}
 
-	opts.TalosAddress = resolvedAddress
+	ips := make([]string, len(resolved))
+	hostnames := make([]string, len(resolved))
 
-	return opts, hostname, nil
+	for index, entry := range resolved {
+		ips[index], hostnames[index] = entry.ip, entry.hostname
+	}
+
+	return ips, hostnames, nil
+}
+
+// resolveTalosAddresses is ResolveTalosAddresses' own implementation.
+func resolveTalosAddresses(
+	ctx context.Context, resolver instancedomain.Resolver, addresses []string,
+) ([]resolvedAddress, error) {
+	resolved := make([]resolvedAddress, 0, len(addresses))
+	seen := map[string]string{}
+
+	for _, address := range addresses {
+		resolvedIP, hostname, err := instancedomain.ResolveAddress(ctx, resolver, address)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve talos address: %w", err)
+		}
+
+		if first, duplicate := seen[resolvedIP]; duplicate {
+			return nil, fmt.Errorf("%w: %q and %q both resolve to %s",
+				ErrDuplicateInstanceAddress, first, address, resolvedIP)
+		}
+
+		seen[resolvedIP] = address
+
+		resolved = append(resolved, resolvedAddress{ip: resolvedIP, hostname: hostname})
+	}
+
+	return resolved, nil
 }
 
 // annotateHostname sets instancedomain.AnnotationHostname on inst when
@@ -217,21 +340,28 @@ func annotateHostname(inst *v1alpha2.Instance, hostname string) {
 	inst.Annotations[instancedomain.AnnotationHostname] = hostname
 }
 
-// Add validates opts, infers opts.Domain when left empty, resolves
-// opts.TalosAddress to an IP if it was typed in as a hostname, and creates
-// all four of BuildAddObjects' objects on hubClient, tolerating
+// Add validates opts, infers opts.Domain when left empty, resolves every
+// one of opts.TalosAddresses to an IP if typed in as a hostname — all of
+// them up front, so one unresolvable or duplicate address creates nothing
+// at all — and creates BuildAddObjects' objects on hubClient, tolerating
 // AlreadyExists on each — safe to re-run zone-add against a zone that's
-// already being added or already exists. Ownership is a strict chain, not
-// four siblings under Zone: Zone owns TalosCluster, TalosCluster owns
-// InstancePool, and Instance is owned by nobody — see
-// taloscluster.TalosClusterFinalizer's own doc for why. zoneObj (and, in
-// turn, cluster) is created first and re-fetched if it already existed, so
-// its UID is available to set as the next link's own controller owner
-// reference. libkapi.WithGarbageCollector is enabled (see pkg/cli/serve.go's
-// own doc), so this ownership is what actually drives cascade deletion —
-// not just inert metadata. Returns the created (or already-existing) Zone.
+// already being added or already exists: existing seed Instances are
+// adopted, not duplicated. Ownership is a strict chain, not siblings under
+// Zone: Zone owns TalosCluster, TalosCluster owns InstancePool, and the
+// Instances are owned by nobody — see taloscluster.TalosClusterFinalizer's
+// own doc for why. zoneObj (and, in turn, cluster) is created first and
+// re-fetched if it already existed, so its UID is available to set as the
+// next link's own controller owner reference. libkapi.WithGarbageCollector
+// is enabled (see pkg/cli/serve.go's own doc), so this ownership is what
+// actually drives cascade deletion — not just inert metadata. Returns the
+// created (or already-existing) Zone.
 func Add(ctx context.Context, hubClient client.Client, opts AddOptions) (*v1alpha2.Zone, error) {
 	err := validateAddOptions(opts)
+	if err != nil {
+		return nil, err
+	}
+
+	resolved, err := resolveTalosAddresses(ctx, opts.Resolver, opts.TalosAddresses)
 	if err != nil {
 		return nil, err
 	}
@@ -243,22 +373,39 @@ func Add(ctx context.Context, hubClient client.Client, opts AddOptions) (*v1alph
 		}
 	}
 
-	opts, hostname, err := resolveTalosAddress(ctx, opts)
+	opts.TalosAddresses = make([]string, len(resolved))
+	for index, entry := range resolved {
+		opts.TalosAddresses[index] = entry.ip
+	}
+
+	zoneObj, instances, pool, cluster := BuildAddObjects(opts)
+	for index, instance := range instances {
+		annotateHostname(instance, resolved[index].hostname)
+	}
+
+	err = createAddObjects(ctx, hubClient, opts, zoneObj, instances, pool, cluster)
 	if err != nil {
 		return nil, err
 	}
 
-	zoneObj, instance, pool, cluster := BuildAddObjects(opts)
-	annotateHostname(instance, hostname)
+	return zoneObj, nil
+}
 
-	err = ensureNamespace(ctx, hubClient, v1alpha2.KontinuumSystemNamespace)
+// createAddObjects creates BuildAddObjects' objects in ownership order —
+// see Add's own doc — split out of Add purely to keep its own cyclomatic
+// complexity down.
+func createAddObjects(
+	ctx context.Context, hubClient client.Client, opts AddOptions, zoneObj *v1alpha2.Zone,
+	instances []*v1alpha2.Instance, pool *v1alpha2.InstancePool, cluster *v1alpha2.TalosCluster,
+) error {
+	err := ensureNamespace(ctx, hubClient, v1alpha2.KontinuumSystemNamespace)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	err = ensureObject(ctx, hubClient, zoneObj)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	// Zone owns TalosCluster — see Add's own doc for the full chain.
@@ -267,32 +414,34 @@ func Add(ctx context.Context, hubClient client.Client, opts AddOptions) (*v1alph
 	// InstancePool's own owner next.
 	err = createOwnedDependents(ctx, hubClient, zoneObj, cluster)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	// TalosCluster owns InstancePool.
 	err = createOwnedDependents(ctx, hubClient, cluster, pool)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	// Instance is owned by nobody — see TeardownSpec's own doc for why its
-	// fate on cluster teardown is an explicit opt-in, not inferred from
-	// ownership. See ensureSeedInstance's own doc for the
+	// Instances are owned by nobody — see TeardownSpec's own doc for why
+	// their fate on cluster teardown is an explicit opt-in, not inferred
+	// from ownership. See ensureSeedInstance's own doc for the
 	// create-new-vs-adopt-existing branch (opts.ExistingInstanceName).
-	err = ensureSeedInstance(ctx, hubClient, opts, instance)
-	if err != nil {
-		return nil, err
+	for _, instance := range instances {
+		err = ensureSeedInstance(ctx, hubClient, opts, instance)
+		if err != nil {
+			return err
+		}
 	}
 
-	return zoneObj, nil
+	return nil
 }
 
 // ensureSeedInstance ensures newInstance's own identity exists and carries
 // this zone's own region/zone labels — either explicitly, via
 // opts.ExistingInstanceName naming an already-registered Instance to adopt
 // (see adoptInstance's own doc) instead of creating a second one, or
-// implicitly: newInstance.Name is now instancedomain.NameFromAddress(opts.TalosAddress)
+// implicitly: newInstance.Name is instancedomain.NameFromAddress(address)
 // (see BuildAddObjects' own doc), the exact same name a standalone "Add
 // instance" registration for that same address would also use, so a freshly
 // typed address that happens to already be registered that way — or left

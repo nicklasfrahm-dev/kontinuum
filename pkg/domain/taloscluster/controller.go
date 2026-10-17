@@ -334,6 +334,21 @@ func (r *Reconciler) reconcileControlPlane(
 			"no discovered control-plane instances claimed yet")
 	}
 
+	// Every replica must be claimed and discovered before any of them is
+	// configured or etcd is bootstrapped: bootstrapping a three-replica
+	// pool on its first member would turn ControlPlaneReady true on a
+	// single node, after which the rest would never be configured at all,
+	// since reconcileControlPlane only ever runs until it first succeeds.
+	replicas, err := controlPlaneReplicas(ctx, r.Client, cluster)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if len(members) < replicas {
+		return r.setControlPlaneCondition(ctx, cluster, metav1.ConditionFalse, reasonWaitingForInstances,
+			fmt.Sprintf("%d of %d control-plane instances claimed and discovered", len(members), replicas))
+	}
+
 	controlPlaneAddr := dialAddress(members[0])
 
 	input, talosCfg, err := generateConfigs(bundle, cluster, controlPlaneAddr)
