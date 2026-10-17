@@ -220,7 +220,7 @@ func testCluster() *v1alpha2.TalosCluster {
 		ObjectMeta: metav1.ObjectMeta{Name: testClusterName},
 		Spec: v1alpha2.TalosClusterSpec{
 			ControlPlane: v1alpha2.TalosClusterMemberSpec{
-				PoolRef: v1alpha2.InstancePoolReference{Name: "cp-pool"},
+				PoolRef: v1alpha2.InstancePoolReference{Name: testControlPlanePool},
 			},
 			Workers: []v1alpha2.TalosClusterWorkerSpec{
 				{Name: "default", PoolRef: v1alpha2.InstancePoolReference{Name: "worker-pool"}},
