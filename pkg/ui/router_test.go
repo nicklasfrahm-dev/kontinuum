@@ -3245,6 +3245,43 @@ func TestHandleZoneDetailShowsNotProvisionedAndNotJoinedWhenMissing(t *testing.T
 	assert.Contains(t, string(body), "Not provisioned yet")
 	assert.Contains(t, string(body), "Not yet joined")
 	assert.Contains(t, string(body), "No conditions reported yet.")
+	assert.Contains(t, string(body), "Not installed yet", "a zone with no recorded storage mode")
+}
+
+func TestHandleZoneDetailShowsStorageMode(t *testing.T) {
+	t.Parallel()
+
+	factory := func(context.Context) (ui.NamespaceLister, error) { return stubNamespaceLister{}, nil }
+	kontinuumFactory := func(context.Context) (ui.KontinuumClient, error) { return stubKontinuumLister{}, nil }
+
+	zoneObj := &v1alpha2.Zone{
+		ObjectMeta: metav1.ObjectMeta{Name: testTalosClusterName, Namespace: v1alpha2.KontinuumSystemNamespace},
+		Spec:       v1alpha2.ZoneSpec{Region: "eu", Zone: testZoneValue, Domain: testExampleDomain},
+		Status:     v1alpha2.ZoneStatus{StorageMode: "Direct"},
+	}
+
+	zoneClient := newTestZoneClient(t, zoneObj)
+	zonesFactory := func(context.Context) (client.Client, error) { return zoneClient, nil }
+
+	router := ui.NewRouter(factory, kontinuumFactory, zonesFactory, "test-version", config.Config{}, false, nil)
+
+	mux := http.NewServeMux()
+	router.RegisterRoutes(mux, nil, nil)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, newTestRequest(t, "/app/kontinuum.sh/v1alpha2/namespaces/kontinuum-system/zones/eu-eu-1a"))
+
+	resp := recorder.Result()
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "Storage mode")
+	assert.Contains(t, string(body), ">Direct<")
+	assert.NotContains(t, string(body), "Not installed yet")
 }
 
 // TestHandleZoneDetailRedirectsToParentForUnknownZone: Zone has no
