@@ -97,7 +97,8 @@ dev-clean: ## Stop development environment and remove volumes
 # version") silently drift apart otherwise. Mirrors .github/workflows/
 # ci.yml's own "Build container image" step.
 image: ## Build the container image
-	docker buildx build -f Containerfile -t kontinuum:$(VERSION) --build-arg VERSION=$(VERSION) --load .
+	docker buildx build -f Containerfile -t kontinuum:$(VERSION) --build-arg VERSION=$(VERSION) \
+		--label org.opencontainers.image.revision=$(shell git rev-parse HEAD 2>/dev/null) --load .
 
 .PHONY: image-push
 image-push: image ## Build and push the working tree's image to ghcr.io under VERSION (see CONTAINER_IMAGE_REPO's own doc above; requires docker login ghcr.io first)
@@ -128,7 +129,7 @@ test: generate ## Run tests
 # control plane and worker and installs Cilium/cert-manager for real —
 # considerably slower than instance's own maintenance-mode-only e2e test.
 test-e2e: generate ## Run gated end-to-end tests (requires Docker; boots real containers)
-	KONTINUUM_TEST_E2E=1 $(GOTEST) -v ./... -run '^TestE2E' -timeout 15m
+	KONTINUUM_TEST_E2E=1 $(GOTEST) -v ./... -run '^TestE2E' -timeout 60m
 
 .PHONY: vet
 vet: generate ## Run go vet

@@ -29,6 +29,8 @@ type ObservedZone struct {
 	Zone   string
 	// IPs are the zone's seed Instances' addresses.
 	IPs []string
+	// Ready is whether the zone reports Ready.
+	Ready bool
 }
 
 // Observed is what kontinuum up found in the fleet's shared storage.
@@ -50,6 +52,11 @@ type Plan struct {
 	// Unmanaged are the zones in the fleet but not in the file that up
 	// leaves alone, without --prune.
 	Unmanaged []string
+	// Unready are declared zones already in the fleet but not Ready yet —
+	// e.g. created by an earlier, interrupted run. up runs its controllers
+	// and waits for them again: in a new hub-less fleet nothing else may
+	// be able to reconcile them yet.
+	Unready []string
 	// Drift describes every declared difference up doesn't apply: changed
 	// zone instances, and changed fleet-wide settings.
 	Drift []string
@@ -85,6 +92,10 @@ func NewPlan(desired []DesiredZone, cfg *config.Config, version string, observed
 			plan.Create = append(plan.Create, zone)
 
 			continue
+		}
+
+		if !current.Ready {
+			plan.Unready = append(plan.Unready, zone.Name())
 		}
 
 		plan.Drift = append(plan.Drift, instanceDrift(zone, current)...)
@@ -123,14 +134,15 @@ func (p Plan) Upgrade(version string) bool {
 }
 
 // Pending reports whether anything is to be done or reported: zones to
-// create or prune, unmanaged zones, or drift.
+// create, prune or wait for, unmanaged zones, or drift.
 func (p Plan) Pending() bool {
-	return len(p.Create) > 0 || len(p.Prune) > 0 || len(p.Unmanaged) > 0 || len(p.Drift) > 0
+	return p.Changes() || len(p.Unmanaged) > 0 || len(p.Drift) > 0
 }
 
-// Changes reports whether up has anything to apply.
+// Changes reports whether up has anything to apply or converge: zones to
+// create or prune, or declared zones not Ready yet.
 func (p Plan) Changes() bool {
-	return len(p.Create) > 0 || len(p.Prune) > 0
+	return len(p.Create) > 0 || len(p.Prune) > 0 || len(p.Unready) > 0
 }
 
 // Print writes the plan for a human to out.
@@ -147,6 +159,10 @@ func (p Plan) Print(out io.Writer) {
 
 	for _, name := range p.Prune {
 		_, _ = fmt.Fprintf(out, "- remove zone %s\n", name)
+	}
+
+	for _, name := range p.Unready {
+		_, _ = fmt.Fprintf(out, "~ zone %s isn't Ready yet: resuming\n", name)
 	}
 
 	for _, name := range p.Unmanaged {
