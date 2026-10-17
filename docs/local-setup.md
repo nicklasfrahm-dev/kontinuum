@@ -23,7 +23,7 @@ This builds the `kontinuum` binary and starts it with dev-friendly logging (`inf
 ## Connect with kubectl
 
 ```sh
-export KUBECONFIG=kontinuum.yaml
+export KUBECONFIG=kubeconfig.yaml
 kubectl get namespaces
 kubectl create namespace demo
 ```
@@ -52,7 +52,7 @@ For local development, copy `.env.example` to `.env` and adjust as needed — `m
 Once it's up, add the zone the same way you would against real hardware — just point `--talos-address` at the `talos` service's own Compose DNS name instead of a real machine's IP:
 
 ```sh
-export KUBECONFIG=kontinuum.yaml
+export KUBECONFIG=kubeconfig.yaml
 kontinuum zone add --region local --zone a --talos-address talos
 ```
 
