@@ -22,7 +22,7 @@ deletes, every instance it still has claimed — see
 ## Try it
 
 ```sh
-export KUBECONFIG=kontinuum.yaml
+export KUBECONFIG=kubeconfig.yaml
 kubectl delete zone eu-eu-1a
 ```
 
