@@ -114,9 +114,8 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 	reconciler := &TTLReconciler{
 		Client:         mgr.GetClient(),
 		StaleThreshold: c.Config.StaleThreshold,
-		Locker: zonelease.NewLocker(
-			mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
-		Logger: c.Config.Logger,
+		Locker:         zonelease.NewLockerFor(mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease),
+		Logger:         c.Config.Logger,
 	}
 
 	heartbeat := &Heartbeat{

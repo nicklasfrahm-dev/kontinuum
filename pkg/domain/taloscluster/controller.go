@@ -189,9 +189,8 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		HealthCheckInterval: c.Config.HealthCheckInterval,
 		TeardownTimeout:     c.Config.TeardownTimeout,
 		DNS:                 c.Config.DNS,
-		Locker: zonelease.NewLocker(
-			mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
-		Logger: c.Config.Logger,
+		Locker:              zonelease.NewLockerFor(mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease),
+		Logger:              c.Config.Logger,
 	}
 
 	err := ctrl.NewControllerManagedBy(mgr).For(&v1alpha2.TalosCluster{}).Complete(reconciler)

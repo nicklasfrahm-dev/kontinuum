@@ -374,9 +374,9 @@ func buildServer(
 		zoneClientFactory(cfg.Server.Addr, scheme),
 		version, cfg.Redact(), oidcHandler != nil, invalidateSession)
 
-	zoneLease := zonelease.Identity{
-		HolderIdentity: registry.InstanceName(os.Hostname()),
-		SelfZoneKey:    zonelease.Key(cfg.Server.Region, cfg.Server.Zone),
+	zoneLease, err := buildZoneLease(cfg, logger)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 
 	registryOpts, registryController, err := registryOptions(cfg, logger, scheme, zoneLease)
@@ -443,7 +443,7 @@ func buildServer(
 		libkapi.WithPostStartHook(ensureCRD),
 	}, authOpts, registryOpts, instanceOptions(logger, zoneLease), instancePoolOptions(logger, zoneLease),
 		talosClusterOptions(cfg, logger, zoneLease), addonOptions(logger, zoneLease), zoneOptions(cfg, logger, zoneLease),
-		adminRBACOptions(cfg, logger, zoneLease))
+		adminRBACOptions(cfg, logger, zoneLease), LonePeerOptions(cfg, logger, zoneLease))
 
 	// Storage is resolved against a background context so the backend
 	// is only torn down by Server.Shutdown, not by the signal context
@@ -743,6 +743,64 @@ func zoneOptions(cfg *config.Config, logger *slog.Logger, zoneLease zonelease.Id
 	})
 
 	return []libkapi.Option{libkapi.WithController(controller)}
+}
+
+// buildZoneLease builds this process's own zonelease.Identity, resolving
+// the storage mode to decide whether the fleet is hub-less — see
+// zonelease.Locker.HubLess's own doc.
+func buildZoneLease(cfg *config.Config, logger *slog.Logger) (zonelease.Identity, error) {
+	storageMode, err := resolveStorageMode(cfg)
+	if err != nil {
+		return zonelease.Identity{}, err
+	}
+
+	logger.Info("Resolved storage mode", "mode", storageMode, "hubLess", storageMode.IsHubLess())
+
+	return zonelease.Identity{
+		HolderIdentity: registry.InstanceName(os.Hostname()),
+		SelfZoneKey:    zonelease.Key(cfg.Server.Region, cfg.Server.Zone),
+		HubLess:        storageMode.IsHubLess(),
+	}, nil
+}
+
+// storageModeResolveTimeout bounds the DNS lookup resolveStorageMode may
+// make for the storage host.
+const storageModeResolveTimeout = 10 * time.Second
+
+// resolveStorageMode resolves the fleet's StorageMode from cfg's own
+// storage connection string and KONTINUUM_SERVER_ZONE_STORAGE_MODE — see
+// config.ResolveStorageMode. It runs against the configured
+// cfg.Server.Storage, before resolveZoneStorage rewrites it into a local
+// socket, so a zone peer handed an etcdproxy relay DSN resolves to
+// StorageModeProxy and one handed the shared database's own DSN resolves to
+// the same mode as the process that onboarded it.
+func resolveStorageMode(cfg *config.Config) (config.StorageMode, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), storageModeResolveTimeout)
+	defer cancel()
+
+	mode, err := config.ResolveStorageMode(ctx, nil, cfg.Server.Storage, config.StorageMode(cfg.Server.ZoneStorageMode))
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve storage mode: %w", err)
+	}
+
+	return mode, nil
+}
+
+// LonePeerOptions wires zone.LonePeerCheck onto a hub-less zone peer, so a
+// single-zone hub-less deployment fails at startup instead of presenting as
+// a zone that silently never converges — see zone.ErrLoneHubLessPeer. A hub
+// (empty SelfZoneKey) and every proxy-mode process skip it: there, a hub is
+// what reconciles every zone.
+func LonePeerOptions(cfg *config.Config, logger *slog.Logger, zoneLease zonelease.Identity) []libkapi.Option {
+	if !zoneLease.HubLess || zoneLease.SelfZoneKey == zonelease.GlobalKey {
+		return nil
+	}
+
+	return []libkapi.Option{libkapi.WithController(&zone.LonePeerCheck{
+		Region: cfg.Server.Region,
+		Zone:   cfg.Server.Zone,
+		Logger: logger.With("component", "lonepeer"),
+	})}
 }
 
 // adminRBACOptions builds the libkapi options that wire the admin-group

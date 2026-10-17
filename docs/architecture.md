@@ -28,6 +28,19 @@ Each controller lives in its own package and owns one CRD's reconcile loop, per 
 
 See [Add zone](workflows/zone-add.md) for the full instance → pool → cluster → addon bootstrap flow (including a flow chart) and how a zone's own kontinuum-server gets installed and registers back into the hub, and [Remove zone](workflows/zone-remove.md) for tearing that back down.
 
+## Zone leases and hub-less fleets (`pkg/domain/zonelease`)
+
+Every kontinuum-server process in a fleet runs the same controllers against the same shared storage, so each zone-scoped write is gated on a per-zone `Lease` (`zonelock-<region>-<zone>`): whichever process holds it reconciles that zone, and the rest back off. A zone's own process never takes its own zone's lease — a zone must not reconcile itself.
+
+Fleet-wide state that belongs to no single zone, such as the registry's stale-`Kontinuum` sweep and the admin-group `ClusterRoleBinding`s, uses one more lease, `zonelock-global`. Who may contend for it depends on the [storage mode](reference.md#storage-modes):
+
+- **`Proxy`** needs a hub, because every zone's storage DSN is a relay back to the hub's own endpoint. Only the hub contends for the global lease.
+- **`Direct` and `NATS`** are hub-less: every process holds an identical storage DSN, so any of them can onboard a joining zone. Every peer, zone or hub, contends for the global lease, and the lease serializes them exactly as it does for zone keys. A hub may still run in these modes; it is simply one more peer.
+
+Hub-less follows from the storage mode and nothing else. It is never inferred from whether a hub happens to be registered, so a hub restart can't switch the fleet's behaviour.
+
+A hub-less zone peer cannot reconcile itself, so a fleet whose only zone is the peer itself, with no hub, would never converge. Such a peer refuses to start, with an error saying so. The very first peer of a new hub-less fleet is the exception: it is deployed out-of-band against the shared storage, with its own region and zone set, before any `Zone` object exists. Zone B is then reconciled by A, zone C by A or B, and A's own `Zone` object is picked up once B is running.
+
 ## Web UI (`pkg/ui`)
 
 Server-rendered HTML (Go `html/template`) styled with Tailwind CSS and progressively enhanced with [htmx](https://htmx.org/) — no separate frontend build or JavaScript framework. `pkg/ui/assets.go` vendors Tailwind, htmx, PrismJS, and the JetBrains Mono webfont at `go generate` time (`cmd/vendor-web-assets`) so the shipped container image has no CDN runtime dependency. Pages: topology, instance detail, registry, IAM (OIDC admin group role bindings), connect (kubectl access, with API keys/federated identity credentials planned).
