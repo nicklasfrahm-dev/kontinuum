@@ -48,6 +48,16 @@ type ZoneStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions" patchMergeKey:"type" patchStrategy:"merge"`
+	// StorageMode is how this zone's own kontinuum-server reaches the
+	// fleet's shared storage — Proxy (an etcdproxy relay back to the hub),
+	// Direct (the shared database's own connection string) or NATS — as
+	// resolved when the zone was first installed. The mode is fixed from
+	// then on: a fleet whose resolved mode no longer matches this field is
+	// refused rather than having this zone's kontinuum-env rewritten. Empty
+	// until the first install.
+	// +optional
+	// +kubebuilder:validation:Enum=Proxy;Direct;NATS
+	StorageMode string `json:"storageMode,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -64,6 +74,7 @@ type ZoneStatus struct {
 //nolint:lll
 // +kubebuilder:printcolumn:name="Installed",type="string",JSONPath=".status.conditions[?(@.type==\"Installed\")].status"
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.conditions[?(@.type==\"Installed\")].reason"
+// +kubebuilder:printcolumn:name="Storage",type="string",JSONPath=".status.storageMode",priority=1
 
 // Zone represents a single availability zone — a pure identity/DNS anchor
 // mapping 1:1 to exactly one TalosCluster (see issue #24's architecture

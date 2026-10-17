@@ -374,7 +374,7 @@ func buildServer(
 		zoneClientFactory(cfg.Server.Addr, scheme),
 		version, cfg.Redact(), oidcHandler != nil, invalidateSession)
 
-	zoneLease, err := buildZoneLease(cfg, logger)
+	zoneLease, storageMode, err := buildZoneLease(cfg, logger)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -441,9 +441,7 @@ func buildServer(
 		// v1alpha2.KontinuumSystemNamespace's own doc).
 		libkapi.WithSystemNamespace(v1alpha2.KontinuumSystemNamespace),
 		libkapi.WithPostStartHook(ensureCRD),
-	}, authOpts, registryOpts, instanceOptions(logger, zoneLease), instancePoolOptions(logger, zoneLease),
-		talosClusterOptions(cfg, logger, zoneLease), addonOptions(logger, zoneLease), zoneOptions(cfg, logger, zoneLease),
-		adminRBACOptions(cfg, logger, zoneLease), releaseZoneLeaseOptions(logger, zoneLease))
+	}, authOpts, registryOpts, domainControllerOptions(cfg, logger, zoneLease, storageMode))
 
 	// Storage is resolved against a background context so the backend
 	// is only torn down by Server.Shutdown, not by the signal context
@@ -734,24 +732,40 @@ const zoneImageRepo = "ghcr.io/nicklasfrahm-dev/kontinuum"
 // install reconciler (see pkg/domain/zone) onto the Server. No
 // WithPostStartHook is needed — zones.kontinuum.sh's CRD is already
 // ensured by instanceOptions' own ensureCRDs call.
-func zoneOptions(cfg *config.Config, logger *slog.Logger, zoneLease zonelease.Identity) []libkapi.Option {
+func zoneOptions(
+	cfg *config.Config, logger *slog.Logger, zoneLease zonelease.Identity, storageMode config.StorageMode,
+) []libkapi.Option {
 	controller := zone.NewController(zone.Config{
-		Logger:    logger.With("component", "zone"),
-		HubConfig: cfg,
-		ImageRepo: zoneImageRepo,
-		ZoneLease: zoneLease,
+		Logger:      logger.With("component", "zone"),
+		HubConfig:   cfg,
+		ImageRepo:   zoneImageRepo,
+		StorageMode: storageMode,
+		ZoneLease:   zoneLease,
 	})
 
 	return []libkapi.Option{libkapi.WithController(controller)}
 }
 
+// domainControllerOptions wires every domain controller besides the
+// registry's own (see registryOptions) onto the Server.
+func domainControllerOptions(
+	cfg *config.Config, logger *slog.Logger, zoneLease zonelease.Identity, storageMode config.StorageMode,
+) []libkapi.Option {
+	return slices.Concat(
+		instanceOptions(logger, zoneLease), instancePoolOptions(logger, zoneLease),
+		talosClusterOptions(cfg, logger, zoneLease), addonOptions(logger, zoneLease),
+		zoneOptions(cfg, logger, zoneLease, storageMode),
+		adminRBACOptions(cfg, logger, zoneLease), releaseZoneLeaseOptions(logger, zoneLease))
+}
+
 // buildZoneLease builds this process's own zonelease.Identity, resolving
 // the storage mode to decide whether the fleet is hub-less — see
-// zonelease.Locker.HubLess's own doc.
-func buildZoneLease(cfg *config.Config, logger *slog.Logger) (zonelease.Identity, error) {
+// zonelease.Locker.HubLess's own doc. The resolved mode is returned too,
+// for the zone controller (see zone.Config.StorageMode).
+func buildZoneLease(cfg *config.Config, logger *slog.Logger) (zonelease.Identity, config.StorageMode, error) {
 	storageMode, err := resolveStorageMode(cfg)
 	if err != nil {
-		return zonelease.Identity{}, err
+		return zonelease.Identity{}, "", err
 	}
 
 	logger.Info("Resolved storage mode", "mode", storageMode, "hubLess", storageMode.IsHubLess())
@@ -760,7 +774,7 @@ func buildZoneLease(cfg *config.Config, logger *slog.Logger) (zonelease.Identity
 		HolderIdentity: registry.InstanceName(os.Hostname()),
 		SelfZoneKey:    zonelease.Key(cfg.Server.Region, cfg.Server.Zone),
 		HubLess:        storageMode.IsHubLess(),
-	}, nil
+	}, storageMode, nil
 }
 
 // storageModeResolveTimeout bounds the DNS lookup resolveStorageMode may

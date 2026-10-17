@@ -13,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
+	"github.com/nicklasfrahm/kontinuum/pkg/config"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/etcdproxy"
 )
 
@@ -307,29 +308,43 @@ func (r *Reconciler) persistHubPublicSecret(
 var errGRPCEndpointNotConfigured = errors.New("this hub has no KONTINUUM_SERVER_GRPC_ENDPOINT configured")
 
 // zoneStorageDSN builds the KONTINUUM_SERVER_STORAGE value zoneObj's own
-// kontinuum-server should run with: an etcdproxy.BuildRelayDSN pointing at
-// this hub's own etcd gRPC proxy (r.HubConfig.Server.GRPC.Endpoint — see
+// kontinuum-server should run with in mode.
+//
+// In Proxy mode it is an etcdproxy.BuildRelayDSN pointing at this hub's
+// own etcd gRPC proxy (r.HubConfig.Server.GRPC.Endpoint — see
 // KontinuumGRPCConfigStatus's own doc for why this is read off the hub's
 // own config rather than inferred from a registered Kontinuum the way
-// storage/domain used to be). Carries no credential of its own — see
+// storage/domain used to be). It carries no credential of its own — see
 // ensureEtcdIdentity, which must have already run in the same Reconcile
 // pass to deliver zoneObj's own identity Secret before this DSN is any use
-// to it — so, unlike its own former self, this needs no Kubernetes API
-// call at all.
+// to it. Instead of every joined zone getting a copy of the hub's own raw
+// database connection string (which only the control plane may be able to
+// reach at all — see pkg/domain/etcdproxy's own doc), a zone's own
+// kontinuum-server only ever talks to the hub's own already-public
+// endpoint, authenticated with a credential scoped to that one zone.
 //
-// This is what actually closes the loop this package exists for: instead
-// of every joined zone getting a copy of the hub's own raw database
-// connection string (which only the control plane may be able to reach at
-// all — see pkg/domain/etcdproxy's own doc), a zone's own kontinuum-server
-// only ever talks to the hub's own already-public endpoint, authenticated
-// with a credential scoped to that one zone.
-func (r *Reconciler) zoneStorageDSN(zoneObj *v1alpha2.Zone) (string, error) {
-	endpoint := r.HubConfig.Server.GRPC.Endpoint
-	if endpoint == "" {
-		return "", errGRPCEndpointNotConfigured
-	}
+// In Direct mode the database is reachable from every zone, so the zone is
+// handed r.HubConfig.Server.Storage itself — credential included, which is
+// why Storage is tagged `secret:"true"` and this lands in the zone's
+// kontinuum-env Secret, never its ConfigMap. No gRPC endpoint is needed.
+//
+// NATS mode isn't supported by the zone controller yet.
+func (r *Reconciler) zoneStorageDSN(zoneObj *v1alpha2.Zone, mode config.StorageMode) (string, error) {
+	switch mode {
+	case config.StorageModeDirect:
+		return r.HubConfig.Server.Storage, nil
+	case config.StorageModeProxy:
+		endpoint := r.HubConfig.Server.GRPC.Endpoint
+		if endpoint == "" {
+			return "", errGRPCEndpointNotConfigured
+		}
 
-	return etcdproxy.BuildRelayDSN(zoneObj.Name, endpoint), nil
+		return etcdproxy.BuildRelayDSN(zoneObj.Name, endpoint), nil
+	case config.StorageModeNATS, config.StorageModeAuto:
+		return "", fmt.Errorf("%w: %s", errStorageModeNotSupported, mode)
+	default:
+		return "", fmt.Errorf("%w: %s", errStorageModeNotSupported, mode)
+	}
 }
 
 // minDuration returns whichever of a/b is smaller.
