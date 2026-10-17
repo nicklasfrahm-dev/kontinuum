@@ -72,17 +72,20 @@ func fakeClientWithoutV1alpha2Scheme(t *testing.T) client.Client {
 
 func testAddOptions() zone.AddOptions {
 	return zone.AddOptions{
-		Region:       testRegion,
-		Zone:         testZone,
-		Domain:       testDomain,
-		TalosAddress: testTalosAddress,
+		Region:         testRegion,
+		Zone:           testZone,
+		Domain:         testDomain,
+		TalosAddresses: []string{testTalosAddress},
 	}
 }
 
 func TestBuildAddObjectsSharesNameAcrossZoneInstancePoolAndTalosCluster(t *testing.T) {
 	t.Parallel()
 
-	zoneObj, instance, pool, cluster := zone.BuildAddObjects(testAddOptions())
+	zoneObj, instances, pool, cluster := zone.BuildAddObjects(testAddOptions())
+	require.Len(t, instances, 1)
+
+	instance := instances[0]
 
 	assert.Equal(t, testZoneName, zoneObj.Name)
 	assert.Equal(t, testZoneName, pool.Name)
@@ -144,20 +147,21 @@ func TestBuildAddObjectsInstanceNameHashesTalosAddress(t *testing.T) {
 
 	opts := testAddOptions()
 
-	firstZone, firstInstance, firstPool, firstCluster := zone.BuildAddObjects(opts)
-	assert.Equal(t, instancedomain.NameFromAddress(opts.TalosAddress), firstInstance.Name)
+	firstZone, firstInstances, firstPool, firstCluster := zone.BuildAddObjects(opts)
+	firstInstance := firstInstances[0]
+	assert.Equal(t, instancedomain.NameFromAddress(opts.TalosAddresses[0]), firstInstance.Name)
 
-	secondZone, secondInstance, secondPool, secondCluster := zone.BuildAddObjects(opts)
-	assert.Equal(t, firstInstance.Name, secondInstance.Name)
+	secondZone, secondInstances, secondPool, secondCluster := zone.BuildAddObjects(opts)
+	assert.Equal(t, firstInstance.Name, secondInstances[0].Name)
 	assert.Equal(t, firstZone.Name, secondZone.Name)
 	assert.Equal(t, firstPool.Name, secondPool.Name)
 	assert.Equal(t, firstCluster.Name, secondCluster.Name)
 
-	opts.TalosAddress = "10.0.0.6"
-	thirdZone, thirdInstance, thirdPool, thirdCluster := zone.BuildAddObjects(opts)
-	assert.NotEqual(t, firstInstance.Name, thirdInstance.Name,
+	opts.TalosAddresses = []string{"10.0.0.6"}
+	thirdZone, thirdInstances, thirdPool, thirdCluster := zone.BuildAddObjects(opts)
+	assert.NotEqual(t, firstInstance.Name, thirdInstances[0].Name,
 		"a different --talos-address must get a new Instance identity")
-	assert.Equal(t, instancedomain.NameFromAddress(opts.TalosAddress), thirdInstance.Name)
+	assert.Equal(t, instancedomain.NameFromAddress(opts.TalosAddresses[0]), thirdInstances[0].Name)
 	assert.Equal(t, firstZone.Name, thirdZone.Name, "Zone/InstancePool/TalosCluster names don't depend on the spec hash")
 	assert.Equal(t, firstPool.Name, thirdPool.Name)
 	assert.Equal(t, firstCluster.Name, thirdCluster.Name)
@@ -244,7 +248,7 @@ func TestAddRejectsMissingRequiredFields(t *testing.T) {
 	t.Parallel()
 
 	opts := testAddOptions()
-	opts.TalosAddress = ""
+	opts.TalosAddresses = nil
 
 	_, err := zone.Add(t.Context(), newHubFakeClient(t), opts)
 	require.Error(t, err)
@@ -284,7 +288,7 @@ func TestAddResolvesTalosAddressHostnameToIP(t *testing.T) {
 	hubClient := newHubFakeClient(t)
 
 	opts := testAddOptions()
-	opts.TalosAddress = testTalosHostname
+	opts.TalosAddresses = []string{testTalosHostname}
 	opts.Resolver = stubResolver{addrs: []string{testTalosAddress}}
 
 	_, err := zone.Add(t.Context(), hubClient, opts)
@@ -315,7 +319,7 @@ func TestAddByTalosHostnameMatchesAddByResolvedIP(t *testing.T) {
 	require.NoError(t, hubClient.Create(t.Context(), existing))
 
 	opts := testAddOptions()
-	opts.TalosAddress = testTalosHostname
+	opts.TalosAddresses = []string{testTalosHostname}
 	opts.Resolver = stubResolver{addrs: []string{testTalosAddress}}
 
 	_, err := zone.Add(t.Context(), hubClient, opts)
@@ -335,7 +339,7 @@ func TestAddSurfacesTalosAddressResolveFailure(t *testing.T) {
 	t.Parallel()
 
 	opts := testAddOptions()
-	opts.TalosAddress = testTalosHostname
+	opts.TalosAddresses = []string{testTalosHostname}
 	opts.Resolver = stubResolver{}
 
 	_, err := zone.Add(t.Context(), newHubFakeClient(t), opts)
@@ -518,7 +522,7 @@ func TestAddAdoptsInstanceRegisteredStandaloneForTheSameAddress(t *testing.T) {
 	hubClient := newHubFakeClient(t, existing)
 
 	opts := testAddOptions()
-	opts.TalosAddress = testTalosAddress
+	opts.TalosAddresses = []string{testTalosAddress}
 
 	_, err := zone.Add(t.Context(), hubClient, opts)
 	require.NoError(t, err)
@@ -550,7 +554,7 @@ func TestAddRejectsAlreadyClaimedInstanceRegisteredStandaloneForTheSameAddress(t
 	hubClient := newHubFakeClient(t, existing)
 
 	opts := testAddOptions()
-	opts.TalosAddress = testTalosAddress
+	opts.TalosAddresses = []string{testTalosAddress}
 
 	_, err := zone.Add(t.Context(), hubClient, opts)
 	require.Error(t, err)

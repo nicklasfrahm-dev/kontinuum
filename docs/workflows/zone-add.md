@@ -27,20 +27,30 @@ export KUBECONFIG=kubeconfig.yaml
 kontinuum zone add --region eu --zone eu-1a --talos-address 10.0.0.5 --wait
 ```
 
+For a highly available control plane, pass three or five addresses, either comma-separated or by repeating the flag:
+
+```sh
+kontinuum zone add --region eu --zone eu-1a \
+  --talos-address 10.0.0.5,10.0.0.6,10.0.0.7 --wait
+```
+
+Every address becomes a seed `Instance`, and every one of them joins the zone's control plane and runs etcd. That's why the count must be 1, 3 or 5: an even count adds a node without adding failure tolerance (two members tolerate no failure, like one, while doubling the chance of one), and beyond five every extra etcd member slows writes more than it adds availability. All addresses are resolved before anything is created, so an unresolvable address, or two entries naming the same node (including two hostnames resolving to one IP), fails the whole command and creates nothing. The UI's "Add zone" form takes the same comma-separated list in its Talos address field and applies the same rules.
+
 Fans out a new zone's hub-side objects and, once its `TalosCluster` is bootstrapped, installs and exposes that zone's own kontinuum-server at `eu-1a.eu.example.com` (assuming the hub's `KONTINUUM_SERVER_DNS_DOMAIN` is `example.com`). See [Configuration](../reference.md#zones) for `KONTINUUM_ACME_EMAIL`/`KONTINUUM_ACME_SERVER`, which the `zone` controller needs to issue that certificate.
 
 ## Stages
 
 1. **Fan-out** (`kontinuum zone add`, `pkg/domain/zone`'s shared
    `BuildAddObjects`/`Add`) — creates four hub-side objects, all sharing
-   one name, `<region>-<zone>`, except the seed `Instance` (suffixed with a
-   short hash of `--talos-address`, the same way a Kubernetes ReplicaSet
-   hashes its pod template — re-running `zone add` with the same address is
-   idempotent, and a different address gets a new `Instance` identity
-   instead of colliding): a `Zone`, the seed `Instance` (`spec.interfaces` from
-   `--talos-address`, labeled `kontinuum.sh/region`/`kontinuum.sh/zone`), a
-   `replicas: 1` `InstancePool` selecting that `Instance` by those same
-   labels, and a `TalosCluster` whose control plane references that pool.
+   one name, `<region>-<zone>`, except the seed `Instance`s (each suffixed
+   with a short hash of its `--talos-address` entry, the same way a
+   Kubernetes ReplicaSet hashes its pod template — re-running `zone add`
+   with the same addresses is idempotent, and a different address gets a new
+   `Instance` identity instead of colliding): a `Zone`, one seed `Instance`
+   per address (`spec.interfaces` from `--talos-address`, labeled
+   `kontinuum.sh/region`/`kontinuum.sh/zone`), an `InstancePool` selecting
+   them by those same labels with `replicas` equal to the number of
+   addresses, and a `TalosCluster` whose control plane references that pool.
    This is the same shared naming convention `Addon` objects already assume
    (`<cluster>-<releaseName>` — see `pkg/domain/addon/resources.go`), and
    it's what lets the `zone` controller find "its" `TalosCluster` by name
@@ -63,7 +73,12 @@ Fans out a new zone's hub-side objects and, once its `TalosCluster` is bootstrap
    [Cluster bootstrap details](#cluster-bootstrap-details) below for why
    Cilium/cert-manager install in the order they do, and the
    [cluster bootstrap flow chart](#cluster-bootstrap) for the full state
-   machine. All three built-in addons (Cilium, the standard Gateway API
+   machine. With several seed instances, the `TalosCluster` controller
+   waits until every one of them is claimed and discovered, then configures
+   all of them as control-plane nodes, bootstraps etcd once on the first
+   (by name), and only reports `ControlPlaneReady` once Talos's health
+   check passes with every member joined. The control plane's API endpoint
+   is that first node's address. All three built-in addons (Cilium, the standard Gateway API
    CRDs, and cert-manager) are guaranteed present by the time
    `TalosCluster.status.Ready` is true — and so is external-dns, seeded in
    the same pass, whenever the hub has DNS configured (see

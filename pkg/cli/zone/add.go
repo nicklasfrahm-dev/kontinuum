@@ -17,7 +17,7 @@ const defaultWaitTimeout = 15 * time.Minute
 type AddFlags struct {
 	Region                      string
 	Zone                        string
-	TalosAddress                string
+	TalosAddresses              []string
 	TalosVersion                string
 	KubernetesVersion           string
 	Kubeconfig                  string
@@ -46,8 +46,9 @@ func NewAddCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&flags.Region, "region", "", "Region this zone belongs to")
 	cmd.Flags().StringVar(&flags.Zone, "zone", "", "This zone's own name within --region")
-	cmd.Flags().StringVar(&flags.TalosAddress, "talos-address", "",
-		"Talos maintenance-mode address of the seed node")
+	cmd.Flags().StringSliceVar(&flags.TalosAddresses, "talos-address", nil,
+		"Talos maintenance-mode address of a seed node; repeat it, or separate addresses with commas, "+
+			"for a 3- or 5-node control plane")
 	cmd.Flags().StringVar(&flags.TalosVersion, "talos-version", "",
 		"Talos version (defaults to the cluster controller's own pinned default)")
 	cmd.Flags().StringVar(&flags.KubernetesVersion, "kubernetes-version", "",
@@ -91,7 +92,7 @@ func RunZoneAdd(cmd *cobra.Command, flags AddFlags, buildClient hubClientBuilder
 	createdZone, err := zonedomain.Add(cmd.Context(), hubClient, zonedomain.AddOptions{
 		Region:                      flags.Region,
 		Zone:                        flags.Zone,
-		TalosAddress:                flags.TalosAddress,
+		TalosAddresses:              flags.TalosAddresses,
 		TalosVersion:                flags.TalosVersion,
 		KubernetesVersion:           flags.KubernetesVersion,
 		UnregisterInstancesOnDelete: flags.UnregisterInstancesOnDelete,
