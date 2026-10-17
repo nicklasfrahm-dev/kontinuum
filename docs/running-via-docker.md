@@ -34,7 +34,7 @@ See [Configuration](reference.md#configuration) for the full list of `KONTINUUM_
 ## Connect with kubectl
 
 ```sh
-export KUBECONFIG=kontinuum.yaml
+export KUBECONFIG=kubeconfig.yaml
 kubectl get namespaces
 kubectl create namespace demo
 ```
