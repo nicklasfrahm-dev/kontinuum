@@ -36,3 +36,6 @@ updates:
       # which breaks oras-go v1 via helm.
       - dependency-name: "github.com/siderolabs/talos/pkg/machinery"
       - dependency-name: "github.com/cosi-project/runtime"
+      # v1.84+ pulls otel contrib otelhttp v0.69+, which drops
+      # WithPublicEndpoint and breaks k8s.io/apiserver 0.32.x.
+      - dependency-name: "google.golang.org/grpc"
