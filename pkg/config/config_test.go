@@ -86,15 +86,15 @@ func TestLoadFallsBackToACMEDefaults(t *testing.T) {
 }
 
 func TestLoadReadsDNSEnvVars(t *testing.T) {
-	t.Setenv("KONTINUUM_SERVER_DNS_DOMAIN", "example.com")
-	t.Setenv("KONTINUUM_SERVER_DNS_PROVIDER", "route53")
+	t.Setenv("KONTINUUM_SERVER_DNS_DOMAIN", testDomain)
+	t.Setenv("KONTINUUM_SERVER_DNS_PROVIDER", "AWS")
 	t.Setenv("KONTINUUM_SERVER_DNS_CREDENTIAL", "AKIAEXAMPLE:secret")
 
 	cfg, err := config.Load()
 	require.NoError(t, err)
 
-	assert.Equal(t, "example.com", cfg.Server.DNS.Domain)
-	assert.Equal(t, "route53", cfg.Server.DNS.Provider)
+	assert.Equal(t, testDomain, cfg.Server.DNS.Domain)
+	assert.Equal(t, "AWS", cfg.Server.DNS.Provider)
 	assert.Equal(t, "AKIAEXAMPLE:secret", cfg.Server.DNS.Credential)
 }
 
@@ -102,13 +102,13 @@ func TestRedactStripsDNSCredential(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.Config{}
-	cfg.Server.DNS.Domain = "example.com"
-	cfg.Server.DNS.Provider = "route53"
+	cfg.Server.DNS.Domain = testDomain
+	cfg.Server.DNS.Provider = "AWS"
 	cfg.Server.DNS.Credential = "AKIAEXAMPLE:secret"
 
 	redacted := cfg.Redact()
 
-	assert.Equal(t, "example.com", redacted.Server.DNS.Domain)
-	assert.Equal(t, "route53", redacted.Server.DNS.Provider)
+	assert.Equal(t, testDomain, redacted.Server.DNS.Domain)
+	assert.Equal(t, "AWS", redacted.Server.DNS.Provider)
 	assert.Empty(t, redacted.Server.DNS.Credential)
 }

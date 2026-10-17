@@ -187,8 +187,10 @@ Once both are set, every cluster gets a working
 [external-dns](https://github.com/kubernetes-sigs/external-dns) install,
 with no `Addon` of your own to write, for any provider whose credential is
 plain environment variables (kontinuum documents and tests Cloudflare and
-PowerDNS today — see below for why the cloud providers aren't included
-yet). The `taloscluster` controller seeds it alongside the built-in addons,
+PowerDNS today — see below for why the cloud providers aren't fully
+supported yet). `_PROVIDER` takes one of the PascalCase values listed in
+[DNS providers](../reference.md#dns-providers), which kontinuum translates
+into external-dns's own provider name. The `taloscluster` controller seeds it alongside the built-in addons,
 so it installs in the same wave as Cilium and cert-manager, and the cluster
 isn't `Ready` until it's healthy.
 
@@ -220,7 +222,7 @@ that isn't flat YAML is reported on the `Zone` as
 reads directly as an environment variable:
 
 ```sh
-export KONTINUUM_SERVER_DNS_PROVIDER=cloudflare
+export KONTINUUM_SERVER_DNS_PROVIDER=Cloudflare
 export KONTINUUM_SERVER_DNS_CREDENTIAL="CF_API_TOKEN: <your-scoped-api-token>"
 ```
 
@@ -234,7 +236,7 @@ the legacy Email + Global API Key pair.
 zone's own cluster:
 
 ```sh
-export KONTINUUM_SERVER_DNS_PROVIDER=pdns
+export KONTINUUM_SERVER_DNS_PROVIDER=PowerDNS
 export KONTINUUM_SERVER_DNS_CREDENTIAL="$(cat <<'EOF'
 EXTERNAL_DNS_PDNS_SERVER: http://pdns.example.com:8081
 EXTERNAL_DNS_PDNS_API_KEY: <your-pdns-api-key>
@@ -247,15 +249,19 @@ server; external-dns only manages records inside it. The local development
 stack uses exactly this setup — see
 [Local setup](../local-setup.md#trying-the-full-zone-flow-locally).
 
-**AWS, Azure, and GCP aren't wired up yet.** Route53's own external-dns
-provider would fit this mechanism mechanically (a plain
+**AWS, Azure, and Google are only partly supported.** `AWS`, `Azure` and
+`Google` are accepted values, and with a frontend host each one gets its
+cert-manager DNS-01 solver built from `_CREDENTIAL` (see
+[DNS providers](../reference.md#dns-providers) for the keys). Route53 fits
+the environment-variable mechanism for external-dns too (a plain
 `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` pair), but a long-lived static
 cloud key is exactly the kind of credential kontinuum would rather not ask
-an operator to hand it directly — and Azure DNS/Google Cloud DNS don't fit
-at all, since both authenticate via a *mounted credentials file* rather
-than environment variables (Azure DNS needs an `azure.json`
-service-principal file; Google Cloud DNS needs
-`GOOGLE_APPLICATION_CREDENTIALS` pointing at a service-account JSON file).
+an operator to hand it directly — and external-dns for Azure DNS/Google
+Cloud DNS doesn't fit at all, since both authenticate via a *mounted
+credentials file* rather than environment variables (Azure DNS needs an
+`azure.json` service-principal file; Google Cloud DNS needs
+`GOOGLE_APPLICATION_CREDENTIALS` pointing at a service-account JSON file),
+so zone records aren't published for them yet.
 The plan for all three is a signing-key endpoint on the hub that exchanges
 a short-lived token for each provider's own credentials, rather than
 storing a static one in `_CREDENTIAL` at all.

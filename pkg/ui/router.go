@@ -373,7 +373,7 @@ func buildPages() map[string]*template.Template {
 // /app/home itself on a successful login — kept as a real route (rather than
 // folded into GET /app) purely so that redirect target keeps working.
 func (r *Router) RegisterRoutes(
-	mux *http.ServeMux, appRoot http.HandlerFunc, protect func(http.HandlerFunc) http.HandlerFunc,
+	mux Mux, appRoot http.HandlerFunc, protect func(http.HandlerFunc) http.HandlerFunc,
 ) {
 	if appRoot == nil {
 		appRoot = handleAppRoot
@@ -431,7 +431,7 @@ func (r *Router) RegisterRoutes(
 // cluster-scoped ClusterRole/ClusterRoleBinding route — split out of
 // RegisterRoutes purely to keep that function under funlen's statement
 // limit, the same reasoning buildPages was split out of NewRouter for.
-func (r *Router) registerIAMRoutes(mux *http.ServeMux, wrap func(http.HandlerFunc) http.HandlerFunc) {
+func (r *Router) registerIAMRoutes(mux Mux, wrap func(http.HandlerFunc) http.HandlerFunc) {
 	mux.HandleFunc("GET /app/rbac.authorization.k8s.io/v1/namespaces/{ns}/roles", wrap(r.handleIAMNamespaceRoles))
 	mux.HandleFunc("GET /app/rbac.authorization.k8s.io/v1/namespaces/{ns}/rolebindings",
 		wrap(r.handleIAMNamespaceRoleBindings))

@@ -882,7 +882,8 @@ func (r *Reconciler) installWorkload(
 		return err
 	}
 
-	overrides := zoneEnvOverrides(zoneObj.Spec.Region, zoneObj.Spec.Zone, storage, hostname)
+	overrides := zoneEnvOverrides(zoneObj.Spec.Region, zoneObj.Spec.Zone, storage, hostname,
+		r.HubConfig.Server.Frontend.Host)
 
 	err = ensureEnv(ctx, downstream, downstreamNamespace, r.HubConfig, overrides)
 	if err != nil {
