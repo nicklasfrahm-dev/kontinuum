@@ -30,6 +30,10 @@ spec:
     - jsonPath: .status.conditions[?(@.type=="Installed")].reason
       name: Reason
       type: string
+    - jsonPath: .status.storageMode
+      name: Storage
+      priority: 1
+      type: string
     name: v1alpha2
     schema:
       openAPIV3Schema:
@@ -157,6 +161,20 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              storageMode:
+                description: |-
+                  StorageMode is how this zone's own kontinuum-server reaches the
+                  fleet's shared storage — Proxy (an etcdproxy relay back to the hub),
+                  Direct (the shared database's own connection string) or NATS — as
+                  resolved when the zone was first installed. The mode is fixed from
+                  then on: a fleet whose resolved mode no longer matches this field is
+                  refused rather than having this zone's kontinuum-env rewritten. Empty
+                  until the first install.
+                enum:
+                - Proxy
+                - Direct
+                - NATS
+                type: string
             type: object
         required:
         - metadata
