@@ -292,7 +292,7 @@ func setupE2ECluster(
 		ObjectMeta: metav1.ObjectMeta{Name: "e2e-cluster", Namespace: v1alpha2.KontinuumSystemNamespace},
 		Spec: v1alpha2.TalosClusterSpec{
 			ControlPlane: v1alpha2.TalosClusterMemberSpec{
-				PoolRef: v1alpha2.InstancePoolReference{Name: "cp-pool"},
+				PoolRef: v1alpha2.InstancePoolReference{Name: testControlPlanePool},
 			},
 			Workers: []v1alpha2.TalosClusterWorkerSpec{
 				{Name: "default", PoolRef: v1alpha2.InstancePoolReference{Name: "worker-pool"}},
@@ -437,6 +437,11 @@ func startTalosContainer(ctx context.Context, t *testing.T) string {
 // by the time this fires, every real test assertion has already passed,
 // so failing the whole test on it (the effect of an unchecked
 // require.NoError here) would be a false negative, not a caught bug.
+//
+// Docker refusing to stop a container whose init process is already a
+// zombie ("is zombie and can not be killed") is the same kind of benign
+// teardown race, seen with several privileged Talos containers stopping at
+// once: the container is already exiting, and Ryuk removes it either way.
 func isContainerAlreadyRemoving(err error) bool {
-	return strings.Contains(err.Error(), "is already in progress")
+	return strings.Contains(err.Error(), "is already in progress") || strings.Contains(err.Error(), "is zombie")
 }
