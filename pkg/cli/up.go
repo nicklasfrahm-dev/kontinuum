@@ -23,6 +23,7 @@ import (
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 	"github.com/nicklasfrahm/kontinuum/pkg/config"
 	instancedomain "github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/taloscluster"
 	zonedomain "github.com/nicklasfrahm/kontinuum/pkg/domain/zone"
 	"github.com/nicklasfrahm/kontinuum/pkg/fleet"
 )
@@ -264,11 +265,7 @@ func applyPlan(
 		return err
 	}
 
-	if plan.NewFleet {
-		return writeKubeconfig(out, flags.KubeconfigOut, loaded)
-	}
-
-	return nil
+	return writeKubeconfigOnCreation(out, flags.KubeconfigOut, loaded, plan)
 }
 
 // stopHub stops hub.
@@ -439,6 +436,7 @@ func observeFleet(ctx context.Context, hubClient client.Client) (fleet.Observed,
 
 		observed.Zones = append(observed.Zones, fleet.ObservedZone{
 			Name: zoneObj.Name, Region: zoneObj.Spec.Region, Zone: zoneObj.Spec.Zone, IPs: ips,
+			Ready: meta.IsStatusConditionTrue(zoneObj.Status.Conditions, zonedomain.ReadyConditionType),
 		})
 	}
 
@@ -580,7 +578,34 @@ func zoneStatus(ctx context.Context, hubClient client.Client, name string) (bool
 		return false, "waiting for status", nil
 	}
 
-	return cond.Status == metav1.ConditionTrue, fmt.Sprintf("%s (%s) %s", cond.Status, cond.Reason, cond.Message), nil
+	status := fmt.Sprintf("%s (%s) %s", cond.Status, cond.Reason, cond.Message)
+	if cond.Status != metav1.ConditionTrue {
+		status += clusterStatus(ctx, hubClient, name)
+	}
+
+	return cond.Status == metav1.ConditionTrue, status, nil
+}
+
+// clusterStatus describes name's TalosCluster while it isn't Ready —
+// which addon or control-plane step a zone is actually waiting on, which
+// the zone's own condition only summarizes. Empty once Ready, or when
+// there's no TalosCluster to describe yet.
+func clusterStatus(ctx context.Context, hubClient client.Client, name string) string {
+	var cluster v1alpha2.TalosCluster
+
+	err := hubClient.Get(ctx, client.ObjectKey{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace}, &cluster)
+	if err != nil {
+		return ""
+	}
+
+	for _, conditionType := range []string{taloscluster.ControlPlaneReadyConditionType, taloscluster.ReadyConditionType} {
+		cond := meta.FindStatusCondition(cluster.Status.Conditions, conditionType)
+		if cond != nil && cond.Status != metav1.ConditionTrue {
+			return fmt.Sprintf("; talos cluster %s: %s", conditionType, cond.Message)
+		}
+	}
+
+	return ""
 }
 
 // waitForHandOff waits until a zone peer — any holder other than up's own
@@ -640,6 +665,21 @@ func poll(ctx context.Context, interval time.Duration, check func() (bool, error
 		case <-ticker.C:
 		}
 	}
+}
+
+// writeKubeconfigOnCreation writes the kubeconfig when this run created
+// the fleet — it had no zones at all — or resumed a creation an earlier,
+// interrupted run started and never got to write it: path doesn't exist
+// yet. An existing kubeconfig is never overwritten.
+func writeKubeconfigOnCreation(out io.Writer, path string, loaded *loadedFleet, plan fleet.Plan) error {
+	if !plan.NewFleet {
+		_, err := os.Stat(path)
+		if !os.IsNotExist(err) {
+			return nil
+		}
+	}
+
+	return writeKubeconfig(out, path, loaded)
 }
 
 // writeKubeconfig writes a kubeconfig with one context per zone peer,

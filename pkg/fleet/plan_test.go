@@ -29,8 +29,9 @@ func desiredZone(zone string, ips ...string) fleet.DesiredZone {
 	return fleet.DesiredZone{Zone: fleet.Zone{Region: "eu", Zone: zone, Instances: instances}, IPs: ips}
 }
 
+// observedZone is a Ready zone found in the fleet.
 func observedZone(zone string, ips ...string) fleet.ObservedZone {
-	return fleet.ObservedZone{Name: "eu-" + zone, Region: "eu", Zone: zone, IPs: ips}
+	return fleet.ObservedZone{Name: "eu-" + zone, Region: "eu", Zone: zone, IPs: ips, Ready: true}
 }
 
 // planConfig is the configuration the desired fleet maps onto, and a
@@ -183,4 +184,27 @@ func TestPlanFleetVersionIsTheHighest(t *testing.T) {
 	plan := fleet.NewPlan(nil, cfg, testCLIVersion, fleet.Observed{Kontinuums: []v1alpha2.Kontinuum{older, kontinuum}},
 		false)
 	assert.Equal(t, testCLIVersion, plan.FleetVersion, "v0.37.0 sorts above v0.9.0 as semver, not as a string")
+}
+
+// TestPlanResumesUnreadyZones covers an interrupted run: the zones exist,
+// but aren't Ready yet, so up must run its controllers and wait again.
+func TestPlanResumesUnreadyZones(t *testing.T) {
+	t.Parallel()
+
+	cfg, _ := planConfig(t)
+
+	unready := observedZone("1a", firstIP)
+	unready.Ready = false
+
+	plan := fleet.NewPlan([]fleet.DesiredZone{desiredZone("1a", firstIP)}, cfg, testCLIVersion,
+		fleet.Observed{Zones: []fleet.ObservedZone{unready}}, false)
+
+	assert.Empty(t, plan.Create)
+	assert.Equal(t, []string{"eu-1a"}, plan.Unready)
+	assert.True(t, plan.Changes())
+	assert.True(t, plan.Pending())
+
+	var out bytes.Buffer
+	plan.Print(&out)
+	assert.Contains(t, out.String(), "~ zone eu-1a isn't Ready yet: resuming")
 }

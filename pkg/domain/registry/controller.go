@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	conversionwebhook "sigs.k8s.io/controller-runtime/pkg/webhook/conversion"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
@@ -144,7 +145,13 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 
 	c.heartbeat = heartbeat
 
-	err := ctrl.NewControllerManagedBy(mgr).For(&v1alpha2.Kontinuum{}).Complete(combined)
+	// kontinuum up starts the registry twice in one process — in a
+	// read-only hub to plan, then in one running every controller — and
+	// controller-runtime would otherwise reject the second registration of
+	// the same controller name process-wide.
+	err := ctrl.NewControllerManagedBy(mgr).For(&v1alpha2.Kontinuum{}).
+		WithOptions(controller.Options{SkipNameValidation: new(true)}).
+		Complete(combined)
 	if err != nil {
 		return fmt.Errorf("failed to register server controller: %w", err)
 	}

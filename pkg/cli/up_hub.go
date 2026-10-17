@@ -40,7 +40,8 @@ const (
 // before it ever became ready.
 var errHubExited = errors.New("in-process hub exited before becoming ready")
 
-// productionUpDeps wires RunUp to the real world.
+// productionUpDeps wires RunUp to the real world — the in-process hub,
+// Talos maintenance-mode probing and the CLI's own version.
 func productionUpDeps() UpDeps {
 	discoverer := instancedomain.NewTalosDiscoverer()
 

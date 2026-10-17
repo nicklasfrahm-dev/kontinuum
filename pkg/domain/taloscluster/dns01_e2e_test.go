@@ -6,15 +6,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
 	certmanagerv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -31,17 +28,15 @@ import (
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/taloscluster"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/zone"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/zonelease"
+	"github.com/nicklasfrahm/kontinuum/pkg/e2e"
 )
 
 // This file is the frontend host's DNS-01 end-to-end test. It lives here,
 // rather than in pkg/domain/zone, because it builds on this package's own
-// Talos cluster bootstrap harness (startTalosContainer, reconcileAddonsOnce)
+// Talos cluster bootstrap harness (reconcileUntilReady, reconcileAddonsOnce)
 // to get a real cluster running cert-manager.
 
 const (
-	// e2eBindImage and e2ePebbleImage are pinned like e2eTalosImage.
-	e2eBindImage   = "internetsystemsconsortium/bind9:9.20"
-	e2ePebbleImage = "ghcr.io/letsencrypt/pebble:2.10.1"
 	// e2eDNSDomain is the zone BIND serves and accepts dynamic updates for.
 	e2eDNSDomain = "e2e.test"
 	// e2eTSIGKeyName and e2eTSIGKey sign RFC2136 updates. A throwaway test
@@ -65,16 +60,14 @@ const (
 func TestE2EFrontendHostCertificateIsIssuedViaDNS01(t *testing.T) {
 	t.Parallel()
 
-	if os.Getenv("KONTINUUM_TEST_E2E") == "" {
-		t.Skip("set KONTINUUM_TEST_E2E=1 to run this test — it needs Docker and boots real Talos containers")
-	}
+	e2e.Skip(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), e2eOverallTimeout)
 	defer cancel()
 
-	bindIP := startBindContainer(ctx, t)
-	pebbleIP := startPebbleContainer(ctx, t, bindIP)
-	controlPlaneIP := startTalosContainer(ctx, t)
+	bindIP := e2e.StartBind(ctx, t, e2eDNSDomain, e2eTSIGKeyName, e2eTSIGKey)
+	pebbleIP := e2e.StartPebble(ctx, t, bindIP)
+	controlPlaneIP := e2e.StartTalos(ctx, t)
 
 	hubClient, talosReconciler, addonReconciler, req := setupDNS01Cluster(t, controlPlaneIP, bindIP)
 
@@ -87,92 +80,6 @@ func TestE2EFrontendHostCertificateIsIssuedViaDNS01(t *testing.T) {
 
 	hostname := e2eZoneName + "." + e2eRegion + "." + e2eDNSDomain
 	assert.Equal(t, []string{hostname, "app." + e2eDNSDomain}, cert.Spec.DNSNames)
-}
-
-// startBindContainer runs BIND as the authoritative server for
-// e2eDNSDomain, accepting dynamic updates signed with e2eTSIGKey, and
-// returns its address.
-func startBindContainer(ctx context.Context, t *testing.T) string {
-	t.Helper()
-
-	namedConf := fmt.Sprintf(`key %q { algorithm hmac-sha256; secret %q; };
-options {
-	directory "/var/cache/bind";
-	listen-on { any; };
-	listen-on-v6 { none; };
-	allow-query { any; };
-	recursion no;
-	dnssec-validation no;
-};
-zone %q {
-	type primary;
-	file "/var/lib/bind/db.zone";
-	update-policy { grant %s zonesub ANY; };
-};
-`, e2eTSIGKeyName, e2eTSIGKey, e2eDNSDomain, e2eTSIGKeyName)
-
-	zoneFile := fmt.Sprintf(`$TTL 30
-@ IN SOA ns.%[1]s. admin.%[1]s. 1 30 30 300 30
-@ IN NS ns.%[1]s.
-ns IN A 127.0.0.1
-`, e2eDNSDomain)
-
-	bind, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		Started: true,
-		ContainerRequest: testcontainers.ContainerRequest{
-			Image: e2eBindImage,
-			Cmd:   []string{"-g", "-c", "/etc/bind/named.conf"},
-			Files: []testcontainers.ContainerFile{
-				{Reader: strings.NewReader(namedConf), ContainerFilePath: "/etc/bind/named.conf", FileMode: 0o644},
-				{Reader: strings.NewReader(zoneFile), ContainerFilePath: "/var/lib/bind/db.zone", FileMode: 0o666},
-			},
-			WaitingFor: wait.ForLog("running").WithStartupTimeout(e2eContainerStartTimeout),
-		},
-	})
-	require.NoError(t, err)
-
-	t.Cleanup(func() { terminateContainer(ctx, t, bind) })
-
-	bindIP, err := bind.ContainerIP(ctx)
-	require.NoError(t, err)
-
-	return bindIP
-}
-
-// startPebbleContainer runs Pebble, validating challenges against the DNS
-// server at bindIP, and returns its address.
-func startPebbleContainer(ctx context.Context, t *testing.T, bindIP string) string {
-	t.Helper()
-
-	pebble, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		Started: true,
-		ContainerRequest: testcontainers.ContainerRequest{
-			Image: e2ePebbleImage,
-			Cmd:   []string{"-config", "test/config/pebble-config.json", "-dnsserver", bindIP + ":53"},
-			Env:   map[string]string{"PEBBLE_VA_NOSLEEP": "1", "PEBBLE_WFE_NONCEREJECT": "0"},
-			WaitingFor: wait.ForLog("ACME directory available").
-				WithStartupTimeout(e2eContainerStartTimeout),
-		},
-	})
-	require.NoError(t, err)
-
-	t.Cleanup(func() { terminateContainer(ctx, t, pebble) })
-
-	pebbleIP, err := pebble.ContainerIP(ctx)
-	require.NoError(t, err)
-
-	return pebbleIP
-}
-
-// terminateContainer stops container at the end of the test — see
-// isContainerAlreadyRemoving for the one error it tolerates.
-func terminateContainer(ctx context.Context, t *testing.T, container testcontainers.Container) {
-	t.Helper()
-
-	err := container.Terminate(context.WithoutCancel(ctx))
-	if err != nil && !isContainerAlreadyRemoving(err) {
-		require.NoError(t, err)
-	}
 }
 
 // setupDNS01Cluster seeds a hub client with a single-node TalosCluster for

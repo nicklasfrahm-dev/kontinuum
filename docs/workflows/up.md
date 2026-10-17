@@ -194,7 +194,7 @@ flowchart TD
 - **Unreachable storage is an error, never "no fleet".** `up` only concludes a fleet is new from a database it can read that has no zones.
 - **New zones must be on maintenance-mode nodes.** Before creating anything, `up` checks every instance of every zone not yet in storage, and names each address that doesn't answer as a Talos node in maintenance mode. Such a node belongs to something else, or its state was lost.
 - **Hand-off is proven, not assumed.** `up`'s own hub never takes the fleet-wide lease. So before exiting, `up` waits until a zone peer has renewed that lease, showing that fleet-wide work (the registry's stale-entry sweep, admin role bindings, the frontend host's DNS record) runs with `up` gone.
-- **A kubeconfig is written only on creation.** When the run created the fleet, `up` writes `--kubeconfig-out` (default `kubeconfig.yaml`, mode `0600`) with one context per zone, `<zone>.<region>.<domain>`. The API stays on the zone hostnames even with a frontend host.
+- **A kubeconfig is written only on creation.** When the run created the fleet, or resumed a creation an interrupted run started, `up` writes `--kubeconfig-out` (default `kubeconfig.yaml`, mode `0600`) with one context per zone, `<zone>.<region>.<domain>`. An existing file is never overwritten. The API stays on the zone hostnames even with a frontend host.
 
 The CLI's version is the fleet's version: `up` runs its own controllers, and zones deploy the image of the version reconciling them, so `up` refuses to run when `spec.version` differs from the CLI's version. If the running fleet reports another version than `spec.version`, that is an upgrade, which `up` doesn't do. It reports it and applies zone objects only, without running its own controllers against a fleet running different controller code.
 
@@ -204,6 +204,7 @@ The CLI's version is the fleet's version: `up` runs its own controllers, and zon
 | --- | --- |
 | A zone in the file but not the fleet | Creates it the same way `zone add` does, with one seed `Instance` per `instances` entry, and waits for it to be `Ready`. |
 | A zone in the fleet but not the file | Reports it. With `--prune`, removes it. |
+| A declared zone in the fleet but not `Ready` yet, e.g. after an interrupted run | Runs its controllers and waits for it again. In a new fleet, nothing else may be able to reconcile it yet. |
 | A zone whose `instances` differ | Reports drift, listing the added and missing addresses. Growing or shrinking a running zone's etcd cluster is not supported. |
 | A different `spec.version`, or changed auth, ACME, DNS or frontend settings | Reports drift. Applying fleet-wide settings needs a fleet-wide configuration object in shared state, which is a follow-up. |
 | Nothing | Prints that the fleet is up to date and exits `0`. |
