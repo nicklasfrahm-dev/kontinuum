@@ -392,3 +392,27 @@ func TestUpFileFlagAcceptsCommaSeparatedAndRepeated(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"kontinuum.yml"}, files, "kontinuum.yaml is never discovered")
 }
+
+// TestUpResumesAnInterruptedCreation covers a run killed after creating the
+// zones: the re-run converges them and still writes the kubeconfig.
+func TestUpResumesAnInterruptedCreation(t *testing.T) {
+	t.Parallel()
+
+	unready := func(name, zoneName string) *v1alpha2.Zone {
+		return &v1alpha2.Zone{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace},
+			Spec:       v1alpha2.ZoneSpec{Region: "eu", Zone: zoneName},
+		}
+	}
+
+	harness := newUpHarness(t, unready(zoneA, "1a"), unready("eu-1b", "1b"))
+	flags := upFlags(t, upFleet)
+	flags.Timeout = 50 * time.Millisecond
+
+	var out bytes.Buffer
+
+	err := cli.RunUp(t.Context(), &out, flags, harness.deps())
+	require.ErrorIs(t, err, cli.ErrNotConverged, "nothing marks pre-existing zones Ready in this fake")
+	assert.Contains(t, out.String(), "isn't Ready yet: resuming")
+	assert.Equal(t, []bool{false, true}, harness.controllers, "unready zones are converged, not skipped")
+}
