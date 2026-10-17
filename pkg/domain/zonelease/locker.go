@@ -34,9 +34,11 @@ import (
 
 // GlobalKey is the zone key for hub-owned/fleet-wide state that isn't
 // scoped to any one zone (e.g. registry's TTL sweep, adminrbac's
-// ClusterRoleBindings). A worker (a Locker with a non-empty SelfZoneKey) is
-// refused this key exactly like its own zone's key — that state isn't its
-// own to reconcile either.
+// ClusterRoleBindings). With a hub, a worker (a Locker with a non-empty
+// SelfZoneKey) is refused this key exactly like its own zone's key — that
+// state is the hub's to reconcile. Hub-less (see Locker.HubLess), there is
+// no hub to leave it to, so every peer contends for it and the Lease
+// serializes them, exactly as it already does for zone keys.
 const GlobalKey = ""
 
 // leaseNamePrefix names every Lease this package creates, distinguishing
@@ -79,6 +81,9 @@ type Identity struct {
 	// SelfZoneKey is this process's own zone key, empty for the hub — see
 	// Locker.SelfZoneKey's own doc.
 	SelfZoneKey string
+	// HubLess is whether this process runs in a fleet without a hub — see
+	// Locker.HubLess's own doc.
+	HubLess bool
 }
 
 // Locker gates zone-scoped reconciliation across every kontinuum-server
@@ -106,10 +111,18 @@ type Locker struct {
 	HolderIdentity string
 	// SelfZoneKey is this process's own zone key
 	// (Key(cfg.Server.Region, cfg.Server.Zone)) — empty for the hub. A
-	// non-empty SelfZoneKey is what makes TryAcquire refuse both this exact
-	// key and GlobalKey outright, with no API call: a zone must never
-	// reconcile its own resources, nor anything hub-owned.
+	// non-empty SelfZoneKey is what makes TryAcquire refuse this exact key
+	// outright, with no API call: a zone must never reconcile its own
+	// resources. Unless HubLess is set, it also refuses GlobalKey the same
+	// way: with a hub, fleet-wide state is the hub's alone.
 	SelfZoneKey string
+	// HubLess opens GlobalKey to contention by every peer, zones included.
+	// It follows from the storage mode (see
+	// pkg/config.StorageMode.IsHubLess): in direct and NATS mode every
+	// process holds an identical storage DSN, so there may be no hub at
+	// all, and refusing GlobalKey to zones would leave the registry TTL
+	// sweep and adminrbac's ClusterRoleBindings silently unreconciled.
+	HubLess bool
 	// LeaseDuration is how long a Lease may go without renewal before
 	// another contender may take it over. Defaults to defaultLeaseDuration
 	// when zero — see NewLocker.
@@ -134,6 +147,16 @@ func NewLocker(
 	}
 }
 
+// NewLockerFor builds a Locker for identity with the default lease
+// duration — what every controller's own SetupWithManager uses, so a field
+// added to Identity reaches every Locker without touching each caller.
+func NewLockerFor(apiClient client.Client, apiReader client.Reader, identity Identity) *Locker {
+	locker := NewLocker(apiClient, apiReader, identity.HolderIdentity, identity.SelfZoneKey, 0)
+	locker.HubLess = identity.HubLess
+
+	return locker
+}
+
 // TryAcquire reports whether the caller may perform mutating reconciliation
 // for zoneKey (GlobalKey for hub-owned/fleet-wide state) right now — see
 // Locker's own doc. A false return with a nil error means "someone else
@@ -141,7 +164,7 @@ func NewLocker(
 // failure; callers should quietly back off and retry later (see Jitter),
 // not log it as an error.
 func (l *Locker) TryAcquire(ctx context.Context, zoneKey string) (bool, error) {
-	if l.SelfZoneKey != "" && (zoneKey == GlobalKey || zoneKey == l.SelfZoneKey) {
+	if l.refused(zoneKey) {
 		return false, nil
 	}
 
@@ -167,6 +190,20 @@ func (l *Locker) TryAcquire(ctx context.Context, zoneKey string) (bool, error) {
 	}
 
 	return l.takeover(ctx, &lease)
+}
+
+// refused reports whether this process is structurally not allowed to
+// reconcile zoneKey at all — see SelfZoneKey's and HubLess's own docs.
+func (l *Locker) refused(zoneKey string) bool {
+	if l.SelfZoneKey == "" {
+		return false
+	}
+
+	if zoneKey == l.SelfZoneKey {
+		return true
+	}
+
+	return zoneKey == GlobalKey && !l.HubLess
 }
 
 // leaseName maps zoneKey onto the Lease object name this package owns —

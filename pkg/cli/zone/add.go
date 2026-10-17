@@ -33,7 +33,9 @@ func NewAddCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "add",
-		Short: "Add a new zone to this kontinuum control plane",
+		Short: "Add a new zone to the fleet the kubeconfig points at",
+		Long: "Add a new zone to the fleet the kubeconfig points at. Any of the fleet's apiservers works: " +
+			"the hub, or in a hub-less fleet any zone peer, since every one of them reconciles against the same storage.",
 		// Runtime errors (kubeconfig resolution, API errors) shouldn't
 		// print the command usage alongside the error.
 		SilenceUsage: true,
@@ -51,9 +53,9 @@ func NewAddCmd() *cobra.Command {
 	cmd.Flags().StringVar(&flags.KubernetesVersion, "kubernetes-version", "",
 		"Kubernetes version (defaults to the cluster controller's own pinned default)")
 	cmd.Flags().StringVar(&flags.Kubeconfig, "kubeconfig", "",
-		"Path to the hub kubeconfig (defaults to $KUBECONFIG or ~/.kube/config)")
+		"Path to a kubeconfig for any of the fleet's apiservers (defaults to $KUBECONFIG or ~/.kube/config)")
 	cmd.Flags().StringVar(&flags.Context, "context", "",
-		"kubeconfig context naming the hub (defaults to current-context)")
+		"kubeconfig context naming the apiserver to use (defaults to current-context)")
 	cmd.Flags().BoolVar(&flags.Wait, "wait", false,
 		"Block until the zone reports Installed, printing live status")
 	cmd.Flags().DurationVar(&flags.Timeout, "timeout", defaultWaitTimeout,

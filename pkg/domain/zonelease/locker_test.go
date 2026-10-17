@@ -23,6 +23,9 @@ const (
 	// testZoneLeaseName is the Lease object name zonelease.Key("eu", "hel01")
 	// ("eu-hel01") maps onto.
 	testZoneLeaseName = "zonelock-eu-hel01"
+	// testZoneKey and otherZoneKey are two zones' own zonelease.Key values.
+	testZoneKey  = "eu-hel01"
+	otherZoneKey = "eu-hel02"
 )
 
 func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
@@ -227,4 +230,83 @@ func TestJitter(t *testing.T) {
 	}
 
 	assert.Equal(t, time.Duration(0), zonelease.Jitter(0))
+}
+
+// TestTryAcquire_HubLessMatrix covers every combination of hub/zone peer,
+// hub/hub-less and key — see Locker.HubLess's own doc. A nil Client panics
+// on use, so a "refused" row also proves no API call was attempted.
+func TestTryAcquire_HubLessMatrix(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		selfZoneKey string
+		hubLess     bool
+		key         string
+		want        bool
+	}{
+		{name: "hub, global key", selfZoneKey: "", hubLess: false, key: zonelease.GlobalKey, want: true},
+		{name: "hub, zone key", selfZoneKey: "", hubLess: false, key: testZoneKey, want: true},
+		{name: "hub-less hub, global key", selfZoneKey: "", hubLess: true, key: zonelease.GlobalKey, want: true},
+		{name: "hub-less hub, zone key", selfZoneKey: "", hubLess: true, key: testZoneKey, want: true},
+		{name: "worker, global key", selfZoneKey: testZoneKey, hubLess: false, key: zonelease.GlobalKey, want: false},
+		{name: "worker, own key", selfZoneKey: testZoneKey, hubLess: false, key: testZoneKey, want: false},
+		{name: "worker, other key", selfZoneKey: testZoneKey, hubLess: false, key: otherZoneKey, want: true},
+		{name: "peer, global key", selfZoneKey: testZoneKey, hubLess: true, key: zonelease.GlobalKey, want: true},
+		{name: "peer, own key", selfZoneKey: testZoneKey, hubLess: true, key: testZoneKey, want: false},
+		{name: "peer, other key", selfZoneKey: testZoneKey, hubLess: true, key: otherZoneKey, want: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			var apiClient client.Client
+			if test.want {
+				apiClient = newFakeClient(t)
+			}
+
+			locker := zonelease.NewLockerFor(apiClient, apiClient, zonelease.Identity{
+				HolderIdentity: "process-1", SelfZoneKey: test.selfZoneKey, HubLess: test.hubLess,
+			})
+
+			acquired, err := locker.TryAcquire(context.Background(), test.key)
+			require.NoError(t, err)
+			assert.Equal(t, test.want, acquired)
+		})
+	}
+}
+
+// TestTryAcquire_HubLessPeersSerializeGlobalKey proves hub-less peers
+// contend for GlobalKey through the Lease like any zone key: the first one
+// wins, the second is refused while the first's lease is live.
+func TestTryAcquire_HubLessPeersSerializeGlobalKey(t *testing.T) {
+	t.Parallel()
+
+	fakeClient := newFakeClient(t)
+
+	first := zonelease.NewLockerFor(fakeClient, fakeClient, zonelease.Identity{
+		HolderIdentity: "zone-eu-hel01", SelfZoneKey: testZoneKey, HubLess: true,
+	})
+	second := zonelease.NewLockerFor(fakeClient, fakeClient, zonelease.Identity{
+		HolderIdentity: "zone-eu-hel02", SelfZoneKey: otherZoneKey, HubLess: true,
+	})
+
+	acquired, err := first.TryAcquire(context.Background(), zonelease.GlobalKey)
+	require.NoError(t, err)
+	assert.True(t, acquired)
+
+	acquired, err = second.TryAcquire(context.Background(), zonelease.GlobalKey)
+	require.NoError(t, err)
+	assert.False(t, acquired)
+}
+
+func TestNewLockerForDefaultsLeaseDuration(t *testing.T) {
+	t.Parallel()
+
+	locker := zonelease.NewLockerFor(nil, nil, zonelease.Identity{HolderIdentity: "hub-1", HubLess: true})
+
+	assert.Equal(t, "hub-1", locker.HolderIdentity)
+	assert.True(t, locker.HubLess)
+	assert.Positive(t, locker.LeaseDuration)
 }

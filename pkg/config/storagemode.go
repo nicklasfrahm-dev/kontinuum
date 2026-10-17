@@ -54,6 +54,15 @@ func ParseStorageMode(raw string) (StorageMode, error) {
 	}
 }
 
+// IsHubLess reports whether mode runs without a hub: in direct and NATS
+// mode every process is handed an identical storage DSN, so any one of them
+// can onboard a joining zone and contend for fleet-wide work. Only proxy
+// mode structurally needs a hub, because the relay DSN a zone gets is the
+// hub's own endpoint.
+func (m StorageMode) IsHubLess() bool {
+	return m == StorageModeDirect || m == StorageModeNATS
+}
+
 // StorageResolver resolves a hostname to its IP addresses — the LookupHost
 // subset of *net.Resolver that ResolveStorageMode needs. net.DefaultResolver
 // satisfies it; tests inject a stub instead of making real DNS queries.

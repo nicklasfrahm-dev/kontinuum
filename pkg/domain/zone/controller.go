@@ -224,9 +224,8 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		ImageRepo:               c.Config.ImageRepo,
 		RetryInterval:           c.Config.RetryInterval,
 		TeardownTimeout:         c.Config.TeardownTimeout,
-		Locker: zonelease.NewLocker(
-			mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
-		Logger: c.Config.Logger,
+		Locker:                  zonelease.NewLockerFor(mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease),
+		Logger:                  c.Config.Logger,
 	}
 
 	err := ctrl.NewControllerManagedBy(mgr).
