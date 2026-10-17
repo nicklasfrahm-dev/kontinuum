@@ -22,6 +22,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apiserver/pkg/authentication/request/bearertoken"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -33,6 +34,7 @@ import (
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/addon"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/adminrbac"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/etcdproxy"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/identityprovider"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instancepool"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/registry"
@@ -438,7 +440,7 @@ func buildServer(
 		libkapi.WithPostStartHook(ensureCRD),
 	}, authOpts, registryOpts, instanceOptions(logger, zoneLease), instancePoolOptions(logger, zoneLease),
 		talosClusterOptions(cfg, logger, zoneLease), addonOptions(logger, zoneLease), zoneOptions(cfg, logger, zoneLease),
-		adminRBACOptions(cfg, logger, zoneLease))
+		adminRBACOptions(cfg, logger, zoneLease), identityProviderOptions(cfg, logger, zoneLease))
 
 	// Storage is resolved against a background context so the backend
 	// is only torn down by Server.Shutdown, not by the signal context
@@ -759,6 +761,56 @@ func adminRBACOptions(cfg *config.Config, logger *slog.Logger, zoneLease zonelea
 	})
 
 	return []libkapi.Option{libkapi.WithController(controller)}
+}
+
+// identityProviderOptions builds the libkapi options that wire runtime-
+// configurable user discovery (see pkg/domain/identityprovider) onto the
+// Server: a post-start hook ensuring the ClusterIdentityProvider and
+// IdentityProvider CRDs, the controller that hot-swaps every process's own
+// in-memory authenticator and populates the signing key cache, and — only
+// when OIDC is configured, since that's the only mode with an authorizer
+// for an identity to matter to (see configureOIDC) — that authenticator
+// itself, tried after the static OIDC issuer. The static issuer and client
+// ID are reserved, so no provider can claim tokens the static
+// authenticator would already accept first.
+func identityProviderOptions(cfg *config.Config, logger *slog.Logger, zoneLease zonelease.Identity) []libkapi.Option {
+	idpLogger := logger.With("component", "identityprovider")
+
+	cache := identityprovider.NewKeyCache(identityprovider.KeyCacheConfig{Logger: idpLogger})
+	authenticator := identityprovider.NewAuthenticator()
+
+	var reserved []identityprovider.ReservedIssuer
+	if cfg.OIDC.IssuerURL != "" {
+		reserved = append(reserved, identityprovider.ReservedIssuer{
+			URL:       cfg.OIDC.IssuerURL,
+			Audiences: []string{cfg.OIDC.ClientID},
+			Owner:     "the KONTINUUM_OIDC_ISSUER_URL configuration",
+		})
+	}
+
+	controller := identityprovider.NewController(identityprovider.Config{
+		Logger: idpLogger,
+		Registry: identityprovider.NewRegistry(identityprovider.RegistryConfig{
+			Cache: cache, Authenticator: authenticator, Reserved: reserved,
+		}),
+		Cache:     cache,
+		ZoneLease: zoneLease,
+	})
+
+	ensureCRDs := func(ctx context.Context, loopbackConfig *rest.Config) error {
+		return identityprovider.EnsureCRDs(ctx, loopbackConfig, idpLogger)
+	}
+
+	opts := []libkapi.Option{
+		libkapi.WithPostStartHook(ensureCRDs),
+		libkapi.WithController(controller),
+	}
+
+	if cfg.OIDC.IssuerURL != "" {
+		opts = append(opts, libkapi.WithAuthenticator(bearertoken.New(authenticator)))
+	}
+
+	return opts
 }
 
 // displayConfig builds the non-confidential configuration snapshot written

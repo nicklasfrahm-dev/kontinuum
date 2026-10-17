@@ -254,6 +254,11 @@ type stubKontinuumLister struct {
 	// recording anything.
 	created   *[]client.Object
 	createErr error
+	// identityProviders/clusterIdentityProviders back List calls for the
+	// IAM pages' "Identity providers" tab (see listIdentityProviders).
+	// listErr is returned for these list kinds too.
+	identityProviders        []v1alpha2.IdentityProvider
+	clusterIdentityProviders []v1alpha2.ClusterIdentityProvider
 }
 
 // Get looks up either a Kontinuum by name in items or, for a *corev1.Secret,
@@ -402,6 +407,25 @@ func (s stubKontinuumLister) listRBAC(list client.ObjectList) error {
 		}
 
 		target.Items = s.clusterRoles
+	default:
+		return s.listIdentityProviders(list)
+	}
+
+	return nil
+}
+
+// listIdentityProviders backs List's identity provider list kinds — split
+// out of listRBAC purely to keep its cyclomatic complexity down.
+func (s stubKontinuumLister) listIdentityProviders(list client.ObjectList) error {
+	if s.listErr != nil {
+		return s.listErr
+	}
+
+	switch target := list.(type) {
+	case *v1alpha2.IdentityProviderList:
+		target.Items = s.identityProviders
+	case *v1alpha2.ClusterIdentityProviderList:
+		target.Items = s.clusterIdentityProviders
 	}
 
 	return nil

@@ -338,13 +338,17 @@ func buildPages() map[string]*template.Template {
 			"templates/components/icon_user_shield.html",
 			"templates/components/icon_trash.html",
 			"templates/components/role_rows.html", "templates/components/iam_delete_modal.html",
-			"templates/components/role_add_modal.html", "templates/components/rolebinding_add_modal.html"),
+			"templates/components/role_add_modal.html", "templates/components/rolebinding_add_modal.html",
+			"templates/components/icon_fingerprint.html", "templates/components/identity_provider_rows.html",
+			"templates/components/identity_provider_add_modal.html"),
 		pageIAMCluster: mustParsePage("templates/iam_cluster_content.html",
 			"templates/components/icon_info.html", "templates/components/icon_shield_user.html",
 			"templates/components/icon_user_shield.html",
 			"templates/components/icon_trash.html",
 			"templates/components/role_rows.html", "templates/components/iam_delete_modal.html",
-			"templates/components/role_add_modal.html", "templates/components/rolebinding_add_modal.html"),
+			"templates/components/role_add_modal.html", "templates/components/rolebinding_add_modal.html",
+			"templates/components/icon_fingerprint.html", "templates/components/identity_provider_rows.html",
+			"templates/components/identity_provider_add_modal.html"),
 		pageConnect: mustParsePage("templates/connect_content.html",
 			"templates/components/icon_terminal.html",
 			"templates/components/copy_snippet.html", "templates/components/icon_copy.html",
@@ -445,6 +449,12 @@ func (r *Router) registerIAMRoutes(mux *http.ServeMux, wrap func(http.HandlerFun
 	mux.HandleFunc("POST /app/rbac.authorization.k8s.io/v1/clusterroles", wrap(r.handleClusterRoleAdd))
 	mux.HandleFunc("POST /app/rbac.authorization.k8s.io/v1/clusterrolebindings", wrap(r.handleClusterRoleBindingAdd))
 	mux.HandleFunc("DELETE /app/rbac.authorization.k8s.io/v1/clusterroles/{name}", wrap(r.handleDeleteClusterRole))
+	mux.HandleFunc("GET "+identityProvidersPath("{ns}"), wrap(r.handleIAMNamespaceIdentityProviders))
+	mux.HandleFunc("POST "+identityProvidersPath("{ns}"), wrap(r.handleIdentityProviderAdd))
+	mux.HandleFunc("DELETE "+identityProvidersPath("{ns}")+"/{name}", wrap(r.handleDeleteIdentityProvider))
+	mux.HandleFunc("GET "+clusterIdentityProvidersPath, wrap(r.handleIAMClusterIdentityProviders))
+	mux.HandleFunc("POST "+clusterIdentityProvidersPath, wrap(r.handleClusterIdentityProviderAdd))
+	mux.HandleFunc("DELETE "+clusterIdentityProvidersPath+"/{name}", wrap(r.handleDeleteClusterIdentityProvider))
 	mux.HandleFunc("DELETE /app/rbac.authorization.k8s.io/v1/clusterrolebindings/{name}",
 		wrap(r.handleDeleteClusterRoleBinding))
 }
@@ -1812,6 +1822,7 @@ func (r *Router) renderIAMNamespace(writer http.ResponseWriter, request *http.Re
 
 	maps.Copy(data, r.roleAddFormData(namespace, roleAddFields{}, "", ""))
 	maps.Copy(data, r.roleBindingAddFormData(namespace, roleNames(roles), roleBindingAddFields{}, "", ""))
+	maps.Copy(data, identityProviderAddFormData(namespace, defaultIdentityProviderFields(), "", ""))
 
 	r.render(writer, request, pageIAMNamespace, data)
 }
@@ -1843,6 +1854,10 @@ func (r *Router) loadIAMNamespace(
 	}
 
 	data["Roles"] = roles
+
+	if view == viewIdentityProviders {
+		return roles, r.loadIdentityProviders(writer, request, kontinuums, namespace, data)
+	}
 
 	if view != "bindings" {
 		return roles, true
@@ -1884,6 +1899,7 @@ func (r *Router) renderIAMCluster(writer http.ResponseWriter, request *http.Requ
 
 	maps.Copy(data, r.clusterRoleAddFormData(roleAddFields{}, "", ""))
 	maps.Copy(data, r.clusterRoleBindingAddFormData(roleNames(roles), roleBindingAddFields{}, "", ""))
+	maps.Copy(data, identityProviderAddFormData("", defaultIdentityProviderFields(), "", ""))
 
 	r.render(writer, request, pageIAMCluster, data)
 }
@@ -1909,6 +1925,10 @@ func (r *Router) loadIAMCluster(
 	}
 
 	data["Roles"] = roles
+
+	if view == viewIdentityProviders {
+		return roles, r.loadIdentityProviders(writer, request, kontinuums, "", data)
+	}
 
 	if view != "bindings" {
 		return roles, true
