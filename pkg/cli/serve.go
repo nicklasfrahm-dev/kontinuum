@@ -274,9 +274,9 @@ func loadServeConfig(cmd *cobra.Command, addr string, storage string) (*config.C
 	// dials or listens — rather than per-connection.
 	grpclog.SetLoggerV2(logging.NewGRPCLogger(logger))
 
-	err = cfg.ValidateStorageMode()
+	err = validateServeConfig(cfg)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to validate storage mode config: %w", err)
+		return nil, nil, err
 	}
 
 	anonymous, err := cfg.ValidateAuthentication()
@@ -290,6 +290,23 @@ func loadServeConfig(cmd *cobra.Command, addr string, storage string) (*config.C
 	}
 
 	return cfg, logger, nil
+}
+
+// validateServeConfig runs every startup check on cfg besides
+// authentication, which loadServeConfig handles itself since its result
+// also decides a startup warning.
+func validateServeConfig(cfg *config.Config) error {
+	err := cfg.ValidateStorageMode()
+	if err != nil {
+		return fmt.Errorf("failed to validate storage mode config: %w", err)
+	}
+
+	err = cfg.ValidateACME()
+	if err != nil {
+		return fmt.Errorf("failed to validate acme config: %w", err)
+	}
+
+	return nil
 }
 
 // buildScheme registers every GVK any part of the server needs to resolve

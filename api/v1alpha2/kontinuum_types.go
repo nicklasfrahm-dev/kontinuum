@@ -206,7 +206,6 @@ type KontinuumGRPCConfigStatus struct {
 	// expected to present a certificate the zone's own root CA set already
 	// trusts, the same as every other kind of traffic the hub serves.
 	// +optional
-	//nolint:tagliatelle // "TLS" (acronym kept uppercase) matches this type's own IssuerURL/ClientID convention
 	InsecureTLSSkipVerify string `default:"false" json:"insecureTLSSkipVerify"`
 }
 
@@ -232,16 +231,13 @@ type KontinuumOIDCConfigStatus struct {
 	Enabled bool `json:"enabled"`
 	// IssuerURL is the OIDC issuer URL. Empty when Enabled is false.
 	// +optional
-	//nolint:tagliatelle // "issuerURL" (acronym kept uppercase) is the established Kubernetes API convention
 	IssuerURL string `default:"" json:"issuerURL"`
 	// ClientID is the OAuth 2.0 public client ID registered with the
 	// issuer.
 	// +optional
-	//nolint:tagliatelle // "clientID" (acronym kept uppercase) is the established Kubernetes API convention
 	ClientID string `default:"kontinuum" json:"clientID"`
 	// RedirectURL is the browser login flow's callback URL.
 	// +optional
-	//nolint:tagliatelle // "redirectURL" (acronym kept uppercase) is the established Kubernetes API convention
 	RedirectURL string `default:"http://localhost:8080/app" json:"redirectURL"`
 	// AdminGroups is a comma-delimited list of OIDC groups granted full
 	// access. Empty when Enabled is false.
@@ -270,6 +266,26 @@ type KontinuumACMEConfigStatus struct {
 	// server: it would let anyone on the network path impersonate it.
 	// +optional
 	InsecureSkipVerify string `default:"false" json:"insecureSkipVerify"`
+	// ExternalAccountBinding binds the ACME account to an existing account
+	// at the CA, which CAs such as ZeroSSL and Google Trust Services
+	// require. Leave both fields empty for a CA that doesn't — see
+	// pkg/config.Config.ValidateACME, which rejects setting only one.
+	// +optional
+	ExternalAccountBinding KontinuumACMEExternalAccountBindingConfigStatus `json:"externalAccountBinding"`
+}
+
+// KontinuumACMEExternalAccountBindingConfigStatus is an ACME external
+// account binding: the key ID the CA issued, and its MAC key.
+type KontinuumACMEExternalAccountBindingConfigStatus struct {
+	// KeyID is the ID of the CA key the ACME account is bound to.
+	// +optional
+	KeyID string `default:"" json:"keyID"`
+	// HMACKey is the external account's MAC key, base64url-encoded as the
+	// CA issues it. Confidential: Config.Redact strips it before a value
+	// reaches status.config, and it's tagged `secret:"true"` so
+	// pkg/domain/zone routes a joined zone's own copy into its Secret.
+	// +optional
+	HMACKey string `default:"" json:"hmacKey" secret:"true"`
 }
 
 // KontinuumSecretReference points to the Secret holding a Kontinuum's
