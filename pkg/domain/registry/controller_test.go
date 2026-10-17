@@ -215,3 +215,28 @@ func TestCombinedReconcilerPreservesTTLRequeueForOwnFreshInstance(t *testing.T) 
 	require.NoError(t, err)
 	assert.Positive(t, result.RequeueAfter, "TTL's own staleness recheck must still be scheduled for self")
 }
+
+// TestCombinedReconcilerWithoutHeartbeat covers an unregistered process
+// (see Config.Unregistered): the TTL sweep still runs, and nothing is
+// ever registered for the process itself.
+func TestCombinedReconcilerWithoutHeartbeat(t *testing.T) {
+	t.Parallel()
+
+	fakeClient := newFakeClient(t)
+
+	combined := &registry.CombinedReconciler{
+		TTL: &registry.TTLReconciler{
+			Client:         fakeClient,
+			StaleThreshold: time.Minute,
+			Locker:         zonelease.NewLocker(fakeClient, fakeClient, "test-hub", "", 0),
+			Logger:         slog.Default(),
+		},
+	}
+
+	_, err := combined.Reconcile(context.Background(), ctrl.Request{NamespacedName: selfInstanceKey()})
+	require.NoError(t, err)
+
+	var list v1alpha2.KontinuumList
+	require.NoError(t, fakeClient.List(context.Background(), &list))
+	assert.Empty(t, list.Items)
+}

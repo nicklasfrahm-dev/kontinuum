@@ -84,6 +84,8 @@ type Identity struct {
 	// HubLess is whether this process runs in a fleet without a hub — see
 	// Locker.HubLess's own doc.
 	HubLess bool
+	// Temporary marks a short-lived peer — see Locker.Temporary's own doc.
+	Temporary bool
 }
 
 // Locker gates zone-scoped reconciliation across every kontinuum-server
@@ -123,6 +125,12 @@ type Locker struct {
 	// all, and refusing GlobalKey to zones would leave the registry TTL
 	// sweep and adminrbac's ClusterRoleBindings silently unreconciled.
 	HubLess bool
+	// Temporary marks a peer that is about to go away again — kontinuum
+	// up's in-process hub. It reconciles zones like any other peer, but is
+	// always refused GlobalKey: fleet-wide state is left to the fleet's own
+	// peers, so a fleet-wide reconcile observed while up runs proves the
+	// fleet carries on without it.
+	Temporary bool
 	// LeaseDuration is how long a Lease may go without renewal before
 	// another contender may take it over. Defaults to defaultLeaseDuration
 	// when zero — see NewLocker.
@@ -153,6 +161,7 @@ func NewLocker(
 func NewLockerFor(apiClient client.Client, apiReader client.Reader, identity Identity) *Locker {
 	locker := NewLocker(apiClient, apiReader, identity.HolderIdentity, identity.SelfZoneKey, 0)
 	locker.HubLess = identity.HubLess
+	locker.Temporary = identity.Temporary
 
 	return locker
 }
@@ -193,8 +202,13 @@ func (l *Locker) TryAcquire(ctx context.Context, zoneKey string) (bool, error) {
 }
 
 // refused reports whether this process is structurally not allowed to
-// reconcile zoneKey at all — see SelfZoneKey's and HubLess's own docs.
+// reconcile zoneKey at all — see SelfZoneKey's, HubLess's and Temporary's
+// own docs.
 func (l *Locker) refused(zoneKey string) bool {
+	if l.Temporary && zoneKey == GlobalKey {
+		return true
+	}
+
 	if l.SelfZoneKey == "" {
 		return false
 	}

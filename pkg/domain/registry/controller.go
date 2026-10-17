@@ -67,6 +67,11 @@ type Config struct {
 	// self-registration is never gated — see CombinedReconciler.Reconcile's
 	// own doc for why.
 	ZoneLease zonelease.Identity
+	// Unregistered runs the registry without registering this process: no
+	// Kontinuum object and no heartbeat, only the TTL reconciler and the
+	// conversion webhook. For kontinuum up's in-process hub, a temporary
+	// peer the fleet must never mistake for a member.
+	Unregistered bool
 }
 
 // Controller wires kontinuum's server registry — the kontinuums.kontinuum.sh
@@ -131,6 +136,10 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		Config:     c.Config.DisplayConfig,
 	}
 
+	if c.Config.Unregistered {
+		heartbeat = nil
+	}
+
 	combined := &CombinedReconciler{TTL: reconciler, Heartbeat: heartbeat}
 
 	c.heartbeat = heartbeat
@@ -140,9 +149,11 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		return fmt.Errorf("failed to register server controller: %w", err)
 	}
 
-	err = mgr.Add(heartbeat)
-	if err != nil {
-		return fmt.Errorf("failed to register server heartbeat runnable: %w", err)
+	if heartbeat != nil {
+		err = mgr.Add(heartbeat)
+		if err != nil {
+			return fmt.Errorf("failed to register server heartbeat runnable: %w", err)
+		}
 	}
 
 	// Answers the CRD's spec.conversion.webhook (see CustomResourceDefinition)
@@ -189,7 +200,9 @@ func (c *Controller) Deregister(ctx context.Context) error {
 // Heartbeat's Reconcile additionally runs whenever req names this
 // instance's own object, on top of - not instead of - the TTL check.
 type CombinedReconciler struct {
-	TTL       *TTLReconciler
+	TTL *TTLReconciler
+	// Heartbeat is nil for an unregistered process — see
+	// Config.Unregistered.
 	Heartbeat *Heartbeat
 }
 
@@ -200,7 +213,7 @@ func (r *CombinedReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return result, err
 	}
 
-	if req.Name == r.Heartbeat.Name {
+	if r.Heartbeat != nil && req.Name == r.Heartbeat.Name {
 		_, err := r.Heartbeat.Reconcile(ctx, req)
 		if err != nil {
 			return result, err

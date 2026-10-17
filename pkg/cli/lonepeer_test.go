@@ -24,8 +24,8 @@ func TestLonePeerOptions(t *testing.T) {
 		identity zonelease.Identity
 		wired    bool
 	}{
-		{name: "hub-less zone peer", identity: zonelease.Identity{SelfZoneKey: "eu-1a", HubLess: true}, wired: true},
-		{name: "proxy-mode worker", identity: zonelease.Identity{SelfZoneKey: "eu-1a"}, wired: false},
+		{name: "hub-less zone peer", identity: zonelease.Identity{SelfZoneKey: zoneA, HubLess: true}, wired: true},
+		{name: "proxy-mode worker", identity: zonelease.Identity{SelfZoneKey: zoneA}, wired: false},
 		{name: "hub-less hub", identity: zonelease.Identity{HubLess: true}, wired: false},
 		{name: "hub", identity: zonelease.Identity{}, wired: false},
 	}

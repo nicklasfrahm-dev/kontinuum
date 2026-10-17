@@ -187,6 +187,11 @@ type Config struct {
 	// mode is never moved to another — see ErrStorageModeChanged. Empty
 	// means config.StorageModeProxy.
 	StorageMode config.StorageMode
+	// Version is this process's own build version, deployed onto zones
+	// while no Kontinuum is registered at all to take the fleet's version
+	// from — the case for kontinuum up creating a brand-new fleet, whose
+	// in-process hub never registers itself. See resolveImage.
+	Version string
 	// ZoneLease is this process's own zonelease.Locker identity — see
 	// zonelease.Identity's own doc. Reconcile refuses to mutate a Zone it
 	// doesn't hold this lease for, so the hub and every joined zone sharing
@@ -237,6 +242,7 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		RetryInterval:           c.Config.RetryInterval,
 		TeardownTimeout:         c.Config.TeardownTimeout,
 		StorageMode:             c.Config.StorageMode,
+		Version:                 c.Config.Version,
 		Locker:                  zonelease.NewLockerFor(mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease),
 		Logger:                  c.Config.Logger,
 	}
@@ -345,6 +351,8 @@ type Reconciler struct {
 	// StorageMode is the fleet's resolved storage mode — see
 	// Config.StorageMode's own doc. Empty means config.StorageModeProxy.
 	StorageMode config.StorageMode
+	// Version is the fallback version to deploy — see Config.Version.
+	Version string
 	// Locker gates every write below against zonelease — see
 	// Config.ZoneLease's own doc.
 	Locker *zonelease.Locker
@@ -788,6 +796,10 @@ func (r *Reconciler) reconcileRegistryJoin(ctx context.Context, zoneObj *v1alpha
 // requirement Reconcile should block Zone installs on.
 func (r *Reconciler) resolveImage(ctx context.Context) (string, error) {
 	tag, err := findKontinuumVersion(ctx, r.Client)
+	if errors.Is(err, errNoRegisteredKontinuum) && r.Version != "" {
+		tag, err = r.Version, nil
+	}
+
 	if err != nil {
 		return "", err
 	}
