@@ -37,6 +37,7 @@ See [Add zone](workflows/zone-add.md) for how these are used.
 | -------------------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
 | `KONTINUUM_SERVER_DNS_DOMAIN`  | Base domain a zone's own kontinuum-server is published under (`<zone>.<region>.<domain>`)                | *(empty)*                                                       |
 | `KONTINUUM_SERVER_GRPC_ENDPOINT` | This hub's own publicly reachable `host:port` for its etcd gRPC proxy (see [Architecture](architecture.md#storage)) — normally the same `host:port` a browser reaches `/app` on. Required for `zone add` to succeed: without it, a newly joined zone has no way to reach shared storage. | *(empty)* |
+| `KONTINUUM_SERVER_ZONE_STORAGE_MODE` | How a joined zone reaches shared storage: `Proxy`, `Direct` or `NATS`. `Auto` infers it from `KONTINUUM_SERVER_STORAGE` — see [Storage modes](#storage-modes). Any other value, including a lowercase one, fails at startup. | `Auto` |
 | `KONTINUUM_ACME_EMAIL`         | ACME account email used when the `zone` controller creates a joined zone's cert-manager `ClusterIssuer` | *(empty)*                                                       |
 | `KONTINUUM_SERVER_DNS_PROVIDER` | external-dns provider name (e.g. `cloudflare`, `pdns`) for each zone's auto-wired external-dns. Required, together with `_CREDENTIAL`, before a zone's network layer is installed. See [Add zone](workflows/zone-add.md#dns-auto-wiring-external-dns-from-a-flat-yaml-credential). | *(empty)* |
 | `KONTINUUM_SERVER_DNS_CREDENTIAL` | Flat YAML mapping of environment variables for that external-dns provider (e.g. `CF_API_TOKEN: <token>`). Confidential: redacted from status. | *(empty)* |
@@ -45,6 +46,23 @@ See [Add zone](workflows/zone-add.md) for how these are used.
 | `KONTINUUM_ACME_INSECURE_SKIP_VERIFY` | Skip TLS verification of `KONTINUUM_ACME_SERVER` in the `ClusterIssuer`. For a local test ACME server such as Pebble only; never set it against a real one. | `false` |
 
 Set `KONTINUUM_SERVER_DNS_DOMAIN` and `KONTINUUM_SERVER_GRPC_ENDPOINT` once, on the hub — `kontinuum zone add` never needs its own copy of either: it infers the domain from any already-registered `Kontinuum`'s own published config, and the `zone` controller reads the gRPC endpoint directly off the hub's own config to build each zone's storage credential. See [Add zone](workflows/zone-add.md) for the full mechanism.
+
+### Storage modes
+
+`KONTINUUM_SERVER_ZONE_STORAGE_MODE` decides how every joined zone's own kontinuum-server reaches the shared state the fleet reconciles against. Left at `Auto`, the mode is inferred from `KONTINUUM_SERVER_STORAGE`:
+
+| `KONTINUUM_SERVER_STORAGE` | Inferred mode |
+| --- | --- |
+| `nats://...` | `NATS` |
+| `postgres://`, `postgresql://` or `mysql://` whose host resolves **only** to globally routable addresses | `Direct` |
+| Anything else: `sqlite://`, a host with any private, CGNAT, loopback, link-local or ULA address, a host that doesn't resolve, `etcd://` | `Proxy` |
+
+Addresses treated as non-routable are RFC 1918 (`10/8`, `172.16/12`, `192.168/16`), RFC 6598 CGNAT (`100.64/10`), loopback (`127/8`, `::1`), link-local (`169.254/16`, `fe80::/10`), IPv6 ULA (`fc00::/7`), unspecified and multicast. A hostname with a mix of public and private records counts as non-routable.
+
+Set the mode explicitly to override inference, for example behind split-horizon DNS, where the address the hub resolves isn't the one every zone would.
+
+!!! note
+    The mode is resolved and validated, but the `zone` controller still hands every zone a `Proxy` relay DSN regardless of it; `Direct` takes effect in a later release.
 
 Flags override environment variables when explicitly set:
 
