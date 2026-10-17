@@ -28,6 +28,10 @@ Since the `/app` UI's OAuth client is public (no client secret), the browser exc
 
 Everything under `/app/*` other than `/app`, `/app/login`, and `/app/logout` requires a valid session; `/app/logout` clears it.
 
+## Additional identity providers
+
+More issuers can be trusted at runtime, without a restart, through the `ClusterIdentityProvider` and `IdentityProvider` resources — including per-tenant issuers whose identities are confined to their own namespace. See [Identity providers](identity-providers.md).
+
 ## Admin group role bindings
 
 The UI's **IAM** page visualizes which OIDC groups (from `KONTINUUM_OIDC_ADMIN_GROUPS`) are bound to the `system:masters`-equivalent role, so operators can see the effective admin set at a glance without cross-referencing environment variables.

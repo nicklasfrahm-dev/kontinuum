@@ -1,0 +1,49 @@
+{{/*
+    identity-provider-row renders one identityProviderRow (an
+    IdentityProvider or ClusterIdentityProvider — see identityproviders.go)
+    as a card: its name, Ready state, and age, then the issuer it trusts,
+    the CEL expressions mapping a token's claims onto a user, and the state
+    of its signing key cache. Shared by iam_namespace_content.html's and
+    iam_cluster_content.html's own "Identity providers" tab.
+*/}}
+{{define "identity-provider-row"}}
+<div class="px-6 py-4">
+    <div class="flex items-center justify-between gap-4 flex-wrap">
+        <div class="flex items-center gap-2 min-w-0">
+            <span class="text-sm font-medium text-white truncate">{{.Name}}</span>
+            {{if .Ready}}
+            <span class="inline-flex items-center rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-emerald-400">Ready</span>
+            {{else}}
+            <span class="inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-amber-400">{{.Reason}}</span>
+            {{end}}
+        </div>
+        <div class="flex items-center gap-3">
+            <span class="text-xs text-neutral-600 font-mono">{{.Age}}</span>
+            <button type="button" onclick="openIAMDeleteModal('{{js .KindLabel}}', '{{js .Name}}', '', '', '{{js .DeleteURL}}')"
+                    class="inline-flex items-center justify-center rounded-lg p-1.5 text-neutral-500 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                    aria-label="Delete {{.Name}}">
+                {{template "icon-trash"}}
+            </button>
+        </div>
+    </div>
+    {{if not .Ready}}
+    <p class="mt-2 text-xs text-amber-400/80 break-words">{{.Message}}</p>
+    {{end}}
+    <dl class="mt-3 grid grid-cols-1 sm:grid-cols-[8rem_1fr] gap-x-4 gap-y-1.5 text-xs">
+        <dt class="text-neutral-500">Issuer</dt>
+        <dd class="font-mono text-neutral-300 break-all">{{.Issuer}}</dd>
+        <dt class="text-neutral-500">Audiences</dt>
+        <dd class="flex flex-wrap gap-1.5">
+            {{range .Audiences}}
+            <span class="inline-flex items-center rounded-full bg-neutral-800 border border-neutral-700 px-2 py-0.5 font-mono text-neutral-300">{{.}}</span>
+            {{end}}
+        </dd>
+        <dt class="text-neutral-500">Username</dt>
+        <dd class="font-mono text-neutral-300 break-all">{{if .Prefix}}<span class="text-accent">"{{.Prefix}}"</span> + {{end}}{{.UsernameMapping}}</dd>
+        <dt class="text-neutral-500">Groups</dt>
+        <dd class="font-mono text-neutral-300 break-all">{{if .GroupsMapping}}{{if .Prefix}}<span class="text-accent">"{{.Prefix}}"</span> + {{end}}{{.GroupsMapping}}{{else}}<span class="text-neutral-600">none</span>{{end}}</dd>
+        <dt class="text-neutral-500">Signing keys</dt>
+        <dd class="text-neutral-300">{{.SigningKeys}}{{if .LastKeyRefresh}} <span class="text-neutral-600">&middot; refreshed {{.LastKeyRefresh}} ago</span>{{end}}</dd>
+    </dl>
+</div>
+{{end}}
