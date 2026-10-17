@@ -274,6 +274,11 @@ func loadServeConfig(cmd *cobra.Command, addr string, storage string) (*config.C
 	// dials or listens — rather than per-connection.
 	grpclog.SetLoggerV2(logging.NewGRPCLogger(logger))
 
+	err = cfg.ValidateStorageMode()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to validate storage mode config: %w", err)
+	}
+
 	anonymous, err := cfg.ValidateAuthentication()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to validate authentication config: %w", err)
