@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 
 	"github.com/nicklasfrahm/kontinuum/pkg/cli"
@@ -10,7 +11,16 @@ import (
 
 func main() {
 	err := cli.NewRootCmd().Execute()
-	if err != nil {
-		os.Exit(1)
+	if err == nil {
+		return
 	}
+
+	// A command may ask for a specific exit code, e.g. up --dry-run's 2
+	// for pending changes; every other error exits 1.
+	exitErr, ok := errors.AsType[*cli.ExitError](err)
+	if ok {
+		os.Exit(exitErr.Code)
+	}
+
+	os.Exit(1)
 }

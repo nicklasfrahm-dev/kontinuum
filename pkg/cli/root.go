@@ -28,6 +28,7 @@ func NewRootCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(NewServeCmd())
+	cmd.AddCommand(NewUpCmd())
 	cmd.AddCommand(NewVersionCmd())
 	cmd.AddCommand(config.NewCmd())
 	cmd.AddCommand(zone.NewCmd())
