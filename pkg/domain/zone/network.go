@@ -9,12 +9,14 @@ import (
 	acmev1 "github.com/cert-manager/cert-manager/pkg/apis/acme/v1"
 	certmanagerv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
 )
@@ -34,11 +36,17 @@ const gatewayClassName = "cilium"
 //nolint:gosec // false positive: certSecretName is a Secret's name, not a credential value
 const (
 	clusterIssuerName = "kontinuum"
-	gatewayName       = "kontinuum"
-	certificateName   = "kontinuum"
-	httpRouteName     = "kontinuum"
-	certSecretName    = "kontinuum-tls"
-	dnsEndpointName   = "kontinuum"
+	// eabSecretName holds the ACME external account binding's MAC key
+	// under eabSecretKey — in downstreamNamespace, which is where
+	// cert-manager itself is installed and so where it resolves a
+	// ClusterIssuer's Secret references.
+	eabSecretName   = "kontinuum-acme-eab"
+	eabSecretKey    = "hmacKey"
+	gatewayName     = "kontinuum"
+	certificateName = "kontinuum"
+	httpRouteName   = "kontinuum"
+	certSecretName  = "kontinuum-tls"
+	dnsEndpointName = "kontinuum"
 
 	httpListenerName  = "http"
 	httpsListenerName = "https"
@@ -62,7 +70,12 @@ const (
 func (r *Reconciler) installNetwork(
 	ctx context.Context, downstream client.Client, hostname string,
 ) (bool, error) {
-	err := ensureClusterIssuer(ctx, downstream, clusterIssuerName, r.HubConfig.ACME)
+	err := ensureExternalAccountBindingSecret(ctx, downstream, r.HubConfig.ACME.ExternalAccountBinding)
+	if err != nil {
+		return false, err
+	}
+
+	err = ensureClusterIssuer(ctx, downstream, clusterIssuerName, r.HubConfig.ACME)
 	if err != nil {
 		return false, err
 	}
@@ -106,6 +119,9 @@ func ensureClusterIssuer(
 					Email:         acme.Email,
 					Server:        acme.Server,
 					SkipTLSVerify: skipTLSVerify,
+					// Set for CAs that require binding to an existing
+					// account — see ensureExternalAccountBindingSecret.
+					ExternalAccountBinding: externalAccountBinding(acme.ExternalAccountBinding),
 					PrivateKey: cmmeta.SecretKeySelector{
 						LocalObjectReference: cmmeta.LocalObjectReference{Name: name + "-account-key"},
 					},
@@ -142,6 +158,55 @@ func ensureClusterIssuer(
 
 	if err != nil {
 		return fmt.Errorf("failed to create %q clusterissuer: %w", name, err)
+	}
+
+	return nil
+}
+
+// externalAccountBinding builds the ClusterIssuer's external account
+// binding from binding, pointing at the Secret
+// ensureExternalAccountBindingSecret maintains — nil when no binding is
+// configured.
+func externalAccountBinding(
+	binding v1alpha2.KontinuumACMEExternalAccountBindingConfigStatus,
+) *acmev1.ACMEExternalAccountBinding {
+	if binding.KeyID == "" {
+		return nil
+	}
+
+	return &acmev1.ACMEExternalAccountBinding{
+		KeyID: binding.KeyID,
+		Key: cmmeta.SecretKeySelector{
+			LocalObjectReference: cmmeta.LocalObjectReference{Name: eabSecretName}, Key: eabSecretKey,
+		},
+	}
+}
+
+// ensureExternalAccountBindingSecret upserts the Secret holding the ACME
+// external account binding's MAC key that ensureClusterIssuer references,
+// or deletes it when no binding is configured, so a key removed from the
+// hub's config doesn't linger on every zone.
+func ensureExternalAccountBindingSecret(
+	ctx context.Context, downstream client.Client, binding v1alpha2.KontinuumACMEExternalAccountBindingConfigStatus,
+) error {
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: eabSecretName, Namespace: downstreamNamespace}}
+
+	if binding.KeyID == "" {
+		err := downstream.Delete(ctx, secret)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete %q secret: %w", eabSecretName, err)
+		}
+
+		return nil
+	}
+
+	_, err := controllerutil.CreateOrUpdate(ctx, downstream, secret, func() error {
+		secret.Data = map[string][]byte{eabSecretKey: []byte(binding.HMACKey)}
+
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to ensure %q secret: %w", eabSecretName, err)
 	}
 
 	return nil

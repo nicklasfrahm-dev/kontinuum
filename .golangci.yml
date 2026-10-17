@@ -38,6 +38,14 @@ linters:
         - runtime\.Object
         - client\.Client
         - authorizer\.Authorizer
+    tagliatelle:
+      case:
+        # Kubernetes API convention keeps acronyms whole in field names
+        # (issuerURL, clientID, keyID), which goCamel checks for and plain
+        # camel rejects.
+        rules:
+          json: goCamel
+          yaml: goCamel
     wrapcheck:
       # grpc-go's own status.Error/Errorf already produce a self-describing
       # error (code + message) that is the correct thing to return directly
