@@ -102,7 +102,8 @@ func (c *Config) EnvVars() []EnvVar {
 // Redact returns a copy of c with sensitive fields stripped, safe to log,
 // display, or copy onto a Kontinuum's broadly-readable status.config —
 // currently, any username/password embedded in Server.Storage (e.g.
-// "postgres://user:pass@host/db"). The unredacted original is what stays
+// "postgres://user:pass@host/db"), the DNS provider credential, and the
+// ACME external account binding's MAC key. The unredacted original is what stays
 // confidential, in the Secret status.secretRef points to — see
 // pkg/domain/registry.Heartbeat.SecretData. Pointer receiver purely to
 // match Defaults below (which must take one to populate c in place) —
@@ -111,6 +112,7 @@ func (c *Config) Redact() Config {
 	redacted := *c
 	redacted.Server.Storage = RedactStorage(c.Server.Storage)
 	redacted.Server.DNS.Credential = ""
+	redacted.ACME.ExternalAccountBinding.HMACKey = ""
 
 	return redacted
 }
