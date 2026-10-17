@@ -33,6 +33,7 @@ import (
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/addon"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/adminrbac"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/etcdproxy"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/frontend"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instance"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/instancepool"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/registry"
@@ -306,6 +307,11 @@ func validateServeConfig(cfg *config.Config) error {
 		return fmt.Errorf("failed to validate acme config: %w", err)
 	}
 
+	err = cfg.ValidateDNS()
+	if err != nil {
+		return fmt.Errorf("failed to validate dns config: %w", err)
+	}
+
 	return nil
 }
 
@@ -445,7 +451,7 @@ func buildServer(
 		libkapi.WithAddr(cfg.Server.Addr),
 		libkapi.WithStorage(storage),
 		libkapi.WithLogger(logger),
-		libkapi.WithServerFactory(customHandlers(uiRouter, oidcHandler, scheme)),
+		libkapi.WithServerFactory(customHandlers(uiRouter, oidcHandler, scheme, cfg.Server.Frontend.Host)),
 		libkapi.WithGarbageCollector(libkapi.GarbageCollectorConfig{}),
 		// WithSystemNamespace is where libkapi persists/syncs its own
 		// system-managed state across every replica sharing this same
@@ -772,7 +778,25 @@ func domainControllerOptions(
 		instanceOptions(logger, zoneLease), instancePoolOptions(logger, zoneLease),
 		talosClusterOptions(cfg, logger, zoneLease), addonOptions(logger, zoneLease),
 		zoneOptions(cfg, logger, zoneLease, storageMode),
-		adminRBACOptions(cfg, logger, zoneLease), LonePeerOptions(cfg, logger, zoneLease))
+		adminRBACOptions(cfg, logger, zoneLease), LonePeerOptions(cfg, logger, zoneLease),
+		frontendOptions(cfg, logger, zoneLease))
+}
+
+// frontendOptions wires the frontend host's single-writer DNS reconciler
+// (see pkg/domain/frontend) onto the Server — only when a frontend host is
+// configured.
+func frontendOptions(cfg *config.Config, logger *slog.Logger, zoneLease zonelease.Identity) []libkapi.Option {
+	if cfg.Server.Frontend.Host == "" {
+		return nil
+	}
+
+	controller := frontend.NewController(frontend.Config{
+		Logger:    logger.With("component", "frontend"),
+		Host:      cfg.Server.Frontend.Host,
+		ZoneLease: zoneLease,
+	})
+
+	return []libkapi.Option{libkapi.WithController(controller)}
 }
 
 // buildZoneLease builds this process's own zonelease.Identity, resolving
@@ -1000,7 +1024,9 @@ func shutdownServer(server *libkapi.Server, logger *slog.Logger) error {
 // pkg/domain/etcdproxy) alongside the built API server. Any HTTP request
 // that does not match a registered route falls through to the Kubernetes
 // API server's own handler. oidcHandler is nil when OIDC is not
-// configured, leaving the UI unprotected. scheme must already carry
+// configured, leaving the UI unprotected. With frontendHost set, every /app
+// route — the UI and its OIDC login flow — is only served on that host and
+// redirected there from any other (see ui.NewAppMux). scheme must already carry
 // kontinuum.sh/v1alpha2 and core/v1 (see buildServer), the two GVKs the
 // proxy's own hub client (built from Ctx.LoopbackConfig) needs to resolve.
 //
@@ -1012,9 +1038,11 @@ func shutdownServer(server *libkapi.Server, logger *slog.Logger) error {
 // pkg/domain/zone's own "further zones it joins" ACME propagation) needs
 // to expose this same proxy in front of its own local storage for exactly
 // the same reason the original hub does.
-func customHandlers(uiRouter *ui.Router, oidcHandler *auth.Handler, scheme *runtime.Scheme) libkapi.ServerFactory {
+func customHandlers(
+	uiRouter *ui.Router, oidcHandler *auth.Handler, scheme *runtime.Scheme, frontendHost string,
+) libkapi.ServerFactory {
 	return func(serverCtx *libkapi.Ctx) error {
-		mux := serverCtx.HTTPMux()
+		mux := ui.NewAppMux(serverCtx.HTTPMux(), frontendHost)
 
 		var appRoot http.HandlerFunc
 

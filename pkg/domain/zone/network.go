@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/nicklasfrahm/kontinuum/api/v1alpha2"
+	"github.com/nicklasfrahm/kontinuum/pkg/domain/addon"
 )
 
 // gatewayClassName is the GatewayClass every joined zone's Gateway
@@ -40,8 +41,12 @@ const (
 	// under eabSecretKey — in downstreamNamespace, which is where
 	// cert-manager itself is installed and so where it resolves a
 	// ClusterIssuer's Secret references.
-	eabSecretName   = "kontinuum-acme-eab"
-	eabSecretKey    = "hmacKey"
+	eabSecretName = "kontinuum-acme-eab"
+	eabSecretKey  = "hmacKey"
+	// dns01SecretName holds the DNS provider credential cert-manager's
+	// DNS-01 solver reads, in downstreamNamespace for the same reason as
+	// eabSecretName. Only present while a frontend host is set.
+	dns01SecretName = "kontinuum-dns01-credentials"
 	gatewayName     = "kontinuum"
 	certificateName = "kontinuum"
 	httpRouteName   = "kontinuum"
@@ -50,8 +55,11 @@ const (
 
 	httpListenerName  = "http"
 	httpsListenerName = "https"
-	httpPort          = 80
-	httpsPort         = 443
+	// frontendListenerName is the HTTPS listener serving the fleet's
+	// frontend host — see v1alpha2.KontinuumFrontendConfigStatus.
+	frontendListenerName = "https-frontend"
+	httpPort             = 80
+	httpsPort            = 443
 
 	// dnsRecordTypeA, dnsRecordTypeAAAA, and dnsRecordTypeCNAME are the
 	// external-dns record types ensureDNSEndpoint chooses between, based on
@@ -63,35 +71,48 @@ const (
 )
 
 // installNetwork ensures the ClusterIssuer, Gateway, Certificate, and
-// HTTPRoute exposing this zone's own kontinuum-server at hostname, and
-// reports whether the Certificate has itself finished issuing — see
-// certificateReady's own doc for why that, not just object creation, is
-// what Installed waits on.
+// HTTPRoute exposing this zone's own kontinuum-server at hostname — and, when
+// the fleet has a frontend host (see v1alpha2.KontinuumFrontendConfigStatus),
+// at that host too — and reports whether the Certificate has itself finished
+// issuing — see certificateReady's own doc for why that, not just object
+// creation, is what Installed waits on.
 func (r *Reconciler) installNetwork(
 	ctx context.Context, downstream client.Client, hostname string,
 ) (bool, error) {
-	err := ensureExternalAccountBindingSecret(ctx, downstream, r.HubConfig.ACME.ExternalAccountBinding)
+	frontendHost := r.HubConfig.Server.Frontend.Host
+	hostnames := []string{hostname}
+
+	if frontendHost != "" {
+		hostnames = append(hostnames, frontendHost)
+	}
+
+	solver, err := ensureChallengeSolver(ctx, downstream, r.HubConfig.Server.DNS, frontendHost)
 	if err != nil {
 		return false, err
 	}
 
-	err = ensureClusterIssuer(ctx, downstream, clusterIssuerName, r.HubConfig.ACME)
+	err = ensureExternalAccountBindingSecret(ctx, downstream, r.HubConfig.ACME.ExternalAccountBinding)
 	if err != nil {
 		return false, err
 	}
 
-	err = ensureGateway(ctx, downstream, downstreamNamespace, gatewayName, hostname, certSecretName)
+	err = ensureClusterIssuer(ctx, downstream, clusterIssuerName, r.HubConfig.ACME, solver)
 	if err != nil {
 		return false, err
 	}
 
-	err = ensureCertificate(ctx, downstream, downstreamNamespace, certificateName, hostname, certSecretName,
+	err = ensureGateway(ctx, downstream, downstreamNamespace, gatewayName, hostname, frontendHost, certSecretName)
+	if err != nil {
+		return false, err
+	}
+
+	err = ensureCertificate(ctx, downstream, downstreamNamespace, certificateName, hostnames, certSecretName,
 		clusterIssuerName)
 	if err != nil {
 		return false, err
 	}
 
-	err = ensureHTTPRoute(ctx, downstream, downstreamNamespace, httpRouteName, hostname, gatewayName, serviceName)
+	err = ensureHTTPRoute(ctx, downstream, downstreamNamespace, httpRouteName, hostnames, gatewayName, serviceName)
 	if err != nil {
 		return false, err
 	}
@@ -99,12 +120,72 @@ func (r *Reconciler) installNetwork(
 	return certificateReady(ctx, downstream, downstreamNamespace, certificateName)
 }
 
+// ensureChallengeSolver returns the ACME challenge solver this zone's
+// ClusterIssuer orders certificates with. The challenge is never
+// configured, it follows from frontendHost:
+//
+//   - Without one, HTTP-01 through the Gateway API solver, attached to
+//     gatewayName's own HTTP listener (see ensureGateway) — cert-manager
+//     creates an ephemeral HTTPRoute there for each challenge.
+//   - With one, DNS-01 through dns's provider (see addon.DNS01Solver),
+//     because HTTP-01 fails at random for a name several zones serve: the
+//     CA may validate against a zone other than the one that ordered. The
+//     provider credential external-dns already uses is copied into
+//     dns01SecretName for the solver to read, so operators supply one set
+//     of DNS credentials.
+//
+// dns01SecretName is deleted whenever HTTP-01 is used, so a credential
+// doesn't linger on a zone once the frontend host is unset.
+func ensureChallengeSolver(
+	ctx context.Context, downstream client.Client, dns v1alpha2.KontinuumDNSConfigStatus, frontendHost string,
+) (acmev1.ACMEChallengeSolver, error) {
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: dns01SecretName, Namespace: downstreamNamespace}}
+
+	if frontendHost == "" {
+		err := client.IgnoreNotFound(downstream.Delete(ctx, secret))
+		if err != nil {
+			return acmev1.ACMEChallengeSolver{}, fmt.Errorf("failed to delete %q secret: %w", dns01SecretName, err)
+		}
+
+		return acmev1.ACMEChallengeSolver{
+			HTTP01: &acmev1.ACMEChallengeSolverHTTP01{
+				GatewayHTTPRoute: &acmev1.ACMEChallengeSolverHTTP01GatewayHTTPRoute{
+					ParentRefs: []gatewayv1.ParentReference{{Name: gatewayv1.ObjectName(gatewayName)}},
+				},
+			},
+		}, nil
+	}
+
+	keys, err := addon.ParseDNSCredentialKeys(dns.Credential)
+	if err != nil {
+		return acmev1.ACMEChallengeSolver{}, fmt.Errorf("failed to parse dns credential: %w", err)
+	}
+
+	solver, err := addon.DNS01Solver(dns.Provider, dns01SecretName, keys)
+	if err != nil {
+		return acmev1.ACMEChallengeSolver{}, fmt.Errorf("failed to build dns-01 solver: %w", err)
+	}
+
+	_, err = controllerutil.CreateOrUpdate(ctx, downstream, secret, func() error {
+		secret.Data = make(map[string][]byte, len(keys))
+		for key, value := range keys {
+			secret.Data[key] = []byte(value)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return acmev1.ACMEChallengeSolver{}, fmt.Errorf("failed to ensure %q secret: %w", dns01SecretName, err)
+	}
+
+	return acmev1.ACMEChallengeSolver{DNS01: solver}, nil
+}
+
 // ensureClusterIssuer upserts a cluster-scoped ACME ClusterIssuer solving
-// HTTP-01 challenges via the Gateway API solver, attached to gatewayName's
-// own HTTP listener (see ensureGateway) — cert-manager creates an ephemeral
-// HTTPRoute there for each challenge.
+// challenges with solver — see ensureChallengeSolver.
 func ensureClusterIssuer(
 	ctx context.Context, downstream client.Client, name string, acme v1alpha2.KontinuumACMEConfigStatus,
+	solver acmev1.ACMEChallengeSolver,
 ) error {
 	skipTLSVerify, err := strconv.ParseBool(acme.InsecureSkipVerify)
 	if err != nil {
@@ -125,13 +206,7 @@ func ensureClusterIssuer(
 					PrivateKey: cmmeta.SecretKeySelector{
 						LocalObjectReference: cmmeta.LocalObjectReference{Name: name + "-account-key"},
 					},
-					Solvers: []acmev1.ACMEChallengeSolver{{
-						HTTP01: &acmev1.ACMEChallengeSolverHTTP01{
-							GatewayHTTPRoute: &acmev1.ACMEChallengeSolverHTTP01GatewayHTTPRoute{
-								ParentRefs: []gatewayv1.ParentReference{{Name: gatewayv1.ObjectName(gatewayName)}},
-							},
-						},
-					}},
+					Solvers: []acmev1.ACMEChallengeSolver{solver},
 				},
 			},
 		},
@@ -212,36 +287,32 @@ func ensureExternalAccountBindingSecret(
 	return nil
 }
 
-// ensureGateway upserts a Gateway with two listeners: a plain HTTP one (no
-// hostname restriction) for cert-manager's HTTP-01 solver to attach its
-// ephemeral challenge HTTPRoute to, and an HTTPS one terminating TLS from
-// certSecretName — the Secret ensureCertificate's Certificate populates.
+// ensureGateway upserts a Gateway with a plain HTTP listener (no hostname
+// restriction) for cert-manager's HTTP-01 solver to attach its ephemeral
+// challenge HTTPRoute to, and an HTTPS listener per hostname this zone
+// serves — its own, and frontendHost when set — each terminating TLS from
+// certSecretName, the Secret ensureCertificate's Certificate populates.
 func ensureGateway(
-	ctx context.Context, downstream client.Client, namespace, name, hostname, certSecretName string,
+	ctx context.Context, downstream client.Client, namespace, name, hostname, frontendHost, certSecretName string,
 ) error {
+	listeners := []gatewayv1.Listener{
+		{
+			Name:     httpListenerName,
+			Port:     httpPort,
+			Protocol: gatewayv1.HTTPProtocolType,
+		},
+		httpsListener(httpsListenerName, hostname, certSecretName),
+	}
+
+	if frontendHost != "" {
+		listeners = append(listeners, httpsListener(frontendListenerName, frontendHost, certSecretName))
+	}
+
 	gateway := &gatewayv1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec: gatewayv1.GatewaySpec{
 			GatewayClassName: gatewayClassName,
-			Listeners: []gatewayv1.Listener{
-				{
-					Name:     httpListenerName,
-					Port:     httpPort,
-					Protocol: gatewayv1.HTTPProtocolType,
-				},
-				{
-					Name:     httpsListenerName,
-					Port:     httpsPort,
-					Protocol: gatewayv1.HTTPSProtocolType,
-					Hostname: new(gatewayv1.Hostname(hostname)),
-					TLS: &gatewayv1.GatewayTLSConfig{
-						Mode: new(gatewayv1.TLSModeTerminate),
-						CertificateRefs: []gatewayv1.SecretObjectReference{
-							{Name: gatewayv1.ObjectName(certSecretName)},
-						},
-					},
-				},
-			},
+			Listeners:        listeners,
 		},
 	}
 
@@ -271,16 +342,38 @@ func ensureGateway(
 	return nil
 }
 
-// ensureCertificate upserts a Certificate for hostname, issued by
+// httpsListener builds an HTTPS listener named name for hostname,
+// terminating TLS from certSecretName.
+func httpsListener(name, hostname, certSecretName string) gatewayv1.Listener {
+	return gatewayv1.Listener{
+		Name:     gatewayv1.SectionName(name),
+		Port:     httpsPort,
+		Protocol: gatewayv1.HTTPSProtocolType,
+		Hostname: new(gatewayv1.Hostname(hostname)),
+		TLS: &gatewayv1.GatewayTLSConfig{
+			Mode: new(gatewayv1.TLSModeTerminate),
+			CertificateRefs: []gatewayv1.SecretObjectReference{
+				{Name: gatewayv1.ObjectName(certSecretName)},
+			},
+		},
+	}
+}
+
+// ensureCertificate upserts one Certificate covering every one of
+// hostnames — the zone's own, plus the frontend host when set — issued by
 // issuerName (a ClusterIssuer), storing its key pair in secretName — the
-// same Secret ensureGateway's HTTPS listener references.
+// same Secret every one of ensureGateway's HTTPS listeners references.
+// Each zone keeps a certificate of its own rather than sharing one
+// fleet-wide: every zone's name set differs, so the CA's duplicate
+// certificate limit never applies and no Secret is copied between zones.
 func ensureCertificate(
-	ctx context.Context, downstream client.Client, namespace, name, hostname, secretName, issuerName string,
+	ctx context.Context, downstream client.Client, namespace, name string, hostnames []string,
+	secretName, issuerName string,
 ) error {
 	cert := &certmanagerv1.Certificate{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec: certmanagerv1.CertificateSpec{
-			DNSNames:   []string{hostname},
+			DNSNames:   hostnames,
 			SecretName: secretName,
 			IssuerRef: cmmeta.ObjectReference{
 				Name:  issuerName,
@@ -316,21 +409,46 @@ func ensureCertificate(
 	return nil
 }
 
+// routeAttachments returns the HTTPRoute's parent references and hostnames
+// for hostnames: the zone's own hostname on gatewayName's HTTPS listener,
+// and the frontend host, when present, on its own listener.
+func routeAttachments(hostnames []string, gatewayName string) ([]gatewayv1.ParentReference, []gatewayv1.Hostname) {
+	parentRefs := []gatewayv1.ParentReference{{
+		Name:        gatewayv1.ObjectName(gatewayName),
+		SectionName: new(gatewayv1.SectionName(httpsListenerName)),
+	}}
+
+	routeHostnames := make([]gatewayv1.Hostname, 0, len(hostnames))
+	for index, hostname := range hostnames {
+		routeHostnames = append(routeHostnames, gatewayv1.Hostname(hostname))
+
+		if index > 0 {
+			parentRefs = append(parentRefs, gatewayv1.ParentReference{
+				Name:        gatewayv1.ObjectName(gatewayName),
+				SectionName: new(gatewayv1.SectionName(frontendListenerName)),
+			})
+		}
+	}
+
+	return parentRefs, routeHostnames
+}
+
 // ensureHTTPRoute upserts an HTTPRoute attaching to gatewayName's HTTPS
-// listener and routing hostname to serviceName.
+// listeners and routing every one of hostnames to serviceName. Redirecting
+// the UI from a zone's own hostname to the frontend host is
+// kontinuum-server's own concern, not this route's — see
+// pkg/ui.FrontendRedirect.
 func ensureHTTPRoute(
-	ctx context.Context, downstream client.Client, namespace, name, hostname, gatewayName, serviceName string,
+	ctx context.Context, downstream client.Client, namespace, name string, hostnames []string,
+	gatewayName, serviceName string,
 ) error {
+	parentRefs, routeHostnames := routeAttachments(hostnames, gatewayName)
+
 	route := &gatewayv1.HTTPRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec: gatewayv1.HTTPRouteSpec{
-			CommonRouteSpec: gatewayv1.CommonRouteSpec{
-				ParentRefs: []gatewayv1.ParentReference{{
-					Name:        gatewayv1.ObjectName(gatewayName),
-					SectionName: new(gatewayv1.SectionName(httpsListenerName)),
-				}},
-			},
-			Hostnames: []gatewayv1.Hostname{gatewayv1.Hostname(hostname)},
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{ParentRefs: parentRefs},
+			Hostnames:       routeHostnames,
 			Rules: []gatewayv1.HTTPRouteRule{{
 				BackendRefs: []gatewayv1.HTTPBackendRef{{
 					BackendRef: gatewayv1.BackendRef{

@@ -405,7 +405,7 @@ func TestReconcileTreatsAlreadyExistsAsBootstrapped(t *testing.T) {
 // cloudflareDNSConfig is a hub DNS config for Cloudflare with flatYAML as
 // its credential.
 func cloudflareDNSConfig(flatYAML string) v1alpha2.KontinuumDNSConfigStatus {
-	dns := v1alpha2.KontinuumDNSConfigStatus{Provider: "cloudflare"}
+	dns := v1alpha2.KontinuumDNSConfigStatus{Provider: "Cloudflare"}
 	dns.Credential = flatYAML
 
 	return dns
