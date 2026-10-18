@@ -428,7 +428,7 @@ func createAddObjects(
 	// from ownership. See ensureSeedInstance's own doc for the
 	// create-new-vs-adopt-existing branch (opts.ExistingInstanceName).
 	for _, instance := range instances {
-		err = ensureSeedInstance(ctx, hubClient, opts, instance)
+		err = ensureSeedInstance(ctx, hubClient, opts, pool.Name, instance)
 		if err != nil {
 			return err
 		}
@@ -450,10 +450,10 @@ func createAddObjects(
 // same way an explicit pick would be, not just left unlabeled the way a bare
 // tolerate-AlreadyExists create used to leave it.
 func ensureSeedInstance(
-	ctx context.Context, hubClient client.Client, opts AddOptions, newInstance *v1alpha2.Instance,
+	ctx context.Context, hubClient client.Client, opts AddOptions, poolName string, newInstance *v1alpha2.Instance,
 ) error {
 	if opts.ExistingInstanceName != "" {
-		return adoptInstance(ctx, hubClient, opts.ExistingInstanceName, newInstance.Labels)
+		return adoptInstance(ctx, hubClient, opts.ExistingInstanceName, poolName, newInstance.Labels)
 	}
 
 	err := hubClient.Create(ctx, newInstance)
@@ -465,7 +465,7 @@ func ensureSeedInstance(
 		return fmt.Errorf("failed to create %T %q: %w", newInstance, newInstance.GetName(), err)
 	}
 
-	return adoptInstance(ctx, hubClient, newInstance.Name, newInstance.Labels)
+	return adoptInstance(ctx, hubClient, newInstance.Name, poolName, newInstance.Labels)
 }
 
 // adoptInstance fetches the already-registered Instance named name (in
@@ -476,7 +476,14 @@ func ensureSeedInstance(
 // matches it — overwriting any stale region/zone pair left over from a
 // previous zone that has since released it (see instancepool.Reconciler's
 // own release, which strips only v1alpha2.LabelClaimedBy, not region/zone).
-func adoptInstance(ctx context.Context, hubClient client.Client, name string, labels map[string]string) error {
+//
+// An Instance already claimed by poolName itself is this same zone's own,
+// adopted by an earlier or concurrent run of the same zone add — e.g. two
+// kontinuum ups creating the same declared zone at once — so it's left as
+// is rather than rejected.
+func adoptInstance(
+	ctx context.Context, hubClient client.Client, name, poolName string, labels map[string]string,
+) error {
 	var inst v1alpha2.Instance
 
 	key := client.ObjectKey{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace}
@@ -486,7 +493,12 @@ func adoptInstance(ctx context.Context, hubClient client.Client, name string, la
 		return fmt.Errorf("failed to fetch existing instance %q: %w", name, err)
 	}
 
-	if _, claimed := inst.Labels[v1alpha2.LabelClaimedBy]; claimed {
+	claimedBy, claimed := inst.Labels[v1alpha2.LabelClaimedBy]
+	if claimed && claimedBy == poolName {
+		return nil
+	}
+
+	if claimed {
 		return fmt.Errorf("%w: %q", errInstanceAlreadyClaimed, name)
 	}
 
