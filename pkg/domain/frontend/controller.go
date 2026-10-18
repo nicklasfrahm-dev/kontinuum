@@ -145,6 +145,9 @@ func (r *Runnable) Reconcile(ctx context.Context) {
 		return
 	}
 
+	ctx, release := r.Locker.KeepRenewed(ctx, zonelease.GlobalKey)
+	defer release()
+
 	clusters, err := r.zoneClusters(ctx)
 	if err != nil {
 		r.Logger.Error("Failed to list zones for frontend dns", "error", err)
