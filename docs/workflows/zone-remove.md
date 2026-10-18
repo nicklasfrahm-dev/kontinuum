@@ -137,7 +137,7 @@ own reset genuinely can't succeed (hardware pulled, network gone) doesn't
 block the rest of the cluster's instances from being released, or the
 `TalosCluster` object itself from finishing deletion.
 
-### Removing a fleet's last zone { #removing-a-fleets-last-zone }
+### Removing a fleet's last zone
 
 A zone's own `kontinuum-server` never tears its own zone down, because
 that would delete the `Deployment`, and reset the nodes, it runs on itself

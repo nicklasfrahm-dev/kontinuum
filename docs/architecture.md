@@ -44,7 +44,7 @@ Fleet-wide state that belongs to no single zone, such as the registry's stale-`K
 
 Hub-less follows from the storage mode and nothing else. It is never inferred from whether a hub happens to be registered, so a hub restart can't switch the fleet's behaviour.
 
-### Single-zone fleets { #single-zone-fleets }
+### Single-zone fleets
 
 A hub-less fleet may consist of a single zone, for example a test setup, or a fleet whose other zones are down during an upgrade. Its only zone reconciles itself: it keeps its own `TalosCluster`, addons and `kontinuum` `Deployment` converged, including rolling that `Deployment` onto a new version.
 
