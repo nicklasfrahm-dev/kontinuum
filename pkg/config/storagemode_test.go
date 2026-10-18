@@ -200,28 +200,28 @@ func TestParseStorageMode(t *testing.T) {
 	}
 }
 
-func TestDefaultZoneStorageModeIsAuto(t *testing.T) {
+func TestDefaultStorageModeIsAuto(t *testing.T) {
 	t.Parallel()
 
 	defaults := &config.Config{}
 	defaults.Defaults()
 
-	assert.Equal(t, string(config.StorageModeAuto), defaults.Server.ZoneStorageMode)
+	assert.Equal(t, string(config.StorageModeAuto), defaults.Server.StorageMode)
 	require.NoError(t, defaults.ValidateStorageMode())
 }
 
-func TestLoadReadsZoneStorageModeEnvVar(t *testing.T) {
-	t.Setenv("KONTINUUM_SERVER_ZONE_STORAGE_MODE", "Direct")
+func TestLoadReadsStorageModeEnvVar(t *testing.T) {
+	t.Setenv("KONTINUUM_SERVER_STORAGE_MODE", "Direct")
 
 	cfg, err := config.Load()
 	require.NoError(t, err)
 
-	assert.Equal(t, "Direct", cfg.Server.ZoneStorageMode)
+	assert.Equal(t, "Direct", cfg.Server.StorageMode)
 	require.NoError(t, cfg.ValidateStorageMode())
 }
 
 func TestValidateStorageModeRejectsInvalidValue(t *testing.T) {
-	t.Setenv("KONTINUUM_SERVER_ZONE_STORAGE_MODE", "direct")
+	t.Setenv("KONTINUUM_SERVER_STORAGE_MODE", "direct")
 
 	cfg, err := config.Load()
 	require.NoError(t, err)
@@ -229,17 +229,17 @@ func TestValidateStorageModeRejectsInvalidValue(t *testing.T) {
 	require.ErrorIs(t, cfg.ValidateStorageMode(), config.ErrInvalidStorageMode)
 }
 
-func TestZoneStorageModeReachesEnvVars(t *testing.T) {
+func TestStorageModeReachesEnvVars(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.Config{}
 	cfg.Defaults()
-	cfg.Server.ZoneStorageMode = string(config.StorageModeDirect)
+	cfg.Server.StorageMode = string(config.StorageModeDirect)
 
 	var found bool
 
 	for _, envVar := range cfg.EnvVars() {
-		if envVar.Name == "KONTINUUM_SERVER_ZONE_STORAGE_MODE" {
+		if envVar.Name == "KONTINUUM_SERVER_STORAGE_MODE" {
 			found = true
 
 			assert.Equal(t, "Direct", envVar.Value)
