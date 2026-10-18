@@ -35,6 +35,7 @@ func newFakeClient(t *testing.T, objects ...client.Object) client.Client {
 
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, coordinationv1.AddToScheme(scheme))
+	require.NoError(t, v1alpha2.AddToScheme(scheme))
 
 	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 }
@@ -158,9 +159,10 @@ func TestTryAcquire_ExpiredOtherHolderIsTakenOver(t *testing.T) {
 	assert.Equal(t, int32(1), *lease.Spec.LeaseTransitions)
 }
 
-// TestTryAcquire_OwnZoneKeyIsRefusedWithoutAPICall proves a worker never
-// even talks to the API server when asked for its own zone's key — a zone
-// must never reconcile its own resources (see Locker's own doc). A nil
+// TestTryAcquire_OwnZoneKeyIsRefusedWithoutAPICall proves a worker in a
+// fleet with a hub never even talks to the API server when asked for its
+// own zone's key — the hub reconciles it (see Locker.SelfZoneKey's own
+// doc). A nil
 // Client would panic if TryAcquire tried to use it, so a nil-panic-free
 // return proves no call was attempted.
 func TestTryAcquire_OwnZoneKeyIsRefusedWithoutAPICall(t *testing.T) {
@@ -253,7 +255,7 @@ func TestTryAcquire_HubLessMatrix(t *testing.T) {
 		{name: "worker, own key", selfZoneKey: testZoneKey, hubLess: false, key: testZoneKey, want: false},
 		{name: "worker, other key", selfZoneKey: testZoneKey, hubLess: false, key: otherZoneKey, want: true},
 		{name: "peer, global key", selfZoneKey: testZoneKey, hubLess: true, key: zonelease.GlobalKey, want: true},
-		{name: "peer, own key", selfZoneKey: testZoneKey, hubLess: true, key: testZoneKey, want: false},
+		{name: "peer, own key", selfZoneKey: testZoneKey, hubLess: true, key: testZoneKey, want: true},
 		{name: "peer, other key", selfZoneKey: testZoneKey, hubLess: true, key: otherZoneKey, want: true},
 	}
 
@@ -263,7 +265,7 @@ func TestTryAcquire_HubLessMatrix(t *testing.T) {
 
 			var apiClient client.Client
 			if test.want {
-				apiClient = newFakeClient(t)
+				apiClient = newFakeClient(t, ownZone(), ownTalosCluster())
 			}
 
 			locker := zonelease.NewLockerFor(apiClient, apiClient, zonelease.Identity{
@@ -309,4 +311,192 @@ func TestNewLockerForDefaultsLeaseDuration(t *testing.T) {
 	assert.Equal(t, "hub-1", locker.HolderIdentity)
 	assert.True(t, locker.HubLess)
 	assert.Positive(t, locker.LeaseDuration)
+}
+
+// ownZone and ownTalosCluster are testZoneKey's own Zone and TalosCluster,
+// both named after the zone key.
+func ownZone() *v1alpha2.Zone {
+	return &v1alpha2.Zone{ObjectMeta: metav1.ObjectMeta{Name: testZoneKey, Namespace: v1alpha2.KontinuumSystemNamespace}}
+}
+
+func ownTalosCluster() *v1alpha2.TalosCluster {
+	return &v1alpha2.TalosCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: testZoneKey, Namespace: v1alpha2.KontinuumSystemNamespace},
+	}
+}
+
+// removing marks obj as being deleted, held back by a finalizer.
+func removing(obj client.Object) {
+	now := metav1.Now()
+	obj.SetDeletionTimestamp(&now)
+	obj.SetFinalizers([]string{"kontinuum.sh/test"})
+}
+
+// removingZone and removingTalosCluster are ownZone and ownTalosCluster
+// being deleted.
+func removingZone() *v1alpha2.Zone {
+	zoneObj := ownZone()
+	removing(zoneObj)
+
+	return zoneObj
+}
+
+func removingTalosCluster() *v1alpha2.TalosCluster {
+	cluster := ownTalosCluster()
+	removing(cluster)
+
+	return cluster
+}
+
+// TestTryAcquire_PeerRefusesOwnKeyWhileItsZoneIsRemoved covers the one
+// exception to a hub-less zone reconciling itself: removing it, which
+// would delete the Deployment and reset the nodes the peer runs on.
+func TestTryAcquire_PeerRefusesOwnKeyWhileItsZoneIsRemoved(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		objects []client.Object
+	}{
+		{name: "zone being deleted", objects: []client.Object{removingZone(), ownTalosCluster()}},
+		{name: "talos cluster being deleted", objects: []client.Object{ownZone(), removingTalosCluster()}},
+		{name: "zone gone", objects: []client.Object{ownTalosCluster()}},
+		{name: "talos cluster gone", objects: []client.Object{ownZone()}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			apiClient := newFakeClient(t, test.objects...)
+			locker := zonelease.NewLockerFor(apiClient, apiClient, zonelease.Identity{
+				HolderIdentity: "process-1", SelfZoneKey: testZoneKey, HubLess: true,
+			})
+
+			acquired, err := locker.TryAcquire(context.Background(), testZoneKey)
+			require.NoError(t, err)
+			assert.False(t, acquired)
+
+			acquired, err = locker.TryAcquire(context.Background(), otherZoneKey)
+			require.NoError(t, err)
+			assert.True(t, acquired, "only the peer's own zone is left to others")
+		})
+	}
+}
+
+// shortLeaseDuration keeps KeepRenewed's renewal loop fast enough to test,
+// with enough headroom that a loaded -race run still renews in time.
+const shortLeaseDuration = 900 * time.Millisecond
+
+func getLease(t *testing.T, apiClient client.Client, name string) *coordinationv1.Lease {
+	t.Helper()
+
+	var lease coordinationv1.Lease
+	require.NoError(t, apiClient.Get(context.Background(),
+		client.ObjectKey{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace}, &lease))
+
+	return &lease
+}
+
+func TestKeepRenewed_RenewsWhileTheReconcileRuns(t *testing.T) {
+	t.Parallel()
+
+	apiClient := newFakeClient(t)
+	holder := zonelease.NewLocker(apiClient, apiClient, "process-1", "", shortLeaseDuration)
+	contender := zonelease.NewLocker(apiClient, apiClient, "process-2", "", shortLeaseDuration)
+
+	acquired, err := holder.TryAcquire(context.Background(), testZoneKey)
+	require.NoError(t, err)
+	require.True(t, acquired)
+
+	ctx, release := holder.KeepRenewed(context.Background(), testZoneKey)
+	defer release()
+
+	// Run for well past the lease duration: without background renewal
+	// the contender would take the Lease over.
+	time.Sleep(2 * shortLeaseDuration)
+
+	require.NoError(t, ctx.Err())
+
+	acquired, err = contender.TryAcquire(context.Background(), testZoneKey)
+	require.NoError(t, err)
+	assert.False(t, acquired)
+}
+
+func TestKeepRenewed_CancelsWhenTheLeaseIsLost(t *testing.T) {
+	t.Parallel()
+
+	apiClient := newFakeClient(t)
+	holder := zonelease.NewLocker(apiClient, apiClient, "process-1", "", shortLeaseDuration)
+
+	acquired, err := holder.TryAcquire(context.Background(), testZoneKey)
+	require.NoError(t, err)
+	require.True(t, acquired)
+
+	ctx, release := holder.KeepRenewed(context.Background(), testZoneKey)
+	defer release()
+
+	lease := getLease(t, apiClient, testZoneLeaseName)
+	other := "process-2"
+	lease.Spec.HolderIdentity = &other
+	require.NoError(t, apiClient.Update(context.Background(), lease))
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(3 * shortLeaseDuration):
+		t.Fatal("the reconcile's context outlived the lease")
+	}
+
+	require.ErrorIs(t, context.Cause(ctx), zonelease.ErrLeaseLost)
+}
+
+func TestKeepRenewed_ReleaseStopsRenewing(t *testing.T) {
+	t.Parallel()
+
+	apiClient := newFakeClient(t)
+	holder := zonelease.NewLocker(apiClient, apiClient, "process-1", "", shortLeaseDuration)
+
+	acquired, err := holder.TryAcquire(context.Background(), testZoneKey)
+	require.NoError(t, err)
+	require.True(t, acquired)
+
+	ctx, release := holder.KeepRenewed(context.Background(), testZoneKey)
+	release()
+
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+	require.NotErrorIs(t, context.Cause(ctx), zonelease.ErrLeaseLost)
+}
+
+func TestReleaseAll_FreesOnlyTheHoldersZoneLeases(t *testing.T) {
+	t.Parallel()
+
+	apiClient := newFakeClient(t, &coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{Name: "unrelated", Namespace: v1alpha2.KontinuumSystemNamespace},
+		Spec:       coordinationv1.LeaseSpec{HolderIdentity: new("process-1")},
+	})
+	holder := zonelease.NewLocker(apiClient, apiClient, "process-1", "", testLeaseDuration)
+	other := zonelease.NewLocker(apiClient, apiClient, "process-2", "", testLeaseDuration)
+
+	for _, key := range []string{testZoneKey, zonelease.GlobalKey} {
+		acquired, err := holder.TryAcquire(context.Background(), key)
+		require.NoError(t, err)
+		require.True(t, acquired)
+	}
+
+	acquired, err := other.TryAcquire(context.Background(), otherZoneKey)
+	require.NoError(t, err)
+	require.True(t, acquired)
+
+	released, err := zonelease.ReleaseAll(context.Background(), apiClient, "process-1")
+	require.NoError(t, err)
+	assert.Equal(t, 2, released)
+
+	for _, key := range []string{testZoneKey, zonelease.GlobalKey} {
+		acquired, err = other.TryAcquire(context.Background(), key)
+		require.NoError(t, err)
+		assert.True(t, acquired, "a released lease is free at once, not after the lease duration")
+	}
+
+	assert.Equal(t, "process-1", *getLease(t, apiClient, "unrelated").Spec.HolderIdentity,
+		"a lease this package didn't create is left alone")
 }

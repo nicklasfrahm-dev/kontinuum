@@ -443,7 +443,7 @@ func buildServer(
 		libkapi.WithPostStartHook(ensureCRD),
 	}, authOpts, registryOpts, instanceOptions(logger, zoneLease), instancePoolOptions(logger, zoneLease),
 		talosClusterOptions(cfg, logger, zoneLease), addonOptions(logger, zoneLease), zoneOptions(cfg, logger, zoneLease),
-		adminRBACOptions(cfg, logger, zoneLease), LonePeerOptions(cfg, logger, zoneLease))
+		adminRBACOptions(cfg, logger, zoneLease), releaseZoneLeaseOptions(logger, zoneLease))
 
 	// Storage is resolved against a background context so the backend
 	// is only torn down by Server.Shutdown, not by the signal context
@@ -786,21 +786,43 @@ func resolveStorageMode(cfg *config.Config) (config.StorageMode, error) {
 	return mode, nil
 }
 
-// LonePeerOptions wires zone.LonePeerCheck onto a hub-less zone peer, so a
-// single-zone hub-less deployment fails at startup instead of presenting as
-// a zone that silently never converges — see zone.ErrLoneHubLessPeer. A hub
-// (empty SelfZoneKey) and every proxy-mode process skip it: there, a hub is
-// what reconciles every zone.
-func LonePeerOptions(cfg *config.Config, logger *slog.Logger, zoneLease zonelease.Identity) []libkapi.Option {
-	if !zoneLease.HubLess || zoneLease.SelfZoneKey == zonelease.GlobalKey {
+// releaseZoneLeaseOptions wires releaseZoneLeases onto the Server's
+// shutdown.
+func releaseZoneLeaseOptions(logger *slog.Logger, zoneLease zonelease.Identity) []libkapi.Option {
+	return []libkapi.Option{libkapi.WithPreShutdownHook(releaseZoneLeases(logger, zoneLease.HolderIdentity))}
+}
+
+// releaseZoneLeases frees every zone lease holder still holds once the
+// controller manager has stopped (see libkapi.PreShutdownHookFunc), so the
+// next pod of a rolling update, or another peer, takes over this process's
+// zones at once rather than after the lease duration. A failure only
+// delays that hand-over until the leases expire on their own, so it's
+// logged rather than returned.
+func releaseZoneLeases(logger *slog.Logger, holder string) libkapi.PreShutdownHookFunc {
+	return func(ctx context.Context, loopbackConfig *rest.Config) error {
+		scheme := runtime.NewScheme()
+
+		err := coordinationv1.AddToScheme(scheme)
+		if err != nil {
+			return fmt.Errorf("failed to register lease types: %w", err)
+		}
+
+		apiClient, err := ctrlclient.New(loopbackConfig, ctrlclient.Options{Scheme: scheme})
+		if err != nil {
+			return fmt.Errorf("failed to build lease client: %w", err)
+		}
+
+		released, err := zonelease.ReleaseAll(ctx, apiClient, holder)
+		if err != nil {
+			logger.Warn("Failed to release zone leases on shutdown", "released", released, "error", err)
+
+			return nil
+		}
+
+		logger.Info("Released zone leases on shutdown", "count", released)
+
 		return nil
 	}
-
-	return []libkapi.Option{libkapi.WithController(&zone.LonePeerCheck{
-		Region: cfg.Server.Region,
-		Zone:   cfg.Server.Zone,
-		Logger: logger.With("component", "lonepeer"),
-	})}
 }
 
 // adminRBACOptions builds the libkapi options that wire the admin-group

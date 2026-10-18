@@ -187,6 +187,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return result, err
 	}
 
+	ctx, release := r.Locker.KeepRenewed(ctx, addon.Spec.TalosClusterRef.Name)
+	defer release()
+
 	result, ready, err = r.waitForEarlierWaves(ctx, &addon)
 	if err != nil || !ready {
 		return result, err

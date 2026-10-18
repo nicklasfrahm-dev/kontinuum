@@ -137,6 +137,21 @@ own reset genuinely can't succeed (hardware pulled, network gone) doesn't
 block the rest of the cluster's instances from being released, or the
 `TalosCluster` object itself from finishing deletion.
 
+### Removing a fleet's last zone { #removing-a-fleets-last-zone }
+
+A zone's own `kontinuum-server` never tears its own zone down, because
+that would delete the `Deployment`, and reset the nodes, it runs on itself
+(see [Single-zone fleets](../architecture.md#single-zone-fleets)). In a
+hub-less fleet with other zones, one of them does it. A fleet's last zone
+has nobody left to, so `kubectl delete zone` waits until a process outside
+the zone joins the same storage.
+
+Run a hub for the duration of the removal: `kontinuum serve` with
+`KONTINUUM_SERVER_STORAGE` set to the fleet's connection string, and
+`KONTINUUM_SERVER_REGION`/`KONTINUUM_SERVER_ZONE` left unset. It needs the
+same reach as any peer: the zone's Kubernetes API and its nodes' Talos API
+(port `50000`). Once the `Zone` and its `TalosCluster` are gone, stop it.
+
 ### Operator escape hatch: forcing removal sooner
 
 An operator who has already confirmed the hardware is gone for good — no
