@@ -26,10 +26,6 @@ var (
 	ErrUnknownACMEProvider = errors.New("acme.provider is not one of acme.providers")
 )
 
-// minDirectZones is the fewest zones a direct-mode fleet may declare: a
-// hub-less peer can't reconcile itself, so each zone needs another to.
-const minDirectZones = 2
-
 // Validate checks everything Load leaves to the merged result: required
 // fields, the version check against cliVersion, the ACME provider
 // selection, auth, the zone list and its instances. Every failure is
@@ -180,8 +176,8 @@ func validateAuth(auth Auth, report reporter) {
 }
 
 func validateZones(zones []Zone, report reporter) {
-	if len(zones) < minDirectZones {
-		report("spec.zones needs at least %d zones: a hub-less zone can't reconcile itself", minDirectZones)
+	if len(zones) == 0 {
+		report("spec.zones needs at least one zone")
 	}
 
 	seen := map[string]int{}

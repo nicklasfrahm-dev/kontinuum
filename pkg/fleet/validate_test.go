@@ -122,14 +122,27 @@ func topologyRejectionCases() []rejectionCase {
 		},
 		{name: "duplicate zone", replacements: []string{"zone: eu-1b", "zone: eu-1a"}, want: "already declared"},
 		{
-			name: "single zone",
+			name: "no zones",
 			replacements: []string{
-				"    - region: eu\n      zone: eu-1b\n      instances:\n        - address: 198.51.100.20\n",
-				"",
+				"  zones:\n    - region: eu\n      zone: eu-1a\n      instances:\n        - address: 203.0.113.10\n" +
+					"    - region: eu\n      zone: eu-1b\n      instances:\n        - address: 198.51.100.20\n",
+				"  zones: []\n",
 			},
-			want: "at least 2 zones",
+			want: "at least one zone",
 		},
 	}
+}
+
+// TestValidateAcceptsASingleZone covers a single-AZ fleet: its only zone
+// reconciles itself, so one zone is enough.
+func TestValidateAcceptsASingleZone(t *testing.T) {
+	t.Parallel()
+
+	secondZone := "    - region: eu\n      zone: eu-1b\n      instances:\n        - address: 198.51.100.20\n"
+
+	parsed := validFleet(t, secondZone, "")
+	require.Len(t, parsed.Spec.Zones, 1)
+	require.NoError(t, fleet.Validate(parsed, testCLIVersion))
 }
 
 func TestValidateRejections(t *testing.T) {

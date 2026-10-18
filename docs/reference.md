@@ -148,7 +148,7 @@ A `Fleet` of `apiVersion: up.kontinuum.sh/v1alpha1`. Unknown fields are an error
 | `spec.auth.oidc.clientID` | no | `KONTINUUM_OIDC_CLIENT_ID` | Defaults to `kontinuum`. A public PKCE client; there is no client secret field. |
 | `spec.auth.oidc.adminGroups` | with `oidc` | `KONTINUUM_OIDC_ADMIN_GROUPS` | At least one group. |
 | `spec.auth.insecureAllowAnonymous` | no | `KONTINUUM_INSECURE_ALLOW_ANONYMOUS` | Exactly one of `oidc` or this. |
-| `spec.zones[].region`, `.zone` | yes | Each zone's `Zone` | DNS-1123 labels; unique together. At least two zones. |
+| `spec.zones[].region`, `.zone` | yes | Each zone's `Zone` | DNS-1123 labels; unique together. At least one zone. |
 | `spec.zones[].instances[].address` | yes | Each zone's seed `Instance`s | An IP or a hostname. 1, 3 or 5 per zone, unique across the whole fleet after resolution. |
 
 The challenge type is [not configurable](#frontend-host): with a frontend host, which `up` requires, every zone's certificate is issued via DNS-01.
