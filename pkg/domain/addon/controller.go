@@ -324,8 +324,13 @@ func (r *Reconciler) readyKubeconfig(
 		return nil, ctrl.Result{}, false, err
 	}
 
+	// No TalosCluster yet: either it hasn't been created — the Addon was
+	// applied ahead of it, e.g. by GitOps or before kontinuum up created
+	// its zone — or it's gone and GC will delete this Addon. Either way,
+	// check again later: nothing else re-triggers this Addon when its
+	// cluster appears, and an orphan's retries end once GC removes it.
 	if !found {
-		return nil, ctrl.Result{}, false, nil // orphaned reference — nothing productive to do, relies on GC
+		return nil, ctrl.Result{RequeueAfter: r.RetryInterval}, false, nil
 	}
 
 	if kubeconfig == nil {
@@ -339,8 +344,8 @@ func (r *Reconciler) readyKubeconfig(
 // up in namespace — always the calling Addon's own namespace, which
 // always matches its owning TalosCluster's, since Addon is namespaced
 // alongside it. found is false only when the owning TalosCluster itself
-// is missing — an orphaned reference (GC hasn't caught up yet), nothing
-// productive to do, not worth retrying. found true with a nil kubeconfig
+// is missing — not created yet, or already deleted (see readyKubeconfig
+// for why both are retried). found true with a nil kubeconfig
 // means the cluster exists but hasn't bootstrapped far enough to have
 // stored one yet — callers should retry that case, not treat it the same
 // as "give up".

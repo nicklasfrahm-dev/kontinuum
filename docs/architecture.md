@@ -54,7 +54,7 @@ The exception is removing the zone. Tearing a zone down deletes the very `Deploy
 - in a fleet with other zones, any other zone;
 - for a fleet's last zone, an outside process against the same storage — see [Removing a fleet's last zone](workflows/zone-remove.md#removing-a-fleets-last-zone).
 
-What a zone can't do for itself is recover from a version that fails to start: nothing else in a single-zone fleet can roll it back. Run a hub against the same storage to repair it.
+What a zone can't do for itself is recover from a version that fails to start: nothing else in a single-zone fleet can roll it back. Run [`kontinuum up`](workflows/up.md) or a hub against the same storage to repair it.
 
 ## Web UI (`pkg/ui`)
 

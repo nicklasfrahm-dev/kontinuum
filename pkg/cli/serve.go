@@ -380,6 +380,19 @@ func buildScheme() (*runtime.Scheme, error) {
 func buildServer(
 	cfg *config.Config, logger *slog.Logger, authOpts []libkapi.Option, oidcHandler *auth.Handler,
 ) (*libkapi.Server, *registry.Controller, func(), error) {
+	zoneLease, storageMode, err := buildZoneLease(cfg, logger)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	return buildServerWith(context.Background(), cfg, logger, authOpts, oidcHandler, serverProfile{
+		zoneLease: zoneLease, storageMode: storageMode, register: true, controllers: true, socketDir: "/tmp",
+	})
+}
+
+// buildUIRouter builds the /app UI's router, calling back into the server
+// at cfg.Server.Addr over loopback.
+func buildUIRouter(cfg *config.Config, scheme *runtime.Scheme, oidcHandler *auth.Handler) *ui.Router {
 	// oidcHandler is nil when OIDC isn't configured — leave invalidateSession
 	// nil too rather than binding a method value to a nil receiver.
 	var invalidateSession ui.SessionInvalidator
@@ -387,22 +400,50 @@ func buildServer(
 		invalidateSession = oidcHandler.InvalidateSession
 	}
 
+	return ui.NewRouter(
+		namespaceListerFactory(cfg.Server.Addr), kontinuumListerFactory(cfg.Server.Addr, scheme),
+		zoneClientFactory(cfg.Server.Addr, scheme),
+		version, cfg.Redact(), oidcHandler != nil, invalidateSession)
+}
+
+// serverProfile is what sets one in-process kontinuum server apart from
+// another: serve's own long-running process, or one of kontinuum up's
+// temporary in-process hubs (see up.go).
+type serverProfile struct {
+	// zoneLease is the process's own zonelease identity.
+	zoneLease zonelease.Identity
+	// storageMode is the fleet's resolved storage mode.
+	storageMode config.StorageMode
+	// register is whether the process registers and heartbeats its own
+	// Kontinuum — see registry.Config.Unregistered.
+	register bool
+	// controllers is whether the domain controllers run at all. Without
+	// them the server only serves the API, the CRDs and the conversion
+	// webhook — enough to read and write the fleet's objects.
+	controllers bool
+	// socketDir holds the local storage pool's and relay's unix sockets.
+	socketDir string
+	// started, when set, is closed once every post-start hook has run —
+	// libkapi runs them in registration order, so a last hook closing it
+	// marks the server fully started. Stopping a server any earlier makes
+	// the apiserver exit the process from its own still-running hooks.
+	started chan struct{}
+}
+
+// buildServerWith is buildServer for an explicit profile — see
+// buildServer's own doc.
+func buildServerWith(
+	ctx context.Context, cfg *config.Config, logger *slog.Logger, authOpts []libkapi.Option,
+	oidcHandler *auth.Handler, profile serverProfile,
+) (*libkapi.Server, *registry.Controller, func(), error) {
 	scheme, err := buildScheme()
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	uiRouter := ui.NewRouter(
-		namespaceListerFactory(cfg.Server.Addr), kontinuumListerFactory(cfg.Server.Addr, scheme),
-		zoneClientFactory(cfg.Server.Addr, scheme),
-		version, cfg.Redact(), oidcHandler != nil, invalidateSession)
+	uiRouter := buildUIRouter(cfg, scheme, oidcHandler)
 
-	zoneLease, storageMode, err := buildZoneLease(cfg, logger)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	registryOpts, registryController, err := registryOptions(cfg, logger, scheme, zoneLease)
+	registryOpts, registryController, err := registryOptions(cfg, logger, scheme, profile.zoneLease, profile.register)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -424,7 +465,7 @@ func buildServer(
 		return registry.EnsureCRD(ctx, loopbackConfig, server.WebhookCABundle(), registryLogger)
 	}
 
-	storage, relayCleanup, err := resolveZoneStorage(cfg, logger)
+	storage, relayCleanup, err := resolveZoneStorage(ctx, cfg, logger, profile.socketDir)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -464,13 +505,22 @@ func buildServer(
 		// v1alpha2.KontinuumSystemNamespace's own doc).
 		libkapi.WithSystemNamespace(v1alpha2.KontinuumSystemNamespace),
 		libkapi.WithPostStartHook(ensureCRD),
-	}, authOpts, registryOpts, domainControllerOptions(cfg, logger, zoneLease, storageMode))
+	}, authOpts, registryOpts, domainControllerOptions(cfg, logger, profile))
 
-	// Storage is resolved against a background context so the backend
-	// is only torn down by Server.Shutdown, not by the signal context
-	// that drives ListenAndServe. "=" not ":=" — server is already declared
+	if profile.started != nil {
+		opts = append(opts, libkapi.WithPostStartHook(func(context.Context, *rest.Config) error {
+			close(profile.started)
+
+			return nil
+		}))
+	}
+
+	// Storage is resolved against ctx — a background context, or one
+	// detached from cancellation — so the backend is only torn down by
+	// Server.Shutdown, not by the signal context that drives
+	// ListenAndServe. "=" not ":=" — server is already declared
 	// above, and ensureCRD's own closure captures it by reference.
-	server, err = libkapi.New(context.Background(), opts...)
+	server, err = libkapi.New(ctx, opts...)
 	if err != nil {
 		relayCleanup()
 
@@ -480,7 +530,8 @@ func buildServer(
 	return server, registryController, relayCleanup, nil
 }
 
-// storageRelaySocketPath is where the etcdproxy.Relay resolveStorageDSN
+// storageRelaySocketName, inside the server's socket directory (see
+// serverProfile.socketDir), is where the etcdproxy.Relay resolveStorageDSN
 // starts (for a zone whose own KONTINUUM_SERVER_STORAGE points through it
 // — see etcdproxy.ParseRelayDSN) listens. libkapi's own already-supported
 // "unix://" storage scheme (see pkg/libkapi/storage.Resolve) is then
@@ -489,25 +540,30 @@ func buildServer(
 // writable path the zone Deployment's own read-only-root container gets
 // (see pkg/domain/zone/workload.go's tmpVolumeMountPath) — the same reason
 // libkapi's own Kine endpoint uses a temp-dir socket too.
-const storageRelaySocketPath = "/tmp/kontinuum-storage-relay.sock"
+const storageRelaySocketName = "kontinuum-storage-relay.sock"
 
-// resolveZoneStorage calls resolveStorageDSN against a background context,
-// not the one driving ListenAndServe — see buildServer's own doc, right
-// where its result is used, for why that matters.
-func resolveZoneStorage(cfg *config.Config, logger *slog.Logger) (string, func(), error) {
-	return resolveStorageDSN(context.Background(), logger, cfg.Server.Storage, cfg.Server.GRPC.InsecureTLSSkipVerify)
+// resolveZoneStorage calls resolveStorageDSN against ctx, which must be
+// long-lived and never the one driving ListenAndServe — buildServer passes
+// a background context, kontinuum up one detached from cancellation; see
+// buildServerWith's own doc, right where its result is used, for why that
+// matters.
+func resolveZoneStorage(
+	ctx context.Context, cfg *config.Config, logger *slog.Logger, socketDir string,
+) (string, func(), error) {
+	return resolveStorageDSN(ctx, logger, cfg.Server.Storage, cfg.Server.GRPC.InsecureTLSSkipVerify, socketDir)
 }
 
-// storageLocalPoolSocketPath is where the etcdproxy.LocalPool
+// storageLocalPoolSocketName, inside the server's socket directory, is
+// where the etcdproxy.LocalPool
 // resolveStorageDSN starts (for a Kine DSN backend — postgres://,
 // sqlite://, mysql://, nats://, see etcdproxy.IsPoolableBackend) listens,
 // in place of libkapi's own directly-managed Kine socket — see
 // etcdproxy.LocalPool's own doc for why this local indirection exists at
-// all. Distinct from storageRelaySocketPath: resolveStorageDSN only ever
+// all. Distinct from storageRelaySocketName: resolveStorageDSN only ever
 // starts one of the two per process (a zone uses Relay, everything else
 // uses LocalPool), but giving them separate paths keeps that obvious
 // rather than relying on it.
-const storageLocalPoolSocketPath = "/tmp/kontinuum-storage-pool.sock"
+const storageLocalPoolSocketName = "kontinuum-storage-pool.sock"
 
 // resolveStorageDSN returns the KONTINUUM_SERVER_STORAGE value to actually
 // hand to libkapi.WithStorage, plus a cleanup func that's always safe to
@@ -544,18 +600,21 @@ const storageLocalPoolSocketPath = "/tmp/kontinuum-storage-pool.sock"
 //   - Anything else (etcd://, unix://) is already a real, already-running
 //     endpoint — configured unchanged, libkapi's own concern from here.
 func resolveStorageDSN(
-	ctx context.Context, logger *slog.Logger, configured, insecureSkipVerify string,
+	ctx context.Context, logger *slog.Logger, configured, insecureSkipVerify, socketDir string,
 ) (string, func(), error) {
 	noopCleanup := func() {}
 
 	zoneName, hubEndpoint, ok := etcdproxy.ParseRelayDSN(configured)
 	if ok {
-		return resolveRelayDSN(ctx, logger, zoneName, hubEndpoint, insecureSkipVerify)
+		return resolveRelayDSN(ctx, logger, zoneName, hubEndpoint, insecureSkipVerify,
+			filepath.Join(socketDir, storageRelaySocketName))
 	}
 
 	if !etcdproxy.IsPoolableBackend(configured) {
 		return configured, noopCleanup, nil
 	}
+
+	poolSocketPath := filepath.Join(socketDir, storageLocalPoolSocketName)
 
 	// ctx, not context.Background() — resolveZoneStorage's own doc already
 	// establishes that whatever context reaches here is the right
@@ -564,14 +623,14 @@ func resolveStorageDSN(
 	// lifetime is tied to its own Close, not to any request/setup context
 	// that might be canceled before this process is done with it.
 	pool, err := etcdproxy.StartLocalPool(ctx, etcdproxy.LocalPoolConfig{
-		SocketPath: storageLocalPoolSocketPath,
+		SocketPath: poolSocketPath,
 		Backend:    configured,
 	})
 	if err != nil {
 		return "", noopCleanup, fmt.Errorf("failed to start local storage pool: %w", err)
 	}
 
-	return "unix://" + storageLocalPoolSocketPath, pool.Close, nil
+	return "unix://" + poolSocketPath, pool.Close, nil
 }
 
 // resolveRelayDSN builds and starts the etcdproxy.Relay a RelayScheme DSN
@@ -580,7 +639,7 @@ func resolveStorageDSN(
 // to keep that function's own length in check; see its own doc for the
 // fuller picture this is one branch of.
 func resolveRelayDSN(
-	ctx context.Context, logger *slog.Logger, zoneName, hubEndpoint, insecureSkipVerify string,
+	ctx context.Context, logger *slog.Logger, zoneName, hubEndpoint, insecureSkipVerify, socketPath string,
 ) (string, func(), error) {
 	noopCleanup := func() {}
 
@@ -611,7 +670,7 @@ func resolveRelayDSN(
 
 	//nolint:contextcheck // StartRelay deliberately takes no ctx of its own — see its own doc
 	relay, err := etcdproxy.StartRelay(etcdproxy.RelayConfig{
-		SocketPath:         storageRelaySocketPath,
+		SocketPath:         socketPath,
 		HubEndpoint:        hubEndpoint,
 		Zone:               zoneName,
 		Keys:               keys,
@@ -629,7 +688,7 @@ func resolveRelayDSN(
 		relay.Close()
 	}
 
-	return "unix://" + storageRelaySocketPath, cleanup, nil
+	return "unix://" + socketPath, cleanup, nil
 }
 
 // registryOptions builds the libkapi options that wire kontinuum's server
@@ -649,7 +708,7 @@ func resolveRelayDSN(
 // doc for why). The returned *registry.Controller is buildServer's own
 // return value, passed through unchanged — see its doc.
 func registryOptions(
-	cfg *config.Config, logger *slog.Logger, scheme *runtime.Scheme, zoneLease zonelease.Identity,
+	cfg *config.Config, logger *slog.Logger, scheme *runtime.Scheme, zoneLease zonelease.Identity, register bool,
 ) ([]libkapi.Option, *registry.Controller, error) {
 	role, err := registry.Role(cfg.Server.Region, cfg.Server.Zone)
 	if err != nil {
@@ -667,6 +726,7 @@ func registryOptions(
 		Storage:       cfg.Server.Storage,
 		DisplayConfig: displayConfig(cfg),
 		ZoneLease:     zoneLease,
+		Unregistered:  !register,
 	})
 
 	return []libkapi.Option{
@@ -687,18 +747,25 @@ func registryOptions(
 // already carries these kinds — see buildServer's v1alpha2.AddToScheme) and
 // no webhook server (none of these four kinds have a conversion webhook).
 func instanceOptions(logger *slog.Logger, zoneLease zonelease.Identity) []libkapi.Option {
-	instanceLogger := logger.With("component", "instance")
+	controller := instance.NewController(instance.Config{
+		Logger: logger.With("component", "instance"), ZoneLease: zoneLease,
+	})
 
-	controller := instance.NewController(instance.Config{Logger: instanceLogger, ZoneLease: zoneLease})
+	return []libkapi.Option{libkapi.WithController(controller)}
+}
+
+// crdOptions ensures the four zone-join CRDs (Zone, Instance, InstancePool,
+// TalosCluster) exist as soon as the listener is up — see instanceOptions'
+// own doc. Split out of it so a server running no controllers at all (see
+// serverProfile.controllers) still serves those kinds.
+func crdOptions(logger *slog.Logger) []libkapi.Option {
+	instanceLogger := logger.With("component", "instance")
 
 	ensureCRDs := func(ctx context.Context, loopbackConfig *rest.Config) error {
 		return instance.EnsureCRDs(ctx, loopbackConfig, instanceLogger)
 	}
 
-	return []libkapi.Option{
-		libkapi.WithPostStartHook(ensureCRDs),
-		libkapi.WithController(controller),
-	}
+	return []libkapi.Option{libkapi.WithPostStartHook(ensureCRDs)}
 }
 
 // instancePoolOptions builds the libkapi options that wire the InstancePool
@@ -763,23 +830,62 @@ func zoneOptions(
 		HubConfig:   cfg,
 		ImageRepo:   zoneImageRepo,
 		StorageMode: storageMode,
+		Version:     version,
 		ZoneLease:   zoneLease,
 	})
 
 	return []libkapi.Option{libkapi.WithController(controller)}
 }
 
-// domainControllerOptions wires every domain controller besides the
-// registry's own (see registryOptions) onto the Server.
-func domainControllerOptions(
-	cfg *config.Config, logger *slog.Logger, zoneLease zonelease.Identity, storageMode config.StorageMode,
-) []libkapi.Option {
+// domainControllerOptions wires the zone CRDs and, when profile asks for
+// them, every domain controller besides the registry's own (see
+// registryOptions) onto the Server.
+func domainControllerOptions(cfg *config.Config, logger *slog.Logger, profile serverProfile) []libkapi.Option {
+	if !profile.controllers {
+		return crdOptions(logger)
+	}
+
+	zoneLease := profile.zoneLease
+
 	return slices.Concat(
-		instanceOptions(logger, zoneLease), instancePoolOptions(logger, zoneLease),
+		crdOptions(logger), instanceOptions(logger, zoneLease), instancePoolOptions(logger, zoneLease),
 		talosClusterOptions(cfg, logger, zoneLease), addonOptions(logger, zoneLease),
-		zoneOptions(cfg, logger, zoneLease, storageMode),
+		zoneOptions(cfg, logger, zoneLease, profile.storageMode),
 		adminRBACOptions(cfg, logger, zoneLease), frontendOptions(cfg, logger, zoneLease),
-		releaseZoneLeaseOptions(logger, zoneLease))
+		[]libkapi.Option{libkapi.WithPreShutdownHook(releaseZoneLeases(logger, zoneLease.HolderIdentity))})
+}
+
+// releaseZoneLeases frees every zone lease holder still holds once the
+// controller manager has stopped (see libkapi.PreShutdownHookFunc), so the
+// next pod of a rolling update, or another peer, takes over this process's
+// zones at once rather than after the lease duration. A failure only
+// delays that hand-over until the leases expire on their own, so it's
+// logged rather than returned.
+func releaseZoneLeases(logger *slog.Logger, holder string) libkapi.PreShutdownHookFunc {
+	return func(ctx context.Context, loopbackConfig *rest.Config) error {
+		scheme := runtime.NewScheme()
+
+		err := coordinationv1.AddToScheme(scheme)
+		if err != nil {
+			return fmt.Errorf("failed to register lease types: %w", err)
+		}
+
+		apiClient, err := ctrlclient.New(loopbackConfig, ctrlclient.Options{Scheme: scheme})
+		if err != nil {
+			return fmt.Errorf("failed to build lease client: %w", err)
+		}
+
+		released, err := zonelease.ReleaseAll(ctx, apiClient, holder)
+		if err != nil {
+			logger.Warn("Failed to release zone leases on shutdown", "released", released, "error", err)
+
+			return nil
+		}
+
+		logger.Info("Released zone leases on shutdown", "count", released)
+
+		return nil
+	}
 }
 
 // frontendOptions wires the frontend host's single-writer DNS reconciler
@@ -839,45 +945,6 @@ func resolveStorageMode(cfg *config.Config) (config.StorageMode, error) {
 	}
 
 	return mode, nil
-}
-
-// releaseZoneLeaseOptions wires releaseZoneLeases onto the Server's
-// shutdown.
-func releaseZoneLeaseOptions(logger *slog.Logger, zoneLease zonelease.Identity) []libkapi.Option {
-	return []libkapi.Option{libkapi.WithPreShutdownHook(releaseZoneLeases(logger, zoneLease.HolderIdentity))}
-}
-
-// releaseZoneLeases frees every zone lease holder still holds once the
-// controller manager has stopped (see libkapi.PreShutdownHookFunc), so the
-// next pod of a rolling update, or another peer, takes over this process's
-// zones at once rather than after the lease duration. A failure only
-// delays that hand-over until the leases expire on their own, so it's
-// logged rather than returned.
-func releaseZoneLeases(logger *slog.Logger, holder string) libkapi.PreShutdownHookFunc {
-	return func(ctx context.Context, loopbackConfig *rest.Config) error {
-		scheme := runtime.NewScheme()
-
-		err := coordinationv1.AddToScheme(scheme)
-		if err != nil {
-			return fmt.Errorf("failed to register lease types: %w", err)
-		}
-
-		apiClient, err := ctrlclient.New(loopbackConfig, ctrlclient.Options{Scheme: scheme})
-		if err != nil {
-			return fmt.Errorf("failed to build lease client: %w", err)
-		}
-
-		released, err := zonelease.ReleaseAll(ctx, apiClient, holder)
-		if err != nil {
-			logger.Warn("Failed to release zone leases on shutdown", "released", released, "error", err)
-
-			return nil
-		}
-
-		logger.Info("Released zone leases on shutdown", "count", released)
-
-		return nil
-	}
 }
 
 // adminRBACOptions builds the libkapi options that wire the admin-group

@@ -104,6 +104,67 @@ Flags override environment variables when explicitly set:
 kontinuum serve --addr :9090 --storage postgres://user:pass@host/db
 ```
 
+## `kontinuum up`
+
+See [Converge a fleet](workflows/up.md) for how `up` works.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `-f`, `--file` | `kontinuum.yml` | The `Fleet` to converge to. Several files, comma-separated or with the flag repeated, are merged left to right, the right-most winning. A path containing a comma must use the repeated form. `kontinuum.yaml` is never read by default. |
+| `--dry-run` | off | Print the merged fleet and the plan. Changes nothing. |
+| `--prune` | off | Also remove zones running in the fleet but missing from the file. |
+| `--kubeconfig-out` | `kubeconfig.yaml` | Where a newly created fleet's kubeconfig is written, mode `0600`. |
+| `--timeout` | `30m` | How long to wait for the fleet to converge. |
+
+`up` logs warnings only by default; set `KONTINUUM_LOG_LEVEL` to `info` or `debug` for more.
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | Converged, or nothing to do. |
+| `1` | Error. |
+| `2` | `--dry-run` only: changes or drift are pending. |
+
+### `kontinuum.yml`
+
+A `Fleet` of `apiVersion: up.kontinuum.sh/v1alpha1`. Unknown fields are an error, so a typo can't silently fall back to a default. Field names mirror the configuration above, so each one maps onto a zone's `kontinuum-env` one-to-one.
+
+| Field | Required | Maps onto | Rules |
+| --- | --- | --- | --- |
+| `metadata.name` | yes | — | Names the fleet in `up`'s output. |
+| `spec.version` | yes | — | Must equal the CLI's version. |
+| `spec.frontend.host` | yes | `KONTINUUM_SERVER_FRONTEND_HOST` | Must equal `spec.dns.domain` or be a subdomain of it. |
+| `spec.storage.uri` | yes | `KONTINUUM_SERVER_STORAGE` | Secret field. Must resolve to direct mode. |
+| `spec.storage.mode` | no | `KONTINUUM_SERVER_STORAGE_MODE` | `Auto` (default) or `Direct`. `Proxy` and `NATS` are rejected. |
+| `spec.talos.version`, `spec.kubernetes.version` | no | Each zone's `TalosCluster` | Defaults to the `taloscluster` controller's pinned versions. |
+| `spec.dns.domain` | yes | `KONTINUUM_SERVER_DNS_DOMAIN` | Zones are published as `<zone>.<region>.<domain>`. |
+| `spec.dns.provider` | yes | `KONTINUUM_SERVER_DNS_PROVIDER` | One of the [DNS providers](#dns-providers) with a DNS-01 solver. |
+| `spec.dns.credential` | yes | `KONTINUUM_SERVER_DNS_CREDENTIAL` | Flat mapping; every value is a secret field. Must hold the keys the provider's DNS-01 solver reads. |
+| `spec.acme.provider` | yes | — | A key of `spec.acme.providers`. |
+| `spec.acme.providers.<name>` | yes | `KONTINUUM_ACME_*` when selected | `<name>` is a DNS-1123 label of your choice. Only the selected provider reaches the zones. There are no built-in providers. |
+| `….server`, `….email` | yes | `KONTINUUM_ACME_SERVER`, `_EMAIL` | |
+| `….externalAccountBinding.keyID`, `.hmacKey` | no | `KONTINUUM_ACME_EXTERNAL_ACCOUNT_BINDING_*` | Both or neither. `hmacKey` is a secret field. |
+| `….insecureSkipVerify` | no | `KONTINUUM_ACME_INSECURE_SKIP_VERIFY` | For a Pebble test server only. |
+| `spec.auth.oidc.issuerURL` | with `oidc` | `KONTINUUM_OIDC_ISSUER_URL` | |
+| `spec.auth.oidc.clientID` | no | `KONTINUUM_OIDC_CLIENT_ID` | Defaults to `kontinuum`. A public PKCE client; there is no client secret field. |
+| `spec.auth.oidc.adminGroups` | with `oidc` | `KONTINUUM_OIDC_ADMIN_GROUPS` | At least one group. |
+| `spec.auth.insecureAllowAnonymous` | no | `KONTINUUM_INSECURE_ALLOW_ANONYMOUS` | Exactly one of `oidc` or this. |
+| `spec.zones[].region`, `.zone` | yes | Each zone's `Zone` | DNS-1123 labels; unique together. At least one zone. |
+| `spec.zones[].instances[].address` | yes | Each zone's seed `Instance`s | An IP or a hostname. 1, 3 or 5 per zone, unique across the whole fleet after resolution. |
+
+The challenge type is [not configurable](#frontend-host): with a frontend host, which `up` requires, every zone's certificate is issued via DNS-01.
+
+#### References
+
+Any string field may contain references, also embedded in a longer string (e.g. `version: v0.${env:MINOR}.0`):
+
+| Syntax | Expands to |
+| --- | --- |
+| `${env:NAME}` | The environment variable `NAME`. Unset or empty is an error. There is no `:-default` form. |
+| `${file:path}` | The file's contents, one trailing newline stripped. Relative paths resolve against the file declaring the reference. |
+| `$${` | A literal `${`. |
+
+A bare `${NAME}` without a source is an error suggesting `${env:NAME}`, so it never silently stays literal. Expansion runs on each value after YAML decoding, so an expanded value containing newlines or `: ` can never change the document's structure. Secret fields must be exactly one reference and nothing else.
+
 ## Generated CRD reference
 
 Full generated field-by-field documentation for every CRD, kept in sync with `api/` automatically, is published at:

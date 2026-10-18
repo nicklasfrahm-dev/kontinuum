@@ -151,6 +151,8 @@ Run a hub for the duration of the removal: `kontinuum serve` with
 `KONTINUUM_SERVER_REGION`/`KONTINUUM_SERVER_ZONE` left unset. It needs the
 same reach as any peer: the zone's Kubernetes API and its nodes' Talos API
 (port `50000`). Once the `Zone` and its `TalosCluster` are gone, stop it.
+`kontinuum up --prune` can't do this, since a `kontinuum.yml` needs at
+least one zone.
 
 ### Operator escape hatch: forcing removal sooner
 
