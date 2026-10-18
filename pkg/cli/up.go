@@ -346,7 +346,7 @@ func loadFleet(ctx context.Context, doc *fleet.Document, deps UpDeps) (*loadedFl
 // direct mode, naming the override for split-horizon DNS.
 func requireDirectStorage(ctx context.Context, resolver config.StorageResolver, cfg *config.Config) error {
 	mode, err := config.ResolveStorageMode(ctx, resolver, cfg.Server.Storage,
-		config.StorageMode(cfg.Server.ZoneStorageMode))
+		config.StorageMode(cfg.Server.StorageMode))
 	if err != nil {
 		return fmt.Errorf("failed to resolve storage mode: %w", err)
 	}

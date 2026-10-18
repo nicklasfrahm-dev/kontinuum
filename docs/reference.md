@@ -134,7 +134,7 @@ A `Fleet` of `apiVersion: up.kontinuum.sh/v1alpha1`. Unknown fields are an error
 | `spec.version` | yes | — | Must equal the CLI's version. |
 | `spec.frontend.host` | yes | `KONTINUUM_SERVER_FRONTEND_HOST` | Must equal `spec.dns.domain` or be a subdomain of it. |
 | `spec.storage.uri` | yes | `KONTINUUM_SERVER_STORAGE` | Secret field. Must resolve to direct mode. |
-| `spec.storage.mode` | no | `KONTINUUM_SERVER_ZONE_STORAGE_MODE` | `Auto` (default) or `Direct`. `Proxy` and `NATS` are rejected. |
+| `spec.storage.mode` | no | `KONTINUUM_SERVER_STORAGE_MODE` | `Auto` (default) or `Direct`. `Proxy` and `NATS` are rejected. |
 | `spec.talos.version`, `spec.kubernetes.version` | no | Each zone's `TalosCluster` | Defaults to the `taloscluster` controller's pinned versions. |
 | `spec.dns.domain` | yes | `KONTINUUM_SERVER_DNS_DOMAIN` | Zones are published as `<zone>.<region>.<domain>`. |
 | `spec.dns.provider` | yes | `KONTINUUM_SERVER_DNS_PROVIDER` | One of the [DNS providers](#dns-providers) with a DNS-01 solver. |
