@@ -189,6 +189,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{RequeueAfter: zonelease.Jitter(r.RetryInterval)}, nil
 	}
 
+	ctx, release := r.Locker.KeepRenewed(ctx, zoneKey)
+	defer release()
+
 	if len(inst.Spec.Interfaces) == 0 {
 		return r.recordProbeResult(ctx, &inst, false, false, reasonNoInterface, "spec.interfaces is empty")
 	}

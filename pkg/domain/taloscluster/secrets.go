@@ -3,6 +3,7 @@ package taloscluster
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	talossecrets "github.com/siderolabs/talos/pkg/machinery/config/generate/secrets"
@@ -29,6 +30,12 @@ const (
 	secretNamePrefix = "taloscluster-"
 )
 
+// ErrForeignSecretsBundle is adoptSecretsBundle's sentinel for a secrets
+// bundle Secret at a TalosCluster's own name that another, earlier
+// TalosCluster of that name owns — adopting it would hand this cluster a
+// CA none of its nodes trust.
+var ErrForeignSecretsBundle = errors.New("secrets bundle secret belongs to another talos cluster")
+
 // secretRefFor derives the Secret reference a TalosCluster named
 // clusterName's secrets/kubeconfig are stored under.
 func secretRefFor(clusterName string) v1alpha2.SecretReference {
@@ -38,7 +45,7 @@ func secretRefFor(clusterName string) v1alpha2.SecretReference {
 	}
 }
 
-// ensureSecretsBundle returns cluster's persisted Talos secrets bundle —
+// EnsureSecretsBundle returns cluster's persisted Talos secrets bundle —
 // the CA/keys/tokens every generated machine config and admin Talosconfig
 // is (re-)derived from every reconcile, see this package's own doc for why
 // only the bundle itself is persisted. On first reconcile
@@ -47,7 +54,7 @@ func secretRefFor(clusterName string) v1alpha2.SecretReference {
 // already recorded is reported as an error rather than silently
 // regenerating a new CA, which would orphan any node that already trusts
 // the old one.
-func ensureSecretsBundle(
+func EnsureSecretsBundle(
 	ctx context.Context, kubeClient client.Client, cluster *v1alpha2.TalosCluster,
 ) (*talossecrets.Bundle, error) {
 	if cluster.Status.SecretRef.Name != "" {
@@ -89,8 +96,43 @@ func ensureSecretsBundle(
 	}
 
 	err = kubeClient.Create(ctx, secret)
+	if apierrors.IsAlreadyExists(err) {
+		return adoptSecretsBundle(ctx, kubeClient, cluster, ref)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to create %q secret: %w", ref.Name, err)
+	}
+
+	cluster.Status.SecretRef = ref
+
+	return bundle, nil
+}
+
+// adoptSecretsBundle picks up the bundle an earlier reconcile of cluster
+// already stored at ref, but never recorded in status.secretRef because it
+// stopped first — a process restart, a lost zone lease. Regenerating would
+// orphan any node the stored bundle already configured, so the stored one
+// wins, but only when cluster itself owns it: a Secret left behind by an
+// earlier TalosCluster of the same name belongs to a different CA.
+func adoptSecretsBundle(
+	ctx context.Context, kubeClient client.Client, cluster *v1alpha2.TalosCluster, ref v1alpha2.SecretReference,
+) (*talossecrets.Bundle, error) {
+	var existing corev1.Secret
+
+	err := kubeClient.Get(ctx, client.ObjectKey{Name: ref.Name, Namespace: ref.Namespace}, &existing)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch existing %q secret: %w", ref.Name, err)
+	}
+
+	owner := metav1.GetControllerOf(&existing)
+	if owner == nil || owner.UID != cluster.UID {
+		return nil, fmt.Errorf("%w: %s", ErrForeignSecretsBundle, ref.Name)
+	}
+
+	bundle, err := loadSecretsBundle(ctx, kubeClient, ref)
+	if err != nil {
+		return nil, err
 	}
 
 	cluster.Status.SecretRef = ref

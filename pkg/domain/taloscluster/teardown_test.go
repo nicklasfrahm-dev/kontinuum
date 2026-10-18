@@ -27,7 +27,7 @@ func clusterRequest() ctrl.Request {
 // bootstrapClusterSecrets runs the ordinary (non-teardown) Reconciler once
 // against the cluster fixture already seeded into fakeClient, so it has a
 // real secrets bundle (cluster.Status.SecretRef) to reset members
-// through — ensureSecretsBundle runs unconditionally early in Reconcile,
+// through — EnsureSecretsBundle runs unconditionally early in Reconcile,
 // before the ControlPlaneReady gate, so one call is enough regardless of
 // how far bootstrap itself progresses. Same fixture-setup pattern
 // instance_reset_test.go's own teardown tests use.

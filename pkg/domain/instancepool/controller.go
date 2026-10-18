@@ -142,6 +142,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return result, err
 	}
 
+	ctx, release := r.Locker.KeepRenewed(ctx, pool.Name)
+	defer release()
+
 	if !pool.DeletionTimestamp.IsZero() {
 		return r.reconcileTeardown(ctx, &pool)
 	}
