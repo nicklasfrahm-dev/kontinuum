@@ -106,11 +106,13 @@ func TestDNS01SolverRFC2136(t *testing.T) {
 	}
 	keys[rfc2136KeyEnv] = testAPIValue
 
-	// external-dns exits without an algorithm, so the solver requires one.
+	// external-dns has no default port or algorithm, so the solver requires
+	// both.
 	_, err := addon.DNS01Solver("RFC2136", testSolverStore, keys)
 	require.ErrorIs(t, err, addon.ErrMissingDNSCredentialKey)
-	assert.Contains(t, err.Error(), "EXTERNAL_DNS_RFC2136_TSIG_SECRET_ALG")
+	assert.Contains(t, err.Error(), "EXTERNAL_DNS_RFC2136_PORT, EXTERNAL_DNS_RFC2136_TSIG_SECRET_ALG")
 
+	keys["EXTERNAL_DNS_RFC2136_PORT"] = "53"
 	keys["EXTERNAL_DNS_RFC2136_TSIG_SECRET_ALG"] = "hmac-sha256"
 
 	solver, err := addon.DNS01Solver("RFC2136", testSolverStore, keys)
