@@ -12,7 +12,7 @@ import (
 
 // StorageMode is how a joined zone's own kontinuum-server reaches the shared
 // state every process in a fleet reconciles against — see
-// KONTINUUM_SERVER_ZONE_STORAGE_MODE (Server.ZoneStorageMode) and
+// KONTINUUM_SERVER_STORAGE_MODE (Server.StorageMode) and
 // ResolveStorageMode.
 type StorageMode string
 
@@ -230,11 +230,11 @@ func IsGloballyRoutable(addr netip.Addr) bool {
 	}
 }
 
-// ValidateStorageMode checks that Server.ZoneStorageMode is one of the
+// ValidateStorageMode checks that Server.StorageMode is one of the
 // StorageMode values, so a typo fails at startup rather than surfacing the
 // first time a zone is reconciled.
 func (c *Config) ValidateStorageMode() error {
-	_, err := ParseStorageMode(c.Server.ZoneStorageMode)
+	_, err := ParseStorageMode(c.Server.StorageMode)
 
 	return err
 }

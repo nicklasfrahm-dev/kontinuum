@@ -37,7 +37,7 @@ See [Add zone](workflows/zone-add.md) for how these are used.
 | -------------------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
 | `KONTINUUM_SERVER_DNS_DOMAIN`  | Base domain a zone's own kontinuum-server is published under (`<zone>.<region>.<domain>`)                | *(empty)*                                                       |
 | `KONTINUUM_SERVER_GRPC_ENDPOINT` | This hub's own publicly reachable `host:port` for its etcd gRPC proxy (see [Architecture](architecture.md#storage)) — normally the same `host:port` a browser reaches `/app` on. Required for `zone add` to succeed: without it, a newly joined zone has no way to reach shared storage. | *(empty)* |
-| `KONTINUUM_SERVER_ZONE_STORAGE_MODE` | How a joined zone reaches shared storage: `Proxy`, `Direct` or `NATS`. `Auto` infers it from `KONTINUUM_SERVER_STORAGE` — see [Storage modes](#storage-modes). Any other value, including a lowercase one, fails at startup. | `Auto` |
+| `KONTINUUM_SERVER_STORAGE_MODE` | How a joined zone reaches shared storage: `Proxy`, `Direct` or `NATS`. `Auto` infers it from `KONTINUUM_SERVER_STORAGE` — see [Storage modes](#storage-modes). Any other value, including a lowercase one, fails at startup. | `Auto` |
 | `KONTINUUM_ACME_EMAIL`         | ACME account email used when the `zone` controller creates a joined zone's cert-manager `ClusterIssuer` | *(empty)*                                                       |
 | `KONTINUUM_SERVER_DNS_PROVIDER` | external-dns provider name (e.g. `cloudflare`, `pdns`) for each zone's auto-wired external-dns. Required, together with `_CREDENTIAL`, before a zone's network layer is installed. See [Add zone](workflows/zone-add.md#dns-auto-wiring-external-dns-from-a-flat-yaml-credential). | *(empty)* |
 | `KONTINUUM_SERVER_DNS_CREDENTIAL` | Flat YAML mapping of environment variables for that external-dns provider (e.g. `CF_API_TOKEN: <token>`). Confidential: redacted from status. | *(empty)* |
@@ -49,7 +49,7 @@ Set `KONTINUUM_SERVER_DNS_DOMAIN` and `KONTINUUM_SERVER_GRPC_ENDPOINT` once, on 
 
 ### Storage modes
 
-`KONTINUUM_SERVER_ZONE_STORAGE_MODE` decides how every joined zone's own kontinuum-server reaches the shared state the fleet reconciles against. Left at `Auto`, the mode is inferred from `KONTINUUM_SERVER_STORAGE`:
+`KONTINUUM_SERVER_STORAGE_MODE` decides how every joined zone's own kontinuum-server reaches the shared state the fleet reconciles against. Left at `Auto`, the mode is inferred from `KONTINUUM_SERVER_STORAGE`:
 
 | `KONTINUUM_SERVER_STORAGE` | Inferred mode |
 | --- | --- |

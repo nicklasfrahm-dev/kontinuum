@@ -130,7 +130,7 @@ type KontinuumServerConfigStatus struct {
 	// Zone duplicates spec.zone — see this type's own doc.
 	// +optional
 	Zone string `default:"" json:"zone"`
-	// ZoneStorageMode selects how a joined zone's own kontinuum-server
+	// StorageMode selects how a joined zone's own kontinuum-server
 	// reaches the shared storage: Proxy (an etcdproxy relay back to this
 	// hub), Direct (the shared database's own connection string) or NATS.
 	// Auto, the default, infers it from Storage — see
@@ -138,7 +138,7 @@ type KontinuumServerConfigStatus struct {
 	// environment like every other field here, so a zone resolves the
 	// same mode as the process that onboarded it.
 	// +optional
-	ZoneStorageMode string `default:"Auto" json:"zoneStorageMode"`
+	StorageMode string `default:"Auto" json:"storageMode"`
 	// +optional
 	DNS KontinuumDNSConfigStatus `json:"dns"`
 	// +optional
