@@ -28,6 +28,33 @@ Each controller lives in its own package and owns one CRD's reconcile loop, per 
 
 See [Add zone](workflows/zone-add.md) for the full instance → pool → cluster → addon bootstrap flow (including a flow chart) and how a zone's own kontinuum-server gets installed and registers back into the hub, and [Remove zone](workflows/zone-remove.md) for tearing that back down.
 
+## Zone leases and hub-less fleets (`pkg/domain/zonelease`)
+
+Every kontinuum-server process in a fleet runs the same controllers against the same shared storage, so each zone-scoped write is gated on a per-zone `Lease` (`zonelock-<region>-<zone>`): whichever process holds it reconciles that zone, and the rest back off. With a hub, a zone's own process never takes its own zone's lease, and the hub reconciles it. Hub-less, a zone contends for its own lease like any other peer; see [Single-zone fleets](#single-zone-fleets).
+
+A lease is held by one process, named after its pod, and stays with it for as long as it keeps renewing it:
+
+- **During a reconcile**, the holder renews the lease in the background, and the reconcile's writes stop the moment the lease is lost or goes unrenewed for too long. A long reconcile, such as a Talos health check or a Helm install, therefore never keeps writing after another process took over.
+- **On graceful shutdown**, once its controllers have stopped, a process releases every lease it holds. The next pod of the zone `Deployment`'s rolling update, or another peer, takes over at once instead of after the 45-second lease duration.
+
+Fleet-wide state that belongs to no single zone, such as the registry's stale-`Kontinuum` sweep and the admin-group `ClusterRoleBinding`s, uses one more lease, `zonelock-global`. Who may contend for it depends on the [storage mode](reference.md#storage-modes):
+
+- **`Proxy`** needs a hub, because every zone's storage DSN is a relay back to the hub's own endpoint. Only the hub contends for the global lease.
+- **`Direct` and `NATS`** are hub-less: every process holds an identical storage DSN, so any of them can onboard a joining zone. Every peer, zone or hub, contends for the global lease, and the lease serializes them exactly as it does for zone keys. A hub may still run in these modes; it is simply one more peer.
+
+Hub-less follows from the storage mode and nothing else. It is never inferred from whether a hub happens to be registered, so a hub restart can't switch the fleet's behaviour.
+
+### Single-zone fleets
+
+A hub-less fleet may consist of a single zone, for example a test setup, or a fleet whose other zones are down during an upgrade. Its only zone reconciles itself: it keeps its own `TalosCluster`, addons and `kontinuum` `Deployment` converged, including rolling that `Deployment` onto a new version.
+
+The exception is removing the zone. Tearing a zone down deletes the very `Deployment`, and resets the very nodes, that its own process runs on. So a zone's process stops taking its own zone's lease as soon as its `Zone` or `TalosCluster` is being deleted, or is gone. Another process finishes the removal:
+
+- in a fleet with other zones, any other zone;
+- for a fleet's last zone, an outside process against the same storage — see [Removing a fleet's last zone](workflows/zone-remove.md#removing-a-fleets-last-zone).
+
+What a zone can't do for itself is recover from a version that fails to start: nothing else in a single-zone fleet can roll it back. Run a hub against the same storage to repair it.
+
 ## Web UI (`pkg/ui`)
 
 Server-rendered HTML (Go `html/template`) styled with Tailwind CSS and progressively enhanced with [htmx](https://htmx.org/) — no separate frontend build or JavaScript framework. `pkg/ui/assets.go` vendors Tailwind, htmx, PrismJS, and the JetBrains Mono webfont at `go generate` time (`cmd/vendor-web-assets`) so the shipped container image has no CDN runtime dependency. Pages: topology, instance detail, registry, IAM (OIDC admin group role bindings), connect (kubectl access, with API keys/federated identity credentials planned).

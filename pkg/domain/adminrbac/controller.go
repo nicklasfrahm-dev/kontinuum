@@ -103,9 +103,8 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		Client:      mgr.GetClient(),
 		AdminGroups: c.Config.AdminGroups,
 		Interval:    c.Config.Interval,
-		Locker: zonelease.NewLocker(
-			mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
-		Logger: c.Config.Logger,
+		Locker:      zonelease.NewLockerFor(mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease),
+		Logger:      c.Config.Logger,
 	}
 
 	err := mgr.Add(runnable)
@@ -164,6 +163,9 @@ func (r *Runnable) reconcile(ctx context.Context) {
 	if !acquired {
 		return
 	}
+
+	ctx, release := r.Locker.KeepRenewed(ctx, zonelease.GlobalKey)
+	defer release()
 
 	err = r.ensureRole(ctx)
 	if err != nil {

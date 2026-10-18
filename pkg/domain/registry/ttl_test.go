@@ -154,3 +154,40 @@ func TestTTLReconcilerIgnoresMissingServer(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, result)
 }
+
+// TestTTLReconcilerRunsOnHubLessZonePeer proves the fleet-wide TTL sweep —
+// gated on zonelease.GlobalKey — actually runs on a zone peer once the
+// fleet is hub-less, rather than silently never running for want of a hub.
+func TestTTLReconcilerRunsOnHubLessZonePeer(t *testing.T) {
+	t.Parallel()
+
+	server := &v1alpha2.Kontinuum{
+		ObjectMeta: metav1.ObjectMeta{Name: staleServerName},
+		Spec:       v1alpha2.KontinuumSpec{Region: "eu", Zone: "hel02"},
+		Status: v1alpha2.KontinuumStatus{
+			Role:              v1alpha2.RoleWorker,
+			LastHeartbeatTime: metav1.NewTime(time.Now().Add(-10 * time.Minute)),
+		},
+	}
+
+	for _, hubLess := range []bool{false, true} {
+		fakeClient := newFakeClient(t, server.DeepCopy())
+
+		reconciler := &registry.TTLReconciler{
+			Client:         fakeClient,
+			StaleThreshold: testStaleThreshold,
+			Locker: zonelease.NewLockerFor(fakeClient, fakeClient, zonelease.Identity{
+				HolderIdentity: "zone-eu-hel01", SelfZoneKey: "eu-hel01", HubLess: hubLess,
+			}),
+			Logger: slog.Default(),
+		}
+
+		_, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: staleServerName},
+		})
+		require.NoError(t, err)
+
+		err = fakeClient.Get(context.Background(), types.NamespacedName{Name: staleServerName}, &v1alpha2.Kontinuum{})
+		assert.Equal(t, hubLess, apierrors.IsNotFound(err), "hubLess=%v", hubLess)
+	}
+}

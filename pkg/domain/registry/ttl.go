@@ -74,6 +74,9 @@ func (r *TTLReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{RequeueAfter: zonelease.Jitter(ttlLeaseRetryInterval)}, nil
 	}
 
+	ctx, release := r.Locker.KeepRenewed(ctx, zonelease.GlobalKey)
+	defer release()
+
 	last := server.Status.LastHeartbeatTime.Time
 	if last.IsZero() {
 		last = server.CreationTimestamp.Time
