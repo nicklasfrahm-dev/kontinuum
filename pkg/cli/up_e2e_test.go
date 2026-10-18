@@ -359,7 +359,7 @@ func seedThroughServe(ctx context.Context, t *testing.T, infra upE2EInfra, zones
 			Image: upE2EImage,
 			Env: map[string]string{
 				"KONTINUUM_SERVER_STORAGE":           infra.storageURI,
-				"KONTINUUM_SERVER_ZONE_STORAGE_MODE": "Direct",
+				"KONTINUUM_SERVER_STORAGE_MODE":      "Direct",
 				"KONTINUUM_INSECURE_ALLOW_ANONYMOUS": "true",
 				// Info, so the startup line WaitingFor matches is logged.
 				"KONTINUUM_LOG_LEVEL": "info",
