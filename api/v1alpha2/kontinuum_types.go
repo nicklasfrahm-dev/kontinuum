@@ -143,6 +143,21 @@ type KontinuumServerConfigStatus struct {
 	DNS KontinuumDNSConfigStatus `json:"dns"`
 	// +optional
 	GRPC KontinuumGRPCConfigStatus `json:"grpc"`
+	// +optional
+	Frontend KontinuumFrontendConfigStatus `json:"frontend"`
+}
+
+// KontinuumFrontendConfigStatus groups where the fleet's UI is served,
+// same rationale as KontinuumDNSConfigStatus.
+type KontinuumFrontendConfigStatus struct {
+	// Host is the one hostname the whole fleet's UI is served on, by every
+	// zone at once. When set, every zone's OIDC redirect URL becomes
+	// https://<host>/app, each zone's certificate also covers Host and is
+	// issued via DNS-01, and the UI on a zone's own hostname redirects
+	// here, so the session cookie lives on a single origin. The API stays
+	// on the zone hostnames. Empty keeps every zone on its own hostname.
+	// +optional
+	Host string `default:"" json:"host"`
 }
 
 // KontinuumDNSConfigStatus groups DNS-related server config under its own
@@ -158,11 +173,11 @@ type KontinuumDNSConfigStatus struct {
 	// mirroring how it infers Storage from that Secret.
 	// +optional
 	Domain string `default:"" json:"domain"`
-	// Provider selects the external-dns provider a zone's own DNS record is
-	// managed through (e.g. "route53", "azure", "cloudflare") — passed
-	// through untouched to whatever external-dns Addon the operator
-	// configures for it (see pkg/domain/addon/values/external-dns.yaml's own
-	// doc for why kontinuum doesn't wire this in itself). Not confidential,
+	// Provider selects the DNS provider a zone's records are managed
+	// through: one of Cloudflare, AWS, Azure, Google, DigitalOcean, RFC2136
+	// or PowerDNS — see pkg/config.DNSProvider. pkg/domain/addon translates
+	// it into external-dns's own provider name, and into cert-manager's
+	// DNS-01 solver when a frontend host is set. Not confidential,
 	// so — like Domain — it's published here directly. Empty means no DNS
 	// provider is configured; see pkg/domain/zone's own doc for what that
 	// means for a Zone's own DNSEndpoint management.

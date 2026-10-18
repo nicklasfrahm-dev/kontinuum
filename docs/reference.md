@@ -39,7 +39,8 @@ See [Add zone](workflows/zone-add.md) for how these are used.
 | `KONTINUUM_SERVER_GRPC_ENDPOINT` | This hub's own publicly reachable `host:port` for its etcd gRPC proxy (see [Architecture](architecture.md#storage)) — normally the same `host:port` a browser reaches `/app` on. Required in `Proxy` [storage mode](#storage-modes): without it, a newly joined zone has no way to reach shared storage. Unused in `Direct` mode. | *(empty)* |
 | `KONTINUUM_SERVER_STORAGE_MODE` | How a joined zone reaches shared storage: `Proxy`, `Direct` or `NATS`. `Auto` infers it from `KONTINUUM_SERVER_STORAGE` — see [Storage modes](#storage-modes). Any other value, including a lowercase one, fails at startup. | `Auto` |
 | `KONTINUUM_ACME_EMAIL`         | ACME account email used when the `zone` controller creates a joined zone's cert-manager `ClusterIssuer` | *(empty)*                                                       |
-| `KONTINUUM_SERVER_DNS_PROVIDER` | external-dns provider name (e.g. `cloudflare`, `pdns`) for each zone's auto-wired external-dns. Required, together with `_CREDENTIAL`, before a zone's network layer is installed. See [Add zone](workflows/zone-add.md#dns-auto-wiring-external-dns-from-a-flat-yaml-credential). | *(empty)* |
+| `KONTINUUM_SERVER_DNS_PROVIDER` | DNS provider for each zone's auto-wired external-dns, and for the DNS-01 solver when a frontend host is set: one of the PascalCase values in [DNS providers](#dns-providers). Any other value, including the lowercase external-dns names this used to take, fails at startup. Required, together with `_CREDENTIAL`, before a zone's network layer is installed. See [Add zone](workflows/zone-add.md#dns-auto-wiring-external-dns-from-a-flat-yaml-credential). | *(empty)* |
+| `KONTINUUM_SERVER_FRONTEND_HOST` | The one hostname every zone serves the UI on. See [Frontend host](#frontend-host). | *(empty)* |
 | `KONTINUUM_SERVER_DNS_CREDENTIAL` | Flat YAML mapping of environment variables for that external-dns provider (e.g. `CF_API_TOKEN: <token>`). Confidential: redacted from status. | *(empty)* |
 | `KONTINUUM_ACME_EMAIL`         | ACME account email used when the `zone` controller creates a joined zone's cert-manager `ClusterIssuer` | *(empty)*                                                       |
 | `KONTINUUM_ACME_SERVER`        | ACME directory URL used for the same `ClusterIssuer`                                                     | `https://acme-v02.api.letsencrypt.org/directory` (Let's Encrypt production) |
@@ -48,6 +49,36 @@ See [Add zone](workflows/zone-add.md) for how these are used.
 | `KONTINUUM_ACME_EXTERNAL_ACCOUNT_BINDING_HMAC_KEY` | The external account's MAC key, base64url-encoded as the CA issues it. Confidential: redacted from status, and delivered to each zone through its Secret. | *(empty)* |
 
 Set `KONTINUUM_SERVER_DNS_DOMAIN` and `KONTINUUM_SERVER_GRPC_ENDPOINT` once, on the hub — `kontinuum zone add` never needs its own copy of either: it infers the domain from any already-registered `Kontinuum`'s own published config, and the `zone` controller reads the gRPC endpoint directly off the hub's own config to build each zone's storage credential. See [Add zone](workflows/zone-add.md) for the full mechanism.
+
+### DNS providers
+
+`KONTINUUM_SERVER_DNS_PROVIDER` is translated into external-dns's own provider name, and, when a frontend host is set, into cert-manager's DNS-01 solver. The solver reads its credential from the same `KONTINUUM_SERVER_DNS_CREDENTIAL` external-dns uses, so you supply one set of DNS credentials. A credential missing a key the solver needs is reported on every `Zone` as `Installed=False`, naming the missing keys.
+
+| `KONTINUUM_SERVER_DNS_PROVIDER` | external-dns `provider.name` | cert-manager DNS-01 solver | Credential keys the solver reads |
+| --- | --- | --- | --- |
+| `Cloudflare` | `cloudflare` | `cloudflare` | `CF_API_TOKEN` |
+| `AWS` | `aws` | `route53` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optionally `AWS_REGION` |
+| `Azure` | `azure` | `azureDNS` | `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP` |
+| `Google` | `google` | `cloudDNS` | `EXTERNAL_DNS_GOOGLE_PROJECT`, `GOOGLE_SERVICE_ACCOUNT_KEY` (the JSON key) |
+| `DigitalOcean` | `digitalocean` | `digitalocean` | `DO_TOKEN` |
+| `RFC2136` | `rfc2136` | `rfc2136` | `EXTERNAL_DNS_RFC2136_HOST`, `EXTERNAL_DNS_RFC2136_PORT` (e.g. `53`), `EXTERNAL_DNS_RFC2136_TSIG_KEYNAME`, `EXTERNAL_DNS_RFC2136_TSIG_SECRET`, `EXTERNAL_DNS_RFC2136_TSIG_SECRET_ALG` (e.g. `hmac-sha256`). external-dns has no default for the port or the algorithm. It also needs `EXTERNAL_DNS_RFC2136_ZONE`, and `EXTERNAL_DNS_RFC2136_TSIG_AXFR: "true"` to list existing records |
+| `PowerDNS` | `pdns` | none built in | — |
+
+`PowerDNS` works for each zone's own records, but can't be combined with a frontend host until a cert-manager webhook solver is added.
+
+!!! warning "Breaking change"
+    `KONTINUUM_SERVER_DNS_PROVIDER` used to be passed to external-dns untouched, so it took lowercase external-dns names such as `cloudflare` or `pdns`. Those values now fail at startup: use the PascalCase value from the table above.
+
+### Frontend host
+
+Set `KONTINUUM_SERVER_FRONTEND_HOST` to serve the whole fleet's UI on one hostname, served by every zone at once, rather than on each zone's own `<zone>.<region>.<domain>`. It must equal `KONTINUUM_SERVER_DNS_DOMAIN` or be a subdomain of it, and needs a `KONTINUUM_SERVER_DNS_PROVIDER` with a DNS-01 solver; otherwise the server refuses to start. With it set:
+
+- Every zone's `KONTINUUM_OIDC_REDIRECT_URL` is `https://<frontend host>/app`, so only one redirect URL is registered with the identity provider.
+- Every zone serves the frontend host too: its `Gateway` gets an extra HTTPS listener, and its certificate covers both its own hostname and the frontend host.
+- UI requests (`/app`) on a zone's own hostname are redirected with a `308` to the frontend host, so the session cookie lives on a single origin. The API, and kubeconfigs, stay on the zone hostnames.
+- The frontend host's DNS record has a single writer: whichever process holds the fleet-wide lease keeps one `DNSEndpoint` listing the `Gateway` address of every `Ready` zone. That `DNSEndpoint` lives in one zone's cluster, the first `Ready` zone by name, so the zones' external-dns instances never fight over the record.
+
+**The challenge is not configurable.** With a frontend host, every zone's certificate is ordered through DNS-01: HTTP-01 fails at random for a name with several A records, because the CA may validate against a zone other than the one that ordered. Without a frontend host, each certificate only covers the zone's own hostname, and HTTP-01 through the zone's own `Gateway` keeps working. A setting whose only valid value follows from another one would just be a way to get it wrong. Each zone keeps its own certificate: every zone's set of names is different, so the CA's limit on duplicate certificates never applies, and no certificate is ever copied between zones.
 
 ### Storage modes
 

@@ -184,11 +184,16 @@ type (
 )
 
 // externalDNSAddonValues returns the external-dns Addon's values: provider.name
-// from KONTINUUM_SERVER_DNS_PROVIDER, and one env entry per credential key
+// translated from KONTINUUM_SERVER_DNS_PROVIDER (see ExternalDNSProviderName), and one env entry per credential key
 // (sorted, for a deterministic encoding) read from secretName via
 // secretKeyRef. The chart has no envFrom/existingSecret support, hence one
 // entry per key.
 func externalDNSAddonValues(provider, secretName string, keys map[string]string) (*apiextensionsv1.JSON, error) {
+	providerName, err := ExternalDNSProviderName(provider)
+	if err != nil {
+		return nil, err
+	}
+
 	names := make([]string, 0, len(keys))
 	for name := range keys {
 		names = append(names, name)
@@ -210,7 +215,7 @@ func externalDNSAddonValues(provider, secretName string, keys map[string]string)
 		Provider externalDNSProviderValues `json:"provider"`
 		Env      []externalDNSEnvVar       `json:"env"`
 	}{
-		Provider: externalDNSProviderValues{Name: provider},
+		Provider: externalDNSProviderValues{Name: providerName},
 		Env:      env,
 	})
 	if err != nil {
