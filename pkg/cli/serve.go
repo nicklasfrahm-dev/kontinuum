@@ -768,7 +768,7 @@ func buildZoneLease(cfg *config.Config, logger *slog.Logger) (zonelease.Identity
 const storageModeResolveTimeout = 10 * time.Second
 
 // resolveStorageMode resolves the fleet's StorageMode from cfg's own
-// storage connection string and KONTINUUM_SERVER_ZONE_STORAGE_MODE — see
+// storage connection string and KONTINUUM_SERVER_STORAGE_MODE — see
 // config.ResolveStorageMode. It runs against the configured
 // cfg.Server.Storage, before resolveZoneStorage rewrites it into a local
 // socket, so a zone peer handed an etcdproxy relay DSN resolves to
@@ -778,7 +778,7 @@ func resolveStorageMode(cfg *config.Config) (config.StorageMode, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), storageModeResolveTimeout)
 	defer cancel()
 
-	mode, err := config.ResolveStorageMode(ctx, nil, cfg.Server.Storage, config.StorageMode(cfg.Server.ZoneStorageMode))
+	mode, err := config.ResolveStorageMode(ctx, nil, cfg.Server.Storage, config.StorageMode(cfg.Server.StorageMode))
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve storage mode: %w", err)
 	}
