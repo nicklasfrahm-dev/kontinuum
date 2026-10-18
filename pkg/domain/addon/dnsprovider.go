@@ -78,9 +78,10 @@ const (
 	envGoogleServiceAccount = "GOOGLE_SERVICE_ACCOUNT_KEY"
 	// DigitalOcean: an API token.
 	envDigitalOceanAPI = "DO_TOKEN"
-	// RFC2136: the nameserver and a TSIG key with its algorithm; the port
-	// is optional, defaulting to 53. external-dns exits on startup without
-	// an algorithm, so unlike cert-manager it has no default to fall back on.
+	// RFC2136: the nameserver with its port, and a TSIG key with its
+	// algorithm. external-dns has no default for either the port (it dials
+	// port 0) or the algorithm (it exits on startup), so neither is
+	// defaulted for cert-manager alone.
 	envRFC2136Host         = "EXTERNAL_DNS_RFC2136_HOST"
 	envRFC2136Port         = "EXTERNAL_DNS_RFC2136_PORT"
 	envRFC2136KeyName      = "EXTERNAL_DNS_RFC2136_TSIG_KEYNAME"
@@ -152,8 +153,10 @@ func dns01SolverBuilders() map[config.DNSProvider]dns01SolverBuilder {
 		},
 		config.DNSProviderDigitalOcean: {required: []string{envDigitalOceanAPI}, build: digitalOceanSolver},
 		config.DNSProviderRFC2136: {
-			required: []string{envRFC2136Host, envRFC2136KeyName, envRFC2136Key, envRFC2136KeyAlgorithm},
-			build:    rfc2136Solver,
+			required: []string{
+				envRFC2136Host, envRFC2136Port, envRFC2136KeyName, envRFC2136Key, envRFC2136KeyAlgorithm,
+			},
+			build: rfc2136Solver,
 		},
 	}
 }
@@ -210,11 +213,6 @@ func digitalOceanSolver(ref secretRefs, _ map[string]string) (*acmev1.ACMEChalle
 }
 
 func rfc2136Solver(ref secretRefs, keys map[string]string) (*acmev1.ACMEChallengeSolverDNS01, error) {
-	port := keys[envRFC2136Port]
-	if port == "" {
-		port = defaultRFC2136Port
-	}
-
 	algorithm, err := tsigAlgorithm(keys[envRFC2136KeyAlgorithm])
 	if err != nil {
 		return nil, err
@@ -222,7 +220,7 @@ func rfc2136Solver(ref secretRefs, keys map[string]string) (*acmev1.ACMEChalleng
 
 	return &acmev1.ACMEChallengeSolverDNS01{
 		RFC2136: &acmev1.ACMEIssuerDNS01ProviderRFC2136{
-			Nameserver:    net.JoinHostPort(keys[envRFC2136Host], port),
+			Nameserver:    net.JoinHostPort(keys[envRFC2136Host], keys[envRFC2136Port]),
 			TSIGKeyName:   keys[envRFC2136KeyName],
 			TSIGAlgorithm: algorithm,
 			TSIGSecret:    ref.key(envRFC2136Key),
