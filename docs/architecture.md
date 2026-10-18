@@ -28,7 +28,7 @@ Each controller lives in its own package and owns one CRD's reconcile loop, per 
 
 See [Add zone](workflows/zone-add.md) for the full instance → pool → cluster → addon bootstrap flow (including a flow chart) and how a zone's own kontinuum-server gets installed and registers back into the hub, and [Remove zone](workflows/zone-remove.md) for tearing that back down.
 
-## Zone leases and hub-less fleets (`pkg/domain/zonelease`) { #hub-less-fleets }
+## Zone leases and hub-less fleets (`pkg/domain/zonelease`)
 
 Every kontinuum-server process in a fleet runs the same controllers against the same shared storage, so each zone-scoped write is gated on a per-zone `Lease` (`zonelock-<region>-<zone>`): whichever process holds it reconciles that zone, and the rest back off. With a hub, a zone's own process never takes its own zone's lease, and the hub reconciles it. Hub-less, a zone contends for its own lease like any other peer; see [Single-zone fleets](#single-zone-fleets).
 
