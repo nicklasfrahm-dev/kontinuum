@@ -124,7 +124,7 @@ See [Converge a fleet](workflows/up.md) for how `up` works.
 | `1` | Error. |
 | `2` | `--dry-run` only: changes or drift are pending. |
 
-### `kontinuum.yml` { #kontinuumyml }
+### `kontinuum.yml`
 
 A `Fleet` of `apiVersion: up.kontinuum.sh/v1alpha1`. Unknown fields are an error, so a typo can't silently fall back to a default. Field names mirror the configuration above, so each one maps onto a zone's `kontinuum-env` one-to-one.
 
