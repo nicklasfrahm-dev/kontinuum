@@ -246,10 +246,10 @@ func (f *Fleet) ToConfig() (*config.Config, error) {
 	spec := f.Spec
 
 	cfg.Server.Storage = spec.Storage.URI
-	cfg.Server.ZoneStorageMode = string(config.StorageModeAuto)
+	cfg.Server.StorageMode = string(config.StorageModeAuto)
 
 	if spec.Storage.Mode != "" {
-		cfg.Server.ZoneStorageMode = spec.Storage.Mode
+		cfg.Server.StorageMode = spec.Storage.Mode
 	}
 
 	cfg.Server.Frontend.Host = spec.Frontend.Host

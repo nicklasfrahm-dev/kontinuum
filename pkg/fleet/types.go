@@ -58,7 +58,7 @@ type Frontend struct {
 }
 
 // Storage maps onto KONTINUUM_SERVER_STORAGE and
-// KONTINUUM_SERVER_ZONE_STORAGE_MODE.
+// KONTINUUM_SERVER_STORAGE_MODE.
 type Storage struct {
 	// Mode overrides storage mode inference, e.g. behind split-horizon DNS.
 	// Optional: one of Auto (the default), Direct or NATS.

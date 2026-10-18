@@ -182,7 +182,7 @@ func TestToConfigMapsEveryField(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "postgres://kontinuum@db.example.com/kontinuum", cfg.Server.Storage)
-	assert.Equal(t, string(config.StorageModeAuto), cfg.Server.ZoneStorageMode)
+	assert.Equal(t, string(config.StorageModeAuto), cfg.Server.StorageMode)
 	assert.Equal(t, "kontinuum.example.com", cfg.Server.Frontend.Host)
 	assert.Equal(t, "example.com", cfg.Server.DNS.Domain)
 	assert.Equal(t, "Cloudflare", cfg.Server.DNS.Provider)
