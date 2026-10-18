@@ -65,6 +65,9 @@ func ensureNamespace(ctx context.Context, downstream client.Client, namespace st
 // doesn't override KONTINUUM_OIDC_REDIRECT_URL at all, falling back to
 // the hub's own value rather than producing a malformed "https:///app"
 // the way computing one from an empty hostname unconditionally used to.
+// When the fleet has a frontend host, every zone's redirect URL is
+// https://<frontendHost>/app instead, so only one redirect URL is ever
+// registered with the identity provider.
 //
 // Everything else copies straight off hubConfig.EnvVars() — see
 // ensureEnv — including KONTINUUM_ACME_EMAIL/_SERVER (so this zone's own
@@ -73,7 +76,7 @@ func ensureNamespace(ctx context.Context, downstream client.Client, namespace st
 // _INSECURE_TLS_SKIP_VERIFY (so that same further-nested Zone controller
 // can dial this same hub's etcd proxy the exact way this one does — see
 // zoneStorageDSN).
-func zoneEnvOverrides(region, zoneName, storage, hostname string) map[string]string {
+func zoneEnvOverrides(region, zoneName, storage, hostname, frontendHost string) map[string]string {
 	overrides := map[string]string{
 		"KONTINUUM_SERVER_ADDR":   ":8080",
 		"KONTINUUM_SERVER_REGION": region,
@@ -81,7 +84,10 @@ func zoneEnvOverrides(region, zoneName, storage, hostname string) map[string]str
 		storageSecretKey:          storage,
 	}
 
-	if hostname != "" {
+	switch {
+	case frontendHost != "":
+		overrides["KONTINUUM_OIDC_REDIRECT_URL"] = "https://" + frontendHost + "/app"
+	case hostname != "":
 		overrides["KONTINUUM_OIDC_REDIRECT_URL"] = "https://" + hostname + "/app"
 	}
 

@@ -220,7 +220,7 @@ func testCluster() *v1alpha2.TalosCluster {
 		ObjectMeta: metav1.ObjectMeta{Name: testClusterName},
 		Spec: v1alpha2.TalosClusterSpec{
 			ControlPlane: v1alpha2.TalosClusterMemberSpec{
-				PoolRef: v1alpha2.InstancePoolReference{Name: "cp-pool"},
+				PoolRef: v1alpha2.InstancePoolReference{Name: testControlPlanePool},
 			},
 			Workers: []v1alpha2.TalosClusterWorkerSpec{
 				{Name: "default", PoolRef: v1alpha2.InstancePoolReference{Name: "worker-pool"}},
@@ -405,7 +405,7 @@ func TestReconcileTreatsAlreadyExistsAsBootstrapped(t *testing.T) {
 // cloudflareDNSConfig is a hub DNS config for Cloudflare with flatYAML as
 // its credential.
 func cloudflareDNSConfig(flatYAML string) v1alpha2.KontinuumDNSConfigStatus {
-	dns := v1alpha2.KontinuumDNSConfigStatus{Provider: "cloudflare"}
+	dns := v1alpha2.KontinuumDNSConfigStatus{Provider: "Cloudflare"}
 	dns.Credential = flatYAML
 
 	return dns
