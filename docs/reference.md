@@ -61,7 +61,7 @@ Set `KONTINUUM_SERVER_DNS_DOMAIN` and `KONTINUUM_SERVER_GRPC_ENDPOINT` once, on 
 | `Azure` | `azure` | `azureDNS` | `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP` |
 | `Google` | `google` | `cloudDNS` | `EXTERNAL_DNS_GOOGLE_PROJECT`, `GOOGLE_SERVICE_ACCOUNT_KEY` (the JSON key) |
 | `DigitalOcean` | `digitalocean` | `digitalocean` | `DO_TOKEN` |
-| `RFC2136` | `rfc2136` | `rfc2136` | `EXTERNAL_DNS_RFC2136_HOST`, `EXTERNAL_DNS_RFC2136_TSIG_KEYNAME`, `EXTERNAL_DNS_RFC2136_TSIG_SECRET`, `EXTERNAL_DNS_RFC2136_TSIG_SECRET_ALG` (e.g. `hmac-sha256`; external-dns has no default), optionally `EXTERNAL_DNS_RFC2136_PORT` (default `53`) |
+| `RFC2136` | `rfc2136` | `rfc2136` | `EXTERNAL_DNS_RFC2136_HOST`, `EXTERNAL_DNS_RFC2136_PORT` (e.g. `53`), `EXTERNAL_DNS_RFC2136_TSIG_KEYNAME`, `EXTERNAL_DNS_RFC2136_TSIG_SECRET`, `EXTERNAL_DNS_RFC2136_TSIG_SECRET_ALG` (e.g. `hmac-sha256`). external-dns has no default for the port or the algorithm. It also needs `EXTERNAL_DNS_RFC2136_ZONE`, and `EXTERNAL_DNS_RFC2136_TSIG_AXFR: "true"` to list existing records |
 | `PowerDNS` | `pdns` | none built in | — |
 
 `PowerDNS` works for each zone's own records, but can't be combined with a frontend host until a cert-manager webhook solver is added.
