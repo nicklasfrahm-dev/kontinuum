@@ -507,7 +507,10 @@ func TestReconcileUnhealthyProbeSetsReadyFalse(t *testing.T) {
 	assert.Contains(t, cond.Message, "no pods found yet")
 }
 
-func TestReconcileMissingTalosClusterIsNoOp(t *testing.T) {
+// TestReconcileMissingTalosClusterRequeues covers an Addon applied ahead of
+// its TalosCluster: nothing is installed yet, but it's checked again, since
+// nothing else re-triggers it once the cluster appears.
+func TestReconcileMissingTalosClusterRequeues(t *testing.T) {
 	t.Parallel()
 
 	cilium := builtinAddon()
@@ -522,7 +525,7 @@ func TestReconcileMissingTalosClusterIsNoOp(t *testing.T) {
 		NamespacedName: types.NamespacedName{Name: ciliumAddonResourceName, Namespace: v1alpha2.KontinuumSystemNamespace},
 	})
 	require.NoError(t, err)
-	assert.Zero(t, result)
+	assert.Positive(t, result.RequeueAfter)
 	assert.Empty(t, installer.calls)
 }
 
