@@ -164,6 +164,9 @@ func (r *Runnable) reconcile(ctx context.Context) {
 		return
 	}
 
+	ctx, release := r.Locker.KeepRenewed(ctx, zonelease.GlobalKey)
+	defer release()
+
 	err = r.ensureRole(ctx)
 	if err != nil {
 		r.Logger.Error("Failed to ensure admin cluster role", "error", err)

@@ -19,8 +19,11 @@ package zonelease
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
 	"math/rand/v2"
+	"strings"
 	"time"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -58,6 +61,16 @@ const globalLeaseName = leaseNamePrefix + "global"
 // takeover, short enough that a crashed holder's zone isn't stuck for long.
 const defaultLeaseDuration = 45 * time.Second
 
+// renewalsPerLease is how many times KeepRenewed renews a held Lease per
+// lease duration while a reconcile is still running: often enough that
+// one missed renewal never lets the Lease expire under it.
+const renewalsPerLease = 3
+
+// ErrLeaseLost is the cause KeepRenewed cancels its context with once the
+// Lease it keeps renewed is held by someone else, is gone, or went
+// unrenewed for so long that a contender may be about to take it over.
+var ErrLeaseLost = errors.New("zone lease lost")
+
 // Key derives the per-zone lock key from region/zone, matching the
 // <region>-<zone> naming convention v1alpha2 objects already share (see
 // pkg/domain/zone.BuildAddObjects's own doc). Empty when either is empty —
@@ -92,7 +105,8 @@ type Identity struct {
 // process sharing one central storage — see this package's own doc.
 // Callers build one per controller (via NewLocker, in SetupWithManager) and
 // call TryAcquire at the top of every Reconcile/tick that's about to write
-// anything, skipping the write entirely when it returns false.
+// anything, skipping the write entirely when it returns false, and
+// KeepRenewed right after a true one.
 type Locker struct {
 	// Client talks to this process's own apiserver — always mgr.GetClient()
 	// in production, a fake client in tests.
@@ -112,18 +126,25 @@ type Locker struct {
 	// process's lease identity and registry identity match.
 	HolderIdentity string
 	// SelfZoneKey is this process's own zone key
-	// (Key(cfg.Server.Region, cfg.Server.Zone)) — empty for the hub. A
-	// non-empty SelfZoneKey is what makes TryAcquire refuse this exact key
-	// outright, with no API call: a zone must never reconcile its own
-	// resources. Unless HubLess is set, it also refuses GlobalKey the same
-	// way: with a hub, fleet-wide state is the hub's alone.
+	// (Key(cfg.Server.Region, cfg.Server.Zone)) — empty for the hub. Unless
+	// HubLess is set, a non-empty SelfZoneKey makes TryAcquire refuse both
+	// this exact key and GlobalKey outright, with no API call: with a hub,
+	// the hub reconciles every zone and all fleet-wide state.
+	//
+	// Hub-less, a zone contends for its own key like any other peer, so a
+	// single-zone fleet still converges. The one exception is removal:
+	// TryAcquire refuses the zone's own key while its own Zone or
+	// TalosCluster is being deleted or is gone, because tearing a zone
+	// down deletes the very Deployment and resets the very nodes this
+	// process runs on. Another peer, or an outside process such as a hub,
+	// finishes the removal.
 	SelfZoneKey string
-	// HubLess opens GlobalKey to contention by every peer, zones included.
-	// It follows from the storage mode (see
+	// HubLess opens GlobalKey and SelfZoneKey to contention by every peer,
+	// zones included. It follows from the storage mode (see
 	// pkg/config.StorageMode.IsHubLess): in direct and NATS mode every
 	// process holds an identical storage DSN, so there may be no hub at
-	// all, and refusing GlobalKey to zones would leave the registry TTL
-	// sweep and adminrbac's ClusterRoleBindings silently unreconciled.
+	// all, and refusing those keys to zones would leave fleet-wide state,
+	// and a fleet's only zone, silently unreconciled.
 	HubLess bool
 	// Temporary marks a peer that is about to go away again — kontinuum
 	// up's in-process hub. It reconciles zones like any other peer, but is
@@ -177,6 +198,13 @@ func (l *Locker) TryAcquire(ctx context.Context, zoneKey string) (bool, error) {
 		return false, nil
 	}
 
+	if l.SelfZoneKey != GlobalKey && zoneKey == l.SelfZoneKey {
+		removing, err := l.selfRemoving(ctx)
+		if err != nil || removing {
+			return false, err
+		}
+	}
+
 	name := leaseName(zoneKey)
 
 	var lease coordinationv1.Lease
@@ -201,6 +229,35 @@ func (l *Locker) TryAcquire(ctx context.Context, zoneKey string) (bool, error) {
 	return l.takeover(ctx, &lease)
 }
 
+// KeepRenewed renews the Lease for zoneKey, which the caller has just
+// acquired with TryAcquire, in the background until the returned release
+// func is called. TryAcquire only renews at the start of a reconcile, so
+// without this a reconcile running longer than the lease duration — a
+// Talos health check, a Helm install — would keep writing after a
+// contender, such as the next pod of a rolling update, took the Lease
+// over. The returned context is canceled with ErrLeaseLost as its cause
+// the moment the Lease is lost, or has gone unrenewed for long enough that
+// a contender may be about to take it over, so the reconcile's own writes
+// stop. Callers do every write of the reconcile with that context, and
+// defer release.
+func (l *Locker) KeepRenewed(ctx context.Context, zoneKey string) (context.Context, context.CancelFunc) {
+	held, cancel := context.WithCancelCause(ctx)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		l.renewUntilDone(held, cancel, zoneKey)
+	}()
+
+	release := func() {
+		cancel(context.Canceled)
+		<-done
+	}
+
+	return held, release
+}
+
 // refused reports whether this process is structurally not allowed to
 // reconcile zoneKey at all — see SelfZoneKey's, HubLess's and Temporary's
 // own docs.
@@ -213,11 +270,152 @@ func (l *Locker) refused(zoneKey string) bool {
 		return false
 	}
 
-	if zoneKey == l.SelfZoneKey {
-		return true
+	if zoneKey == GlobalKey || zoneKey == l.SelfZoneKey {
+		return !l.HubLess
 	}
 
-	return zoneKey == GlobalKey && !l.HubLess
+	return false
+}
+
+// selfRemoving reports whether this process's own zone is being removed —
+// its Zone or TalosCluster, both named SelfZoneKey, is being deleted or is
+// already gone — see SelfZoneKey's own doc for why TryAcquire then refuses
+// the zone's own key.
+func (l *Locker) selfRemoving(ctx context.Context) (bool, error) {
+	key := client.ObjectKey{Name: l.SelfZoneKey, Namespace: v1alpha2.KontinuumSystemNamespace}
+
+	for _, obj := range []client.Object{&v1alpha2.Zone{}, &v1alpha2.TalosCluster{}} {
+		err := l.Reader.Get(ctx, key, obj)
+		if apierrors.IsNotFound(err) {
+			return true, nil
+		}
+
+		if err != nil {
+			return false, fmt.Errorf("failed to get own %T %q: %w", obj, l.SelfZoneKey, err)
+		}
+
+		if !obj.GetDeletionTimestamp().IsZero() {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+// renewUntilDone is KeepRenewed's own loop: it renews zoneKey's Lease
+// renewalsPerLease times per lease duration until ctx is done, canceling
+// it with ErrLeaseLost once the Lease is lost or a renewal deadline passes.
+// The deadline is one renewal interval short of the lease duration, so the
+// reconcile stops before any contender could judge the Lease expired.
+func (l *Locker) renewUntilDone(ctx context.Context, cancel context.CancelCauseFunc, zoneKey string) {
+	interval := l.LeaseDuration / renewalsPerLease
+	deadline := l.LeaseDuration - interval
+	lastRenewed := time.Now()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		renewed, err := l.renewHeld(ctx, zoneKey)
+		if errors.Is(err, ErrLeaseLost) {
+			cancel(err)
+
+			return
+		}
+
+		if renewed {
+			lastRenewed = time.Now()
+		}
+
+		if time.Since(lastRenewed) > deadline {
+			cancel(fmt.Errorf("%w: %q not renewed for %s", ErrLeaseLost, leaseName(zoneKey), deadline))
+
+			return
+		}
+	}
+}
+
+// renewHeld renews zoneKey's Lease if l still holds it, returning
+// ErrLeaseLost when it's gone or held by someone else. A false return
+// with a nil error is a renewal that didn't land this round — see renew —
+// not a lost Lease.
+func (l *Locker) renewHeld(ctx context.Context, zoneKey string) (bool, error) {
+	name := leaseName(zoneKey)
+
+	var lease coordinationv1.Lease
+
+	err := l.Reader.Get(ctx, client.ObjectKey{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace}, &lease)
+	if apierrors.IsNotFound(err) {
+		return false, fmt.Errorf("%w: %q is gone", ErrLeaseLost, name)
+	}
+
+	if err != nil {
+		return false, fmt.Errorf("failed to get zone lease %q: %w", name, err)
+	}
+
+	if holderIdentity(&lease) != l.HolderIdentity {
+		return false, fmt.Errorf("%w: %q is held by %q", ErrLeaseLost, name, holderIdentity(&lease))
+	}
+
+	return l.renew(ctx, &lease)
+}
+
+// ReleaseAll frees every Lease this package created that holder still
+// holds, so a successor — the next pod of a rolling update, another peer —
+// takes over at once instead of waiting out the lease duration. It's meant
+// for graceful shutdown, once every reconcile that could still write under
+// those Leases has stopped. A Lease that changed or vanished in the
+// meantime is left alone: it's no longer holder's to release.
+func ReleaseAll(ctx context.Context, apiClient client.Client, holder string) (int, error) {
+	var leases coordinationv1.LeaseList
+
+	err := apiClient.List(ctx, &leases, client.InNamespace(v1alpha2.KontinuumSystemNamespace))
+	if err != nil {
+		return 0, fmt.Errorf("failed to list zone leases: %w", err)
+	}
+
+	released := 0
+
+	var errs []error
+
+	for index := range leases.Items {
+		lease := &leases.Items[index]
+		if !strings.HasPrefix(lease.Name, leaseNamePrefix) || holderIdentity(lease) != holder {
+			continue
+		}
+
+		lease.Spec.HolderIdentity = nil
+		lease.Spec.RenewTime = nil
+
+		err = apiClient.Update(ctx, lease)
+		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+			continue
+		}
+
+		if err != nil {
+			errs = append(errs, fmt.Errorf("failed to release zone lease %q: %w", lease.Name, err))
+
+			continue
+		}
+
+		released++
+	}
+
+	return released, errors.Join(errs...)
+}
+
+// leaseDurationSeconds is l.LeaseDuration as a Lease's
+// spec.leaseDurationSeconds, rounded up: truncating would store a
+// sub-second duration as 0, which every contender reads as already
+// expired.
+func (l *Locker) leaseDurationSeconds() int32 {
+	return int32(math.Ceil(l.LeaseDuration.Seconds()))
 }
 
 // leaseName maps zoneKey onto the Lease object name this package owns —
@@ -243,7 +441,7 @@ func (l *Locker) create(ctx context.Context, name string) (bool, error) {
 	}
 
 	now := metav1.NowMicro()
-	durationSeconds := int32(l.LeaseDuration.Seconds())
+	durationSeconds := l.leaseDurationSeconds()
 
 	lease := &coordinationv1.Lease{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: v1alpha2.KontinuumSystemNamespace},
@@ -274,7 +472,7 @@ func (l *Locker) create(ctx context.Context, name string) (bool, error) {
 // fresh Get.
 func (l *Locker) renew(ctx context.Context, lease *coordinationv1.Lease) (bool, error) {
 	now := metav1.NowMicro()
-	durationSeconds := int32(l.LeaseDuration.Seconds())
+	durationSeconds := l.leaseDurationSeconds()
 
 	lease.Spec.RenewTime = &now
 	lease.Spec.LeaseDurationSeconds = &durationSeconds
@@ -299,7 +497,7 @@ func (l *Locker) renew(ctx context.Context, lease *coordinationv1.Lease) (bool, 
 // error.
 func (l *Locker) takeover(ctx context.Context, lease *coordinationv1.Lease) (bool, error) {
 	now := metav1.NowMicro()
-	durationSeconds := int32(l.LeaseDuration.Seconds())
+	durationSeconds := l.leaseDurationSeconds()
 
 	transitions := int32(1)
 	if lease.Spec.LeaseTransitions != nil {

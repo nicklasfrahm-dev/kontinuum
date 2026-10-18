@@ -31,7 +31,12 @@ See [Add zone](workflows/zone-add.md) for the full instance → pool → cluster
 
 ## Zone leases and hub-less fleets (`pkg/domain/zonelease`) { #hub-less-fleets }
 
-Every kontinuum-server process in a fleet runs the same controllers against the same shared storage, so each zone-scoped write is gated on a per-zone `Lease` (`zonelock-<region>-<zone>`): whichever process holds it reconciles that zone, and the rest back off. A zone's own process never takes its own zone's lease — a zone must not reconcile itself.
+Every kontinuum-server process in a fleet runs the same controllers against the same shared storage, so each zone-scoped write is gated on a per-zone `Lease` (`zonelock-<region>-<zone>`): whichever process holds it reconciles that zone, and the rest back off. With a hub, a zone's own process never takes its own zone's lease, and the hub reconciles it. Hub-less, a zone contends for its own lease like any other peer; see [Single-zone fleets](#single-zone-fleets).
+
+A lease is held by one process, named after its pod, and stays with it for as long as it keeps renewing it:
+
+- **During a reconcile**, the holder renews the lease in the background, and the reconcile's writes stop the moment the lease is lost or goes unrenewed for too long. A long reconcile, such as a Talos health check or a Helm install, therefore never keeps writing after another process took over.
+- **On graceful shutdown**, once its controllers have stopped, a process releases every lease it holds. The next pod of the zone `Deployment`'s rolling update, or another peer, takes over at once instead of after the 45-second lease duration.
 
 Fleet-wide state that belongs to no single zone, such as the registry's stale-`Kontinuum` sweep and the admin-group `ClusterRoleBinding`s, uses one more lease, `zonelock-global`. Who may contend for it depends on the [storage mode](reference.md#storage-modes):
 
@@ -40,7 +45,16 @@ Fleet-wide state that belongs to no single zone, such as the registry's stale-`K
 
 Hub-less follows from the storage mode and nothing else. It is never inferred from whether a hub happens to be registered, so a hub restart can't switch the fleet's behaviour.
 
-A hub-less zone peer cannot reconcile itself, so a fleet whose only zone is the peer itself, with no hub, would never converge. Such a peer refuses to start, with an error saying so. The very first peer of a new hub-less fleet is the exception: it is deployed out-of-band against the shared storage, with its own region and zone set, before any `Zone` object exists. Zone B is then reconciled by A, zone C by A or B, and A's own `Zone` object is picked up once B is running.
+### Single-zone fleets { #single-zone-fleets }
+
+A hub-less fleet may consist of a single zone, for example a test setup, or a fleet whose other zones are down during an upgrade. Its only zone reconciles itself: it keeps its own `TalosCluster`, addons and `kontinuum` `Deployment` converged, including rolling that `Deployment` onto a new version.
+
+The exception is removing the zone. Tearing a zone down deletes the very `Deployment`, and resets the very nodes, that its own process runs on. So a zone's process stops taking its own zone's lease as soon as its `Zone` or `TalosCluster` is being deleted, or is gone. Another process finishes the removal:
+
+- in a fleet with other zones, any other zone;
+- for a fleet's last zone, an outside process against the same storage — see [Removing a fleet's last zone](workflows/zone-remove.md#removing-a-fleets-last-zone).
+
+What a zone can't do for itself is recover from a version that fails to start: nothing else in a single-zone fleet can roll it back. Run [`kontinuum up`](workflows/up.md) or a hub against the same storage to repair it.
 
 ## Web UI (`pkg/ui`)
 
