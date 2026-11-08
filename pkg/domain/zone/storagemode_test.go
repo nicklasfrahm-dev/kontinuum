@@ -231,3 +231,22 @@ func TestStorageModeOfDSN(t *testing.T) {
 		assert.Equal(t, want, zone.StorageModeOfDSN(dsn), dsn)
 	}
 }
+
+// TestReconcileDeploysOwnVersionWithNothingRegistered covers kontinuum up
+// creating a new fleet: its in-process hub never registers a Kontinuum, so
+// the zone deploys the reconciling process's own version.
+func TestReconcileDeploysOwnVersionWithNothingRegistered(t *testing.T) {
+	t.Parallel()
+
+	hubClient := newHubFakeClient(t, testZoneObject(), readyTalosCluster(), kubeconfigSecret())
+	downstream := newDownstreamFakeClient(t)
+	reconciler := newDirectModeReconciler(t, hubClient, downstream)
+	reconciler.Version = testKontinuumVersion
+
+	_, err := reconciler.Reconcile(t.Context(), reconcileRequest())
+	require.NoError(t, err)
+
+	cond := meta.FindStatusCondition(getTestZone(t, hubClient).Status.Conditions, zone.InstalledConditionType)
+	require.NotNil(t, cond)
+	assert.NotEqual(t, "NoVersionFound", cond.Reason)
+}

@@ -313,6 +313,30 @@ func TestNewLockerForDefaultsLeaseDuration(t *testing.T) {
 	assert.Positive(t, locker.LeaseDuration)
 }
 
+// TestTryAcquire_TemporaryPeerIsNeverGrantedGlobalKey covers kontinuum
+// up's in-process hub: it reconciles zones, but fleet-wide state is left
+// to the fleet's own peers. A nil Client proves no API call is attempted.
+func TestTryAcquire_TemporaryPeerIsNeverGrantedGlobalKey(t *testing.T) {
+	t.Parallel()
+
+	locker := zonelease.NewLockerFor(nil, nil, zonelease.Identity{
+		HolderIdentity: "kontinuum-up", HubLess: true, Temporary: true,
+	})
+
+	acquired, err := locker.TryAcquire(context.Background(), zonelease.GlobalKey)
+	require.NoError(t, err)
+	assert.False(t, acquired)
+
+	fakeClient := newFakeClient(t)
+	locker = zonelease.NewLockerFor(fakeClient, fakeClient, zonelease.Identity{
+		HolderIdentity: "kontinuum-up", HubLess: true, Temporary: true,
+	})
+
+	acquired, err = locker.TryAcquire(context.Background(), testZoneKey)
+	require.NoError(t, err)
+	assert.True(t, acquired, "zone keys are still contended for")
+}
+
 // ownZone and ownTalosCluster are testZoneKey's own Zone and TalosCluster,
 // both named after the zone key.
 func ownZone() *v1alpha2.Zone {

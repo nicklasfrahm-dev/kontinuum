@@ -93,35 +93,37 @@ For local development, copy `.env.example` to `.env` and adjust as needed — `m
 Usage:
   make <target>
 
+
 General
-  help           Display this help
+  help             Display this help
 
 Development
-  generate       Regenerate deepcopy methods, CRDs, and vendored web assets
-  build          Build the binary
-  run            Run the server locally with dev-friendly logging (info, console)
-  install        Build the binary and install it to ~/.local/bin
-  dev            Start development environment with hot reload (air + postgres + proxy)
-  dev-down       Stop development environment
-  dev-clean      Stop development environment and remove volumes
-  image          Build the container image
+  generate         Regenerate deepcopy methods, CRDs, and vendored web assets
+  build            Build the binary
+  run              Run the server locally with dev-friendly logging (info, console)
+  install          Build the binary and install it to ~/.local/bin
+  dev              Start development environment with hot reload (air + postgres + proxy + talos)
+  dev-down         Stop development environment
+  dev-clean        Stop development environment and remove volumes
+  image            Build the container image
+  image-push       Build and push the working tree's image to ghcr.io under VERSION (see CONTAINER_IMAGE_REPO's own doc above; requires docker login ghcr.io first)
 
 Quality
-  verify         Run every required verification (build, vet, lint, test, test-e2e, tidy, docs-lint)
-  test           Run tests
-  test-e2e       Run gated end-to-end tests (requires Docker; boots real containers)
-  vet            Run go vet
-  lint           Run golangci-lint
-  lint-fix       Run golangci-lint and fix issues
-  tidy           Download and tidy dependencies
+  verify           Run every required verification (build, vet, lint, test, test-e2e, tidy, docs-lint)
+  test             Run tests
+  test-e2e         Run gated end-to-end tests (requires Docker; boots real containers)
+  vet              Run go vet
+  lint             Run golangci-lint
+  lint-fix         Run golangci-lint and fix issues
+  tidy             Download and tidy dependencies
 
 Documentation
-  docs           Serve documentation locally with live-reload (http://127.0.0.1:8000)
-  docs-lint      Build docs strictly and check for broken links (mirrors CI's "Build docs" job)
-  docs-clean     Remove the documentation virtualenv, cached lychee binary, and built site
+  docs             Serve documentation locally with live-reload (http://127.0.0.1:8000)
+  docs-lint        Build docs strictly and check for broken links (mirrors CI's "Build docs" job)
+  docs-clean       Remove the documentation virtualenv, cached lychee binary, and built site
 
 Cleanup
-  clean          Remove build artifacts
+  clean            Remove build artifacts
 ```
 
 ## Container

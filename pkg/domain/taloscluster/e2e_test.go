@@ -9,12 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/moby/moby/api/types/container"
-	"github.com/moby/moby/api/types/mount"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,21 +24,16 @@ import (
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/addon"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/taloscluster"
 	"github.com/nicklasfrahm/kontinuum/pkg/domain/zonelease"
+	"github.com/nicklasfrahm/kontinuum/pkg/e2e"
 )
 
-// e2eTalosImage is pinned for the same reason
-// pkg/domain/instance/talos_e2e_test.go's own e2eTalosImage is — see that
-// constant's doc.
-const e2eTalosImage = "ghcr.io/siderolabs/talos:v1.13.0"
-
 const (
-	e2eContainerStartTimeout = 90 * time.Second
-	e2eOverallTimeout        = 12 * time.Minute
-	e2eReconcileTick         = 15 * time.Second
-	e2eHealthCheckTimeout    = 60 * time.Second
-	e2eRetryInterval         = 15 * time.Second
-	e2eWorkerJoinTimeout     = 5 * time.Minute
-	e2eAddonHealthTimeout    = 3 * time.Minute
+	e2eOverallTimeout     = 12 * time.Minute
+	e2eReconcileTick      = 15 * time.Second
+	e2eHealthCheckTimeout = 60 * time.Second
+	e2eRetryInterval      = 15 * time.Second
+	e2eWorkerJoinTimeout  = 5 * time.Minute
+	e2eAddonHealthTimeout = 3 * time.Minute
 )
 
 // TestE2ETalosClusterBootstrapsAndWorkerJoins is the gated, opt-in
@@ -58,9 +49,7 @@ const (
 func TestE2ETalosClusterBootstrapsAndWorkerJoins(t *testing.T) {
 	t.Parallel()
 
-	if os.Getenv("KONTINUUM_TEST_E2E") == "" {
-		t.Skip("set KONTINUUM_TEST_E2E=1 to run this test — it needs Docker and boots real Talos containers")
-	}
+	e2e.Skip(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), e2eOverallTimeout)
 	defer cancel()
@@ -285,8 +274,8 @@ func setupE2ECluster(
 ) (client.Client, *taloscluster.Reconciler, *addon.Reconciler, ctrl.Request) {
 	t.Helper()
 
-	controlPlaneIP := startTalosContainer(ctx, t)
-	workerIP := startTalosContainer(ctx, t)
+	controlPlaneIP := e2e.StartTalos(ctx, t)
+	workerIP := e2e.StartTalos(ctx, t)
 
 	cluster := &v1alpha2.TalosCluster{
 		ObjectMeta: metav1.ObjectMeta{Name: "e2e-cluster", Namespace: v1alpha2.KontinuumSystemNamespace},
@@ -378,70 +367,4 @@ func assertWorkerJoins(ctx context.Context, t *testing.T, kubeconfig []byte) {
 
 		return len(nodes.Items) >= 2
 	}, e2eWorkerJoinTimeout, e2eReconcileTick, "worker never joined the cluster")
-}
-
-// startTalosContainer boots e2eTalosImage with the same docker run shape
-// pkg/domain/instance/talos_e2e_test.go's own startTalosContainer uses —
-// duplicated rather than shared/exported, see the implementation plan's
-// "Shared test helper" note: both are test-only, gated-by-env-var files,
-// and this repo has no shared e2e test-support package today.
-func startTalosContainer(ctx context.Context, t *testing.T) string {
-	t.Helper()
-
-	talosContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		Started: true,
-		ContainerRequest: testcontainers.ContainerRequest{
-			Image: e2eTalosImage,
-			Tmpfs: map[string]string{"/run": "", "/system": "", "/tmp": ""},
-			// apid — the maintenance-mode gRPC listener this test's
-			// bootstrapper dials — starts a moment after "entering
-			// maintenance service" logs; its own health check is what
-			// actually confirms the listener is up.
-			WaitingFor: wait.ForLog("service[apid](Running): Health check successful").
-				WithStartupTimeout(e2eContainerStartTimeout),
-			HostConfigModifier: func(hostConfig *container.HostConfig) {
-				hostConfig.Privileged = true
-				hostConfig.CgroupnsMode = container.CgroupnsModeHost
-				hostConfig.SecurityOpt = []string{"seccomp=unconfined", "apparmor=unconfined"}
-				hostConfig.Mounts = []mount.Mount{
-					{Type: mount.TypeVolume, Target: "/system/state"},
-					{Type: mount.TypeVolume, Target: "/var"},
-					{Type: mount.TypeVolume, Target: "/etc/cni"},
-					{Type: mount.TypeVolume, Target: "/etc/kubernetes"},
-					{Type: mount.TypeVolume, Target: "/usr/libexec/kubernetes"},
-					{Type: mount.TypeVolume, Target: "/opt"},
-				}
-			},
-		},
-	})
-	require.NoError(t, err)
-
-	t.Cleanup(func() {
-		err := talosContainer.Terminate(context.WithoutCancel(ctx))
-		if err != nil && !isContainerAlreadyRemoving(err) {
-			require.NoError(t, err)
-		}
-	})
-
-	containerIP, err := talosContainer.ContainerIP(ctx)
-	require.NoError(t, err)
-
-	return containerIP
-}
-
-// isContainerAlreadyRemoving reports whether err is Docker's own "removal
-// of container ... is already in progress" response — a benign race
-// between this test's own explicit Terminate call and testcontainers'
-// Ryuk reaper sidecar concurrently cleaning up the same container at
-// session end, not a real cleanup failure. Seen intermittently in CI:
-// by the time this fires, every real test assertion has already passed,
-// so failing the whole test on it (the effect of an unchecked
-// require.NoError here) would be a false negative, not a caught bug.
-//
-// Docker refusing to stop a container whose init process is already a
-// zombie ("is zombie and can not be killed") is the same kind of benign
-// teardown race, seen with several privileged Talos containers stopping at
-// once: the container is already exiting, and Ryuk removes it either way.
-func isContainerAlreadyRemoving(err error) bool {
-	return strings.Contains(err.Error(), "is already in progress") || strings.Contains(err.Error(), "is zombie")
 }

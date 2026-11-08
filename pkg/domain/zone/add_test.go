@@ -560,3 +560,28 @@ func TestAddRejectsAlreadyClaimedInstanceRegisteredStandaloneForTheSameAddress(t
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already claimed")
 }
+
+// TestAddIsIdempotentForInstancesItsOwnPoolClaimed covers re-running the
+// same zone add — e.g. two kontinuum ups creating the same declared zone at
+// once — after the zone's own pool already claimed its seed Instance: that
+// Instance is this zone's, not someone else's, so the re-run succeeds.
+func TestAddIsIdempotentForInstancesItsOwnPoolClaimed(t *testing.T) {
+	t.Parallel()
+
+	existing := &v1alpha2.Instance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: instancedomain.NameFromAddress(testTalosAddress), Namespace: v1alpha2.KontinuumSystemNamespace,
+			Labels: map[string]string{v1alpha2.LabelClaimedBy: testZoneName},
+		},
+		Spec: v1alpha2.InstanceSpec{Interfaces: []string{testTalosAddress}},
+	}
+	hubClient := newHubFakeClient(t, existing)
+
+	_, err := zone.Add(t.Context(), hubClient, testAddOptions())
+	require.NoError(t, err)
+
+	var got v1alpha2.Instance
+	require.NoError(t, hubClient.Get(t.Context(),
+		client.ObjectKey{Name: existing.Name, Namespace: v1alpha2.KontinuumSystemNamespace}, &got))
+	assert.Equal(t, testZoneName, got.Labels[v1alpha2.LabelClaimedBy])
+}
