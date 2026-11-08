@@ -27,14 +27,14 @@ export KUBECONFIG=kubeconfig.yaml
 kontinuum zone add --region eu --zone eu-1a --talos-address 10.0.0.5 --wait
 ```
 
-For a highly available control plane, pass three or five addresses, either comma-separated or by repeating the flag:
+For a highly available control plane, pass three or more addresses, either comma-separated or by repeating the flag:
 
 ```sh
 kontinuum zone add --region eu --zone eu-1a \
   --talos-address 10.0.0.5,10.0.0.6,10.0.0.7 --wait
 ```
 
-Every address becomes a seed `Instance`, and every one of them joins the zone's control plane and runs etcd. That's why the count must be 1, 3 or 5: an even count adds a node without adding failure tolerance (two members tolerate no failure, like one, while doubling the chance of one), and beyond five every extra etcd member slows writes more than it adds availability. All addresses are resolved before anything is created, so an unresolvable address, or two entries naming the same node (including two hostnames resolving to one IP), fails the whole command and creates nothing. The UI's "Add zone" form takes the same comma-separated list in its Talos address field and applies the same rules.
+Every address becomes a seed `Instance`, and every one of them joins the zone's control plane and runs etcd. That's why any count works except two: one member runs alone, and three or more keep a majority when one is lost. Two members need each other for a majority, so losing either one, or the link between them, leaves no quorum and nothing to break the tie. An even count above two is allowed, but tolerates no more failures than the odd count below it: four survives losing one member, like three. All addresses are resolved before anything is created, so an unresolvable address, or two entries naming the same node (including two hostnames resolving to one IP), fails the whole command and creates nothing. The UI's "Add zone" form takes the same comma-separated list in its Talos address field and applies the same rules.
 
 Fans out a new zone's hub-side objects and, once its `TalosCluster` is bootstrapped, installs and exposes that zone's own kontinuum-server at `eu-1a.eu.example.com` (assuming the hub's `KONTINUUM_SERVER_DNS_DOMAIN` is `example.com`). See [Configuration](../reference.md#zones) for `KONTINUUM_ACME_EMAIL`/`KONTINUUM_ACME_SERVER`, which the `zone` controller needs to issue that certificate.
 

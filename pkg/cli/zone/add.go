@@ -48,7 +48,7 @@ func NewAddCmd() *cobra.Command {
 	cmd.Flags().StringVar(&flags.Zone, "zone", "", "This zone's own name within --region")
 	cmd.Flags().StringSliceVar(&flags.TalosAddresses, "talos-address", nil,
 		"Talos maintenance-mode address of a seed node; repeat it, or separate addresses with commas, "+
-			"for a 3- or 5-node control plane")
+			"for a control plane of three or more nodes (never two)")
 	cmd.Flags().StringVar(&flags.TalosVersion, "talos-version", "",
 		"Talos version (defaults to the cluster controller's own pinned default)")
 	cmd.Flags().StringVar(&flags.KubernetesVersion, "kubernetes-version", "",

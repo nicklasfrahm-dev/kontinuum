@@ -41,8 +41,8 @@ type AddOptions struct {
 	// TalosAddresses are the seed Instances' candidate addresses (IPs or
 	// hostnames), one Instance per entry — the addresses the instance
 	// discovery controller dials in Talos maintenance mode. Every one of
-	// them joins the zone's control plane and runs etcd, so there must be
-	// 1, 3 or 5 (see ValidateInstanceCount), each distinct once resolved
+	// them joins the zone's control plane, so there must be at least one
+	// and never exactly two (see ValidateInstanceCount), each distinct once resolved
 	// (see ErrDuplicateInstanceAddress). A hostname is resolved before it
 	// ever reaches spec.interfaces[0] — see instancedomain.ResolveAddress
 	// and Add's own doc — exactly like instance.AddOptions.Address's own
@@ -96,11 +96,11 @@ var (
 	// from under it between the modal opening and this submission.
 	errInstanceAlreadyClaimed = errors.New("zone add: instance already claimed")
 	// ErrInvalidInstanceCount is ValidateInstanceCount's sentinel for a
-	// zone with an instance count other than 1, 3 or 5.
+	// zone with no instances, or with exactly two.
 	ErrInvalidInstanceCount = errors.New(
-		"a zone needs 1, 3 or 5 instances: every instance joins the control plane and runs etcd, " +
-			"and an even count adds a node without adding failure tolerance " +
-			"(2 tolerates no failure, like 1, while doubling the chance of one)")
+		"a zone needs at least 1 instance, and not exactly 2: every instance joins the control plane, " +
+			"and two members need each other for a majority, so losing either one, or the link between them, " +
+			"leaves no quorum and nothing to break the tie")
 	// ErrDuplicateInstanceAddress is Add's sentinel for two TalosAddresses
 	// entries that name the same node once resolved.
 	ErrDuplicateInstanceAddress = errors.New("zone add: duplicate instance address")
@@ -127,16 +127,18 @@ func SplitTalosAddresses(raw string) []string {
 	return addresses
 }
 
-// maxInstancesPerZone is the largest instance count ValidateInstanceCount
-// accepts: beyond five, every extra etcd member slows down writes more
-// than it adds availability.
-const maxInstancesPerZone = 5
+// splitBrainInstanceCount is the one instance count ValidateInstanceCount
+// rejects besides none at all: one member runs alone, and three or more
+// keep a majority when one is lost, but two can't — see
+// ErrInvalidInstanceCount.
+const splitBrainInstanceCount = 2
 
-// ValidateInstanceCount enforces a zone's 1/3/5 instance rule — see
-// ErrInvalidInstanceCount. Exported so kontinuum up's own validation of
-// kontinuum.yml applies exactly the same limit as zone add and the UI.
+// ValidateInstanceCount enforces a zone's instance rule: at least one, and
+// never exactly two — see ErrInvalidInstanceCount. Exported so kontinuum
+// up's own validation of kontinuum.yml applies exactly the same rule as
+// zone add and the UI.
 func ValidateInstanceCount(count int) error {
-	if count < 1 || count > maxInstancesPerZone || count%2 == 0 {
+	if count < 1 || count == splitBrainInstanceCount {
 		return fmt.Errorf("%w: got %d", ErrInvalidInstanceCount, count)
 	}
 

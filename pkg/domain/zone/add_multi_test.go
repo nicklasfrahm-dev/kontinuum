@@ -53,11 +53,11 @@ func listZoneInstances(t *testing.T, hubClient client.Client) []v1alpha2.Instanc
 func TestValidateInstanceCount(t *testing.T) {
 	t.Parallel()
 
-	for _, count := range []int{1, 3, 5} {
+	for _, count := range []int{1, 3, 4, 5, 6, 7} {
 		require.NoError(t, zone.ValidateInstanceCount(count), count)
 	}
 
-	for _, count := range []int{0, 2, 4, 6, 7, -1} {
+	for _, count := range []int{0, 2, -1} {
 		require.ErrorIs(t, zone.ValidateInstanceCount(count), zone.ErrInvalidInstanceCount, count)
 	}
 }
@@ -104,23 +104,32 @@ func TestAddCreatesOneSeedInstancePerAddress(t *testing.T) {
 	assert.Len(t, listZoneInstances(t, hubClient), len(threeTalosAddresses()))
 }
 
-func TestAddRejectsEvenAndOversizedInstanceCounts(t *testing.T) {
+func TestAddRejectsTwoInstances(t *testing.T) {
 	t.Parallel()
 
-	for _, addresses := range [][]string{
-		{testTalosAddress, secondTalosAddress},
-		{testTalosAddress, secondTalosAddress, thirdTalosAddress, "10.0.1.8"},
-		{"10.0.1.1", "10.0.1.2", "10.0.1.3", "10.0.1.4", testTalosAddress, secondTalosAddress},
-	} {
-		hubClient := newHubFakeClient(t)
+	hubClient := newHubFakeClient(t)
 
-		opts := testAddOptions()
-		opts.TalosAddresses = addresses
+	opts := testAddOptions()
+	opts.TalosAddresses = []string{testTalosAddress, secondTalosAddress}
 
-		_, err := zone.Add(t.Context(), hubClient, opts)
-		require.ErrorIs(t, err, zone.ErrInvalidInstanceCount, addresses)
-		assert.Empty(t, listZoneInstances(t, hubClient))
-	}
+	_, err := zone.Add(t.Context(), hubClient, opts)
+	require.ErrorIs(t, err, zone.ErrInvalidInstanceCount)
+	assert.Empty(t, listZoneInstances(t, hubClient))
+}
+
+func TestAddAcceptsAnEvenInstanceCountAboveTwo(t *testing.T) {
+	t.Parallel()
+
+	hubClient := newHubFakeClient(t)
+
+	fourAddresses := append(threeTalosAddresses(), "10.0.1.8")
+
+	opts := testAddOptions()
+	opts.TalosAddresses = fourAddresses
+
+	_, err := zone.Add(t.Context(), hubClient, opts)
+	require.NoError(t, err)
+	assert.Len(t, listZoneInstances(t, hubClient), len(opts.TalosAddresses))
 }
 
 func TestAddRejectsDuplicateAddressWithinZone(t *testing.T) {
