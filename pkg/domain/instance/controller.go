@@ -118,9 +118,8 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		DialTimeout:     c.Config.DialTimeout,
 		RetryInterval:   c.Config.RetryInterval,
 		RecheckInterval: c.Config.RecheckInterval,
-		Locker: zonelease.NewLocker(
-			mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
-		Logger: c.Config.Logger,
+		Locker:          zonelease.NewLockerFor(mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease),
+		Logger:          c.Config.Logger,
 	}
 
 	err := ctrl.NewControllerManagedBy(mgr).For(&v1alpha2.Instance{}).Complete(reconciler)
@@ -189,6 +188,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if !acquired {
 		return ctrl.Result{RequeueAfter: zonelease.Jitter(r.RetryInterval)}, nil
 	}
+
+	ctx, release := r.Locker.KeepRenewed(ctx, zoneKey)
+	defer release()
 
 	if len(inst.Spec.Interfaces) == 0 {
 		return r.recordProbeResult(ctx, &inst, false, false, reasonNoInterface, "spec.interfaces is empty")

@@ -32,7 +32,7 @@ func buildHubClient(kubeconfigPath, contextOverride string) (client.Client, erro
 
 	restCfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides).ClientConfig()
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve hub kubeconfig: %w", err)
+		return nil, fmt.Errorf("failed to resolve kubeconfig: %w", err)
 	}
 
 	scheme := runtime.NewScheme()

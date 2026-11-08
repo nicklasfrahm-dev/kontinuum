@@ -189,9 +189,8 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		HealthCheckInterval: c.Config.HealthCheckInterval,
 		TeardownTimeout:     c.Config.TeardownTimeout,
 		DNS:                 c.Config.DNS,
-		Locker: zonelease.NewLocker(
-			mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
-		Logger: c.Config.Logger,
+		Locker:              zonelease.NewLockerFor(mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease),
+		Logger:              c.Config.Logger,
 	}
 
 	err := ctrl.NewControllerManagedBy(mgr).For(&v1alpha2.TalosCluster{}).Complete(reconciler)
@@ -238,6 +237,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return result, err
 	}
 
+	ctx, release := r.Locker.KeepRenewed(ctx, cluster.Name)
+	defer release()
+
 	if !cluster.DeletionTimestamp.IsZero() {
 		return r.reconcileTeardown(ctx, &cluster)
 	}
@@ -249,7 +251,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
-	bundle, err := ensureSecretsBundle(ctx, r.Client, &cluster)
+	bundle, err := EnsureSecretsBundle(ctx, r.Client, &cluster)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to ensure secrets bundle for %q: %w", cluster.Name, err)
 	}

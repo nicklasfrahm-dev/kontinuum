@@ -374,9 +374,9 @@ func buildServer(
 		zoneClientFactory(cfg.Server.Addr, scheme),
 		version, cfg.Redact(), oidcHandler != nil, invalidateSession)
 
-	zoneLease := zonelease.Identity{
-		HolderIdentity: registry.InstanceName(os.Hostname()),
-		SelfZoneKey:    zonelease.Key(cfg.Server.Region, cfg.Server.Zone),
+	zoneLease, err := buildZoneLease(cfg, logger)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 
 	registryOpts, registryController, err := registryOptions(cfg, logger, scheme, zoneLease)
@@ -443,7 +443,7 @@ func buildServer(
 		libkapi.WithPostStartHook(ensureCRD),
 	}, authOpts, registryOpts, instanceOptions(logger, zoneLease), instancePoolOptions(logger, zoneLease),
 		talosClusterOptions(cfg, logger, zoneLease), addonOptions(logger, zoneLease), zoneOptions(cfg, logger, zoneLease),
-		adminRBACOptions(cfg, logger, zoneLease))
+		adminRBACOptions(cfg, logger, zoneLease), releaseZoneLeaseOptions(logger, zoneLease))
 
 	// Storage is resolved against a background context so the backend
 	// is only torn down by Server.Shutdown, not by the signal context
@@ -743,6 +743,86 @@ func zoneOptions(cfg *config.Config, logger *slog.Logger, zoneLease zonelease.Id
 	})
 
 	return []libkapi.Option{libkapi.WithController(controller)}
+}
+
+// buildZoneLease builds this process's own zonelease.Identity, resolving
+// the storage mode to decide whether the fleet is hub-less — see
+// zonelease.Locker.HubLess's own doc.
+func buildZoneLease(cfg *config.Config, logger *slog.Logger) (zonelease.Identity, error) {
+	storageMode, err := resolveStorageMode(cfg)
+	if err != nil {
+		return zonelease.Identity{}, err
+	}
+
+	logger.Info("Resolved storage mode", "mode", storageMode, "hubLess", storageMode.IsHubLess())
+
+	return zonelease.Identity{
+		HolderIdentity: registry.InstanceName(os.Hostname()),
+		SelfZoneKey:    zonelease.Key(cfg.Server.Region, cfg.Server.Zone),
+		HubLess:        storageMode.IsHubLess(),
+	}, nil
+}
+
+// storageModeResolveTimeout bounds the DNS lookup resolveStorageMode may
+// make for the storage host.
+const storageModeResolveTimeout = 10 * time.Second
+
+// resolveStorageMode resolves the fleet's StorageMode from cfg's own
+// storage connection string and KONTINUUM_SERVER_STORAGE_MODE — see
+// config.ResolveStorageMode. It runs against the configured
+// cfg.Server.Storage, before resolveZoneStorage rewrites it into a local
+// socket, so a zone peer handed an etcdproxy relay DSN resolves to
+// StorageModeProxy and one handed the shared database's own DSN resolves to
+// the same mode as the process that onboarded it.
+func resolveStorageMode(cfg *config.Config) (config.StorageMode, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), storageModeResolveTimeout)
+	defer cancel()
+
+	mode, err := config.ResolveStorageMode(ctx, nil, cfg.Server.Storage, config.StorageMode(cfg.Server.StorageMode))
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve storage mode: %w", err)
+	}
+
+	return mode, nil
+}
+
+// releaseZoneLeaseOptions wires releaseZoneLeases onto the Server's
+// shutdown.
+func releaseZoneLeaseOptions(logger *slog.Logger, zoneLease zonelease.Identity) []libkapi.Option {
+	return []libkapi.Option{libkapi.WithPreShutdownHook(releaseZoneLeases(logger, zoneLease.HolderIdentity))}
+}
+
+// releaseZoneLeases frees every zone lease holder still holds once the
+// controller manager has stopped (see libkapi.PreShutdownHookFunc), so the
+// next pod of a rolling update, or another peer, takes over this process's
+// zones at once rather than after the lease duration. A failure only
+// delays that hand-over until the leases expire on their own, so it's
+// logged rather than returned.
+func releaseZoneLeases(logger *slog.Logger, holder string) libkapi.PreShutdownHookFunc {
+	return func(ctx context.Context, loopbackConfig *rest.Config) error {
+		scheme := runtime.NewScheme()
+
+		err := coordinationv1.AddToScheme(scheme)
+		if err != nil {
+			return fmt.Errorf("failed to register lease types: %w", err)
+		}
+
+		apiClient, err := ctrlclient.New(loopbackConfig, ctrlclient.Options{Scheme: scheme})
+		if err != nil {
+			return fmt.Errorf("failed to build lease client: %w", err)
+		}
+
+		released, err := zonelease.ReleaseAll(ctx, apiClient, holder)
+		if err != nil {
+			logger.Warn("Failed to release zone leases on shutdown", "released", released, "error", err)
+
+			return nil
+		}
+
+		logger.Info("Released zone leases on shutdown", "count", released)
+
+		return nil
+	}
 }
 
 // adminRBACOptions builds the libkapi options that wire the admin-group

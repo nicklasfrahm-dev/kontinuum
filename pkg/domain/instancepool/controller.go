@@ -101,9 +101,8 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 	reconciler := &Reconciler{
 		Client:        mgr.GetClient(),
 		RetryInterval: c.Config.RetryInterval,
-		Locker: zonelease.NewLocker(
-			mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
-		Logger: c.Config.Logger,
+		Locker:        zonelease.NewLockerFor(mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease),
+		Logger:        c.Config.Logger,
 	}
 
 	err := ctrl.NewControllerManagedBy(mgr).
@@ -142,6 +141,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if !acquired {
 		return result, err
 	}
+
+	ctx, release := r.Locker.KeepRenewed(ctx, pool.Name)
+	defer release()
 
 	if !pool.DeletionTimestamp.IsZero() {
 		return r.reconcileTeardown(ctx, &pool)

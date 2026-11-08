@@ -178,8 +178,10 @@ type Config struct {
 	// ZoneLease is this process's own zonelease.Locker identity — see
 	// zonelease.Identity's own doc. Reconcile refuses to mutate a Zone it
 	// doesn't hold this lease for, so the hub and every joined zone sharing
-	// the same central storage never reconcile the same Zone at once, and a
-	// zone's own process never reconciles its own Zone at all.
+	// the same central storage never reconcile the same Zone at once. With a
+	// hub, a zone's own process never reconciles its own Zone; hub-less, it
+	// does, except while that Zone is being removed — see
+	// zonelease.Locker.SelfZoneKey's own doc.
 	ZoneLease zonelease.Identity
 }
 
@@ -224,9 +226,8 @@ func (c *Controller) SetupWithManager(mgr ctrl.Manager) error {
 		ImageRepo:               c.Config.ImageRepo,
 		RetryInterval:           c.Config.RetryInterval,
 		TeardownTimeout:         c.Config.TeardownTimeout,
-		Locker: zonelease.NewLocker(
-			mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease.HolderIdentity, c.Config.ZoneLease.SelfZoneKey, 0),
-		Logger: c.Config.Logger,
+		Locker:                  zonelease.NewLockerFor(mgr.GetClient(), mgr.GetAPIReader(), c.Config.ZoneLease),
+		Logger:                  c.Config.Logger,
 	}
 
 	err := ctrl.NewControllerManagedBy(mgr).
@@ -357,6 +358,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if !acquired {
 		return ctrl.Result{RequeueAfter: zonelease.Jitter(r.RetryInterval)}, nil
 	}
+
+	ctx, release := r.Locker.KeepRenewed(ctx, zonelease.Key(zoneObj.Spec.Region, zoneObj.Spec.Zone))
+	defer release()
 
 	if !zoneObj.DeletionTimestamp.IsZero() {
 		return r.reconcileTeardown(ctx, &zoneObj)
