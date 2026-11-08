@@ -355,6 +355,16 @@ spec:
                           so pkg/domain/zone routes a joined zone's own copy of this env var
                           into its Secret rather than its broadly-readable ConfigMap.
                         type: string
+                      storageMode:
+                        description: |-
+                          StorageMode selects how a joined zone's own kontinuum-server
+                          reaches the shared storage: Proxy (an etcdproxy relay back to this
+                          hub), Direct (the shared database's own connection string) or NATS.
+                          Auto, the default, infers it from Storage — see
+                          pkg/config.ResolveStorageMode. Copied onto every joined zone's own
+                          environment like every other field here, so a zone resolves the
+                          same mode as the process that onboarded it.
+                        type: string
                       zone:
                         description: Zone duplicates spec.zone — see this type's own
                           doc.
