@@ -28,6 +28,12 @@ Since the `/app` UI's OAuth client is public (no client secret), the browser exc
 
 Everything under `/app/*` other than `/app`, `/app/login`, and `/app/logout` requires a valid session; `/app/logout` clears it.
 
+### Registering Kontinuum with your identity provider
+
+Register Kontinuum as a **public** client: the login flow is PKCE, so there is no client secret, and Kontinuum has no setting for one. Use `KONTINUUM_OIDC_CLIENT_ID` as the client ID, and register `KONTINUUM_OIDC_REDIRECT_URL` as its redirect URI.
+
+Without a [frontend host](reference.md#frontend-host), each zone's own UI uses its own redirect URL, `https://<zone>.<region>.<domain>/app`, so every zone's URL must be registered. With `KONTINUUM_SERVER_FRONTEND_HOST` set, every zone uses `https://<frontend host>/app` instead, and that single URL is the only one to register.
+
 ## Admin group role bindings
 
 The UI's **IAM** page visualizes which OIDC groups (from `KONTINUUM_OIDC_ADMIN_GROUPS`) are bound to the `system:masters`-equivalent role, so operators can see the effective admin set at a glance without cross-referencing environment variables.

@@ -62,7 +62,7 @@ services:
       # credential is flat YAML whose keys become external-dns env vars (see
       # docs/workflows/zone-add.md); external-dns reads every flag from an
       # EXTERNAL_DNS_<FLAG> env var, so these set --pdns-server/--pdns-api-key.
-      KONTINUUM_SERVER_DNS_PROVIDER: pdns
+      KONTINUUM_SERVER_DNS_PROVIDER: PowerDNS
       KONTINUUM_SERVER_DNS_CREDENTIAL: |
         EXTERNAL_DNS_PDNS_SERVER: http://pdns:8081
         EXTERNAL_DNS_PDNS_API_KEY: kontinuum
