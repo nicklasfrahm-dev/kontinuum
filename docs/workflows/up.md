@@ -32,7 +32,7 @@ flowchart TB
 
 - A PostgreSQL or MySQL database every zone, and the machine running `up`, can reach. Its hostname must resolve only to public addresses, or you set `spec.storage.mode: Direct` to say so (see [Storage modes](../reference.md#storage-modes)).
 - At least one zone. A single-zone fleet reconciles itself; see [Single-zone fleets](../architecture.md#single-zone-fleets).
-- 1, 3 or 5 Talos nodes per zone, booted into maintenance mode and reachable from the machine running `up` on the Talos API port (`50000`).
+- At least one Talos node per zone, and never exactly two (see [Add zone](zone-add.md) for why), booted into maintenance mode and reachable from the machine running `up` on the Talos API port (`50000`).
 - A DNS zone managed by a [DNS provider with a DNS-01 solver](../reference.md#dns-providers), and an identity provider with Kontinuum registered as a [public PKCE client](../authentication.md#registering-kontinuum-with-your-identity-provider), unless the fleet allows anonymous access.
 - The `kontinuum` CLI of exactly the version the fleet declares in `spec.version`.
 
@@ -101,7 +101,7 @@ spec:
   zones:
     - region: eu
       zone: eu-1a
-      # Every instance joins the zone's control plane; use 1, 3 or 5.
+      # Every instance joins the zone's control plane; use any count but 2.
       instances:
         - address: 203.0.113.10
         - address: 203.0.113.11

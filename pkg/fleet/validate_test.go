@@ -113,12 +113,12 @@ func topologyRejectionCases() []rejectionCase {
 			want: "adminGroups",
 		},
 		{
-			name: "even instance count",
+			name: "two instances",
 			replacements: []string{
 				"        - address: 198.51.100.20\n",
 				"        - address: 198.51.100.20\n        - address: 198.51.100.21\n",
 			},
-			want: "1, 3 or 5 instances",
+			want: "not exactly 2",
 		},
 		{name: "duplicate zone", replacements: []string{"zone: eu-1b", "zone: eu-1a"}, want: "already declared"},
 		{

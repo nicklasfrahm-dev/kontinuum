@@ -136,7 +136,8 @@ type OIDC struct {
 type Zone struct {
 	Region string `json:"region"`
 	Zone   string `json:"zone"`
-	// Instances are the zone's control-plane nodes: 1, 3 or 5.
+	// Instances are the zone's control-plane nodes: at least one, and
+	// never exactly two.
 	Instances []Instance `json:"instances"`
 }
 
