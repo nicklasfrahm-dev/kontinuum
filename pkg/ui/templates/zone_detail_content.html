@@ -53,6 +53,10 @@
                 <dd class="text-sm font-medium text-white break-all text-right">{{if .Domain}}{{.Domain}}{{else}}-{{end}}</dd>
             </div>
             <div class="px-6 py-3 flex items-center justify-between gap-4">
+                <dt class="text-sm text-neutral-500">Storage mode</dt>
+                <dd class="text-sm font-medium text-white">{{if .StorageMode}}{{.StorageMode}}{{else}}<span class="text-neutral-500">Not installed yet</span>{{end}}</dd>
+            </div>
+            <div class="px-6 py-3 flex items-center justify-between gap-4">
                 <dt class="text-sm text-neutral-500">Age</dt>
                 <dd class="text-sm font-medium text-white">{{.Age}}</dd>
             </div>

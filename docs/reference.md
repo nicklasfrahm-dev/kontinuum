@@ -36,7 +36,7 @@ See [Add zone](workflows/zone-add.md) for how these are used.
 | Env var                        | Description                                                                                            | Default                                                         |
 | -------------------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
 | `KONTINUUM_SERVER_DNS_DOMAIN`  | Base domain a zone's own kontinuum-server is published under (`<zone>.<region>.<domain>`)                | *(empty)*                                                       |
-| `KONTINUUM_SERVER_GRPC_ENDPOINT` | This hub's own publicly reachable `host:port` for its etcd gRPC proxy (see [Architecture](architecture.md#storage)) — normally the same `host:port` a browser reaches `/app` on. Required for `zone add` to succeed: without it, a newly joined zone has no way to reach shared storage. | *(empty)* |
+| `KONTINUUM_SERVER_GRPC_ENDPOINT` | This hub's own publicly reachable `host:port` for its etcd gRPC proxy (see [Architecture](architecture.md#storage)) — normally the same `host:port` a browser reaches `/app` on. Required in `Proxy` [storage mode](#storage-modes): without it, a newly joined zone has no way to reach shared storage. Unused in `Direct` mode. | *(empty)* |
 | `KONTINUUM_SERVER_STORAGE_MODE` | How a joined zone reaches shared storage: `Proxy`, `Direct` or `NATS`. `Auto` infers it from `KONTINUUM_SERVER_STORAGE` — see [Storage modes](#storage-modes). Any other value, including a lowercase one, fails at startup. | `Auto` |
 | `KONTINUUM_ACME_EMAIL`         | ACME account email used when the `zone` controller creates a joined zone's cert-manager `ClusterIssuer` | *(empty)*                                                       |
 | `KONTINUUM_SERVER_DNS_PROVIDER` | external-dns provider name (e.g. `cloudflare`, `pdns`) for each zone's auto-wired external-dns. Required, together with `_CREDENTIAL`, before a zone's network layer is installed. See [Add zone](workflows/zone-add.md#dns-auto-wiring-external-dns-from-a-flat-yaml-credential). | *(empty)* |
@@ -61,8 +61,9 @@ Addresses treated as non-routable are RFC 1918 (`10/8`, `172.16/12`, `192.168/16
 
 Set the mode explicitly to override inference, for example behind split-horizon DNS, where the address the hub resolves isn't the one every zone would.
 
-!!! note
-    The mode is resolved and validated, but the `zone` controller still hands every zone a `Proxy` relay DSN regardless of it; `Direct` takes effect in a later release.
+The resolved mode is recorded on each `Zone` as `status.storageMode` the first time it's installed, and shown on its detail page. It is fixed from then on: if the fleet later resolves a different mode, the zone reports `Installed=False` with reason `StorageModeChanged` and its `kontinuum-env` is left untouched. See [Production deployment](production-deployment.md#storage-access-for-joined-zones) for what each mode needs.
+
+`NATS` is accepted as a value, but the `zone` controller can't install zones in it yet.
 
 Flags override environment variables when explicitly set:
 

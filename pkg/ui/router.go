@@ -1124,6 +1124,7 @@ func zoneDetailData(
 		dataKeyRegion:      zoneObj.Spec.Region,
 		"ZoneName":         zoneObj.Spec.Zone,
 		"Domain":           zoneObj.Spec.Domain,
+		"StorageMode":      zoneObj.Status.StorageMode,
 		dataKeyAge:         formatAge(zoneObj.CreationTimestamp.Time),
 		dataKeyDeleting:    !zoneObj.DeletionTimestamp.IsZero(),
 		dataKeyConditions:  conditions,
