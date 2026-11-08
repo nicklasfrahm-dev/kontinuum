@@ -23,7 +23,7 @@ endpoint straight off the hub's own config (see
 [Configuration](../reference.md#zones)):
 
 ```sh
-export KUBECONFIG=kontinuum.yaml
+export KUBECONFIG=kubeconfig.yaml
 kontinuum zone add --region eu --zone eu-1a --talos-address 10.0.0.5 --wait
 ```
 

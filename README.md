@@ -46,7 +46,7 @@ make dev-clean
 ### Connect with kubectl
 
 ```sh
-export KUBECONFIG=kontinuum.yaml
+export KUBECONFIG=kubeconfig.yaml
 kubectl get namespaces
 kubectl create namespace demo
 ```
