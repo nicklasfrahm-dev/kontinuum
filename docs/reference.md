@@ -44,6 +44,8 @@ See [Add zone](workflows/zone-add.md) for how these are used.
 | `KONTINUUM_ACME_EMAIL`         | ACME account email used when the `zone` controller creates a joined zone's cert-manager `ClusterIssuer` | *(empty)*                                                       |
 | `KONTINUUM_ACME_SERVER`        | ACME directory URL used for the same `ClusterIssuer`                                                     | `https://acme-v02.api.letsencrypt.org/directory` (Let's Encrypt production) |
 | `KONTINUUM_ACME_INSECURE_SKIP_VERIFY` | Skip TLS verification of `KONTINUUM_ACME_SERVER` in the `ClusterIssuer`. For a local test ACME server such as Pebble only; never set it against a real one. | `false` |
+| `KONTINUUM_ACME_EXTERNAL_ACCOUNT_BINDING_KEY_ID` | Key ID of an ACME external account binding, for CAs that require binding to an existing account (ZeroSSL, Google Trust Services). Set together with `_HMAC_KEY`, or not at all. | *(empty)* |
+| `KONTINUUM_ACME_EXTERNAL_ACCOUNT_BINDING_HMAC_KEY` | The external account's MAC key, base64url-encoded as the CA issues it. Confidential: redacted from status, and delivered to each zone through its Secret. | *(empty)* |
 
 Set `KONTINUUM_SERVER_DNS_DOMAIN` and `KONTINUUM_SERVER_GRPC_ENDPOINT` once, on the hub — `kontinuum zone add` never needs its own copy of either: it infers the domain from any already-registered `Kontinuum`'s own published config, and the `zone` controller reads the gRPC endpoint directly off the hub's own config to build each zone's storage credential. See [Add zone](workflows/zone-add.md) for the full mechanism.
 

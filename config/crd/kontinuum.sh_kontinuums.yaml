@@ -194,6 +194,25 @@ spec:
                           Email is the ACME account email used when creating a zone's
                           cert-manager ClusterIssuer.
                         type: string
+                      externalAccountBinding:
+                        description: |-
+                          ExternalAccountBinding binds the ACME account to an existing account
+                          at the CA, which CAs such as ZeroSSL and Google Trust Services
+                          require. Leave both fields empty for a CA that doesn't — see
+                          pkg/config.Config.ValidateACME, which rejects setting only one.
+                        properties:
+                          hmacKey:
+                            description: |-
+                              HMACKey is the external account's MAC key, base64url-encoded as the
+                              CA issues it. Confidential: Config.Redact strips it before a value
+                              reaches status.config, and it's tagged `secret:"true"` so
+                              pkg/domain/zone routes a joined zone's own copy into its Secret.
+                            type: string
+                          keyID:
+                            description: KeyID is the ID of the CA key the ACME account
+                              is bound to.
+                            type: string
+                        type: object
                       insecureSkipVerify:
                         description: |-
                           InsecureSkipVerify skips TLS certificate verification on the
