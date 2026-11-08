@@ -14,8 +14,8 @@
     tab out from under the caller.
 -->
 <div id="iam-namespace-content"
-     hx-get="/app/rbac.authorization.k8s.io/v1/namespaces/{{.Namespace}}/{{if eq .View "bindings"}}rolebindings{{else}}roles{{end}}"
-     hx-trigger="every 15s, role-added from:body, rolebinding-added from:body"
+     hx-get="{{if eq .View "providers"}}/app/kontinuum.sh/v1alpha2/namespaces/{{.Namespace}}/identityproviders{{else}}/app/rbac.authorization.k8s.io/v1/namespaces/{{.Namespace}}/{{if eq .View "bindings"}}rolebindings{{else}}roles{{end}}{{end}}"
+     hx-trigger="every 15s, role-added from:body, rolebinding-added from:body, identityprovider-added from:body"
      hx-select="#iam-namespace-content" hx-swap="outerHTML" hx-disinherit="hx-select hx-swap">
     <div class="mb-6 flex items-center justify-between gap-4 flex-wrap">
         <div class="flex items-center gap-4">
@@ -24,11 +24,17 @@
             </div>
             <div>
                 <h1 class="text-xl font-bold text-white">Tenant</h1>
-                <p class="mt-1 text-sm text-neutral-500">Roles and role bindings scoped to the <span class="text-neutral-300">{{.Namespace}}</span> namespace.</p>
+                <p class="mt-1 text-sm text-neutral-500">Roles, role bindings, and identity providers scoped to the <span class="text-neutral-300">{{.Namespace}}</span> namespace.</p>
             </div>
         </div>
         {{if .AuthEnabled}}
-        {{if eq .View "roles"}}
+        {{if eq .View "providers"}}
+        <button type="button" onclick="openIdentityProviderAddModal()"
+                class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium uppercase tracking-wider rounded-lg bg-accent text-neutral-950 hover:bg-accent/90 transition-colors">
+            {{template "icon-fingerprint"}}
+            Add identity provider
+        </button>
+        {{else if eq .View "roles"}}
         <button type="button" onclick="openRoleAddModal()"
                 class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium uppercase tracking-wider rounded-lg bg-accent text-neutral-950 hover:bg-accent/90 transition-colors">
             {{template "icon-shield-user"}}
@@ -63,9 +69,29 @@
            class="px-3 py-1.5 rounded-md transition-colors {{if eq .View "bindings"}}bg-accent text-neutral-950{{else}}text-neutral-400 hover:text-white{{end}}">
             Role bindings
         </a>
+        <a href="/app/kontinuum.sh/v1alpha2/namespaces/{{.Namespace}}/identityproviders"
+           class="px-3 py-1.5 rounded-md transition-colors {{if eq .View "providers"}}bg-accent text-neutral-950{{else}}text-neutral-400 hover:text-white{{end}}">
+            Identity providers
+        </a>
     </div>
 
-    {{if eq .View "roles"}}
+    {{if eq .View "providers"}}
+    <div class="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
+        <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
+            {{template "icon-fingerprint"}}
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider">Identity providers <span class="text-neutral-500">{{len .IdentityProviders}}</span></h2>
+        </div>
+        {{if .IdentityProviders}}
+        <div class="divide-y divide-neutral-800">
+            {{range .IdentityProviders}}
+            {{template "identity-provider-row" .}}
+            {{end}}
+        </div>
+        {{else}}
+        <p class="px-6 py-4 text-sm text-neutral-500">No identity providers found in this namespace.</p>
+        {{end}}
+    </div>
+    {{else if eq .View "roles"}}
     <div class="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
         <div class="px-6 py-3 border-b border-neutral-800 flex items-center gap-2 text-neutral-500">
             {{template "icon-shield-user"}}
@@ -103,6 +129,7 @@
 
 {{template "role-add-modal" .}}
 {{template "rolebinding-add-modal" .}}
+{{template "identity-provider-add-modal" .}}
 {{template "iam-delete-modal" .}}
 
 <script>
@@ -112,6 +139,15 @@
     // registry_content.html's openZoneAddModal, the precedent this follows.
     var roleAddModalPristineHTML = document.getElementById('role-add-modal-body').innerHTML;
     var rolebindingAddModalPristineHTML = document.getElementById('rolebinding-add-modal-body').innerHTML;
+
+    var identityProviderAddModalPristineHTML = document.getElementById('identity-provider-add-modal-body').innerHTML;
+
+    function openIdentityProviderAddModal() {
+        var body = document.getElementById('identity-provider-add-modal-body');
+        body.innerHTML = identityProviderAddModalPristineHTML;
+        htmx.process(body);
+        document.getElementById('identity-provider-add-modal').showModal();
+    }
 
     function openRoleAddModal() {
         var body = document.getElementById('role-add-modal-body');
@@ -147,6 +183,17 @@
         htmx.trigger(document.body, 'role-added');
     });
 
+    document.getElementById('identity-provider-add-modal-body').addEventListener('htmx:afterSwap', function (event) {
+        var marker = event.target.querySelector('[data-toast-prefix]');
+        if (!marker) {
+            return;
+        }
+
+        document.getElementById('identity-provider-add-modal').close();
+        showToast(marker.getAttribute('data-toast-prefix'), '', '');
+        htmx.trigger(document.body, 'identityprovider-added');
+    });
+
     document.getElementById('rolebinding-add-modal-body').addEventListener('htmx:afterSwap', function (event) {
         var marker = event.target.querySelector('[data-toast-prefix]');
         if (!marker) {
@@ -158,21 +205,23 @@
         htmx.trigger(document.body, 'rolebinding-added');
     });
 
-    // openIAMDeleteModal(kindLabel, name, namespace, resource) retargets
-    // the one shared #iam-delete-modal per row — see that dialog's own
+    // openIAMDeleteModal(kindLabel, name, namespace, resource, deleteURL)
+    // retargets the one shared #iam-delete-modal per row — see that dialog's own
     // doc. namespace is always {{.Namespace}} here (role-row/
     // role-binding-row are shared with iam_cluster_content.html, whose own
     // copy of this function builds a cluster-scoped URL instead), so this
     // always takes the namespaced branch — resource ("roles"/
     // "rolebindings") is what actually varies per call site.
+    // deleteURL, when given, is used as-is — identity-provider-row passes
+    // its own kontinuum.sh URL, since identity providers aren't RBAC objects.
     var iamDeleteModal = document.getElementById('iam-delete-modal');
     var iamDeleteModalTitle = document.getElementById('iam-delete-modal-title');
     var iamDeleteModalName = document.getElementById('iam-delete-modal-name');
     var iamDeleteModalConfirm = document.getElementById('iam-delete-modal-confirm');
     var iamDeleteModalConfirmLabel = document.getElementById('iam-delete-modal-confirm-label');
 
-    function openIAMDeleteModal(kindLabel, name, namespace, resource) {
-        var url = namespace
+    function openIAMDeleteModal(kindLabel, name, namespace, resource, deleteURL) {
+        var url = deleteURL ? deleteURL : namespace
             ? '/app/rbac.authorization.k8s.io/v1/namespaces/' + encodeURIComponent(namespace) + '/' + resource + '/' + encodeURIComponent(name)
             : '/app/rbac.authorization.k8s.io/v1/cluster' + resource + '/' + encodeURIComponent(name);
 
@@ -192,7 +241,7 @@
     // <dialog> has no built-in "click outside to close" — close only when
     // the click lands on the dialog element itself (the backdrop area),
     // not when it bubbles up from a click inside the dialog's own content.
-    ['role-add-modal', 'rolebinding-add-modal', 'iam-delete-modal'].forEach(function (id) {
+    ['role-add-modal', 'rolebinding-add-modal', 'identity-provider-add-modal', 'iam-delete-modal'].forEach(function (id) {
         document.getElementById(id).addEventListener('click', function (event) {
             if (event.target === this) {
                 this.close();

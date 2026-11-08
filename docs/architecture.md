@@ -30,11 +30,13 @@ See [Add zone](workflows/zone-add.md) for the full instance → pool → cluster
 
 ## Web UI (`pkg/ui`)
 
-Server-rendered HTML (Go `html/template`) styled with Tailwind CSS and progressively enhanced with [htmx](https://htmx.org/) — no separate frontend build or JavaScript framework. `pkg/ui/assets.go` vendors Tailwind, htmx, PrismJS, and the JetBrains Mono webfont at `go generate` time (`cmd/vendor-web-assets`) so the shipped container image has no CDN runtime dependency. Pages: topology, instance detail, registry, IAM (OIDC admin group role bindings), connect (kubectl access, with API keys/federated identity credentials planned).
+Server-rendered HTML (Go `html/template`) styled with Tailwind CSS and progressively enhanced with [htmx](https://htmx.org/) — no separate frontend build or JavaScript framework. `pkg/ui/assets.go` vendors Tailwind, htmx, PrismJS, and the JetBrains Mono webfont at `go generate` time (`cmd/vendor-web-assets`) so the shipped container image has no CDN runtime dependency. Pages: topology, instance detail, registry, IAM (roles, role bindings, and identity providers), connect (kubectl access, with API keys/federated identity credentials planned).
 
 ## Authentication (`pkg/auth`)
 
 A PKCE-based OpenID Connect login flow for the `/app` UI, plus bearer-token validation for the API itself. See [Authentication](authentication.md) for details.
+
+Additional issuers come from `ClusterIdentityProvider`/`IdentityProvider` objects (`pkg/domain/identityprovider`): every process compiles them into upstream Kubernetes' own CEL-based JWT authenticator, backed by a shared stale-while-revalidate signing key cache, and hot-swaps the active set into the API server's authentication chain via `libkapi.WithAuthenticator`. See [Identity providers](identity-providers.md).
 
 ## Storage
 

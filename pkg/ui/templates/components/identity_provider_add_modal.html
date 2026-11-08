@@ -1,0 +1,229 @@
+{{/*
+    identity-provider-add-modal is the "Add identity provider"/"Add cluster
+    identity provider" dialog shared by iam_namespace_content.html and
+    iam_cluster_content.html — a native <dialog>, opened via each page's
+    own openIdentityProviderAddModal(), following role_add_modal.html's
+    exact pattern. .IDPKind and .IDPAddURL (set by
+    identityProviderAddFormData in identityproviders.go) are what make this
+    one template work for both scopes.
+*/}}
+{{define "identity-provider-add-modal"}}
+<dialog id="identity-provider-add-modal" class="bg-neutral-900 border border-neutral-800 rounded-xl p-0 w-full max-w-2xl text-neutral-100 backdrop:bg-black/60">
+    <div class="px-6 py-3 border-b border-neutral-800 flex items-center justify-between gap-2">
+        <h2 class="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+            <span class="text-accent [&>svg]:h-4 [&>svg]:w-4">{{template "icon-fingerprint"}}</span>
+            Add {{.IDPKind}}
+        </h2>
+        {{template "modal-close-button"}}
+    </div>
+    <div id="identity-provider-add-modal-body" class="p-6 max-h-[75vh] overflow-y-auto">
+        {{template "identity-provider-add-modal-body" .}}
+    </div>
+</dialog>
+
+{{/*
+    Rule-row add/remove is delegated to this dialog element rather than
+    bound to the rows themselves, for exactly the reasons
+    role_add_modal.html's own script documents: rows are replaced
+    wholesale by every htmx swap and every "reopen" reset, and hx-boost
+    never reloads document itself.
+*/}}
+<script>
+(function () {
+    var dialog = document.getElementById('identity-provider-add-modal');
+
+    dialog.addEventListener('click', function (event) {
+        var addButton = event.target.closest('[data-add-cel-rule]');
+        if (addButton) {
+            var containerId = addButton.getAttribute('data-add-cel-rule');
+            var container = document.getElementById(containerId);
+            var template = document.getElementById(containerId + '-template');
+            var index = container.children.length;
+            var wrapper = document.createElement('div');
+            wrapper.innerHTML = template.innerHTML.split('__INDEX__').join(String(index)).trim();
+            container.appendChild(wrapper.firstElementChild);
+
+            return;
+        }
+
+        var removeButton = event.target.closest('[data-remove-cel-rule]');
+        if (removeButton) {
+            removeButton.closest('[data-cel-rule-row]').remove();
+        }
+    });
+
+    // A rejected submission re-renders the form with its error box at the
+    // very top of this long, scrollable dialog — scroll back up so the
+    // error is actually visible instead of leaving the caller looking at
+    // the submit button with no feedback.
+    dialog.addEventListener('htmx:afterSwap', function (event) {
+        if (event.target.id === 'identity-provider-add-modal-body') {
+            event.target.scrollTop = 0;
+        }
+    });
+})();
+</script>
+{{end}}
+
+{{/*
+    identity-provider-add-modal-body is the swappable part of the dialog
+    above — handleIdentityProviderAdd/handleClusterIdentityProviderAdd's
+    POST response replaces just #identity-provider-add-modal-body's
+    innerHTML with this same template, executed directly (see
+    Router.renderIdentityProviderAddModalBody).
+*/}}
+{{define "identity-provider-add-modal-body"}}
+{{if .CreatedIDP}}
+{{/* A hidden marker read by each IAM page's own htmx:afterSwap listener —
+     see role_add_modal.html's identical pattern for why. */}}
+<div data-toast-prefix="Created {{.IDPKind}} {{.CreatedIDP}}." class="hidden"></div>
+{{else}}
+{{if .IDPError}}
+{{/* No whitespace around .IDPError: whitespace-pre-line keeps the CEL
+     compiler's own line breaks (its caret marker) but would also render
+     template indentation as a blank first line. */}}
+<div class="mb-4 bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 text-sm text-red-400 whitespace-pre-line break-words">{{.IDPError}}</div>
+{{end}}
+<form hx-post="{{.IDPAddURL}}" hx-target="#identity-provider-add-modal-body" hx-swap="innerHTML" class="space-y-5">
+    {{with .IDPFields}}
+    <label class="block">
+        <span class="text-xs uppercase tracking-wider text-neutral-500">Name</span>
+        <input type="text" name="name" value="{{.Name}}" required placeholder="corporate-sso"
+               class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+    </label>
+
+    <fieldset class="space-y-3">
+        <legend class="text-xs font-bold uppercase tracking-wider text-white">Issuer</legend>
+        <label class="block">
+            <span class="text-xs uppercase tracking-wider text-neutral-500">Issuer URL</span>
+            <input type="url" name="issuerURL" value="{{.IssuerURL}}" required placeholder="https://accounts.example.com"
+                   class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm font-mono text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+        </label>
+        <label class="block">
+            <span class="text-xs uppercase tracking-wider text-neutral-500">Audiences</span>
+            <input type="text" name="audiences" value="{{.Audiences}}" required placeholder="kontinuum, my-client-id"
+                   class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm font-mono text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+            <span class="mt-1 block text-xs text-neutral-600">Comma-separated. A token must carry at least one of them in its <code>aud</code> claim.</span>
+        </label>
+        <details class="group rounded-lg border border-neutral-800 bg-neutral-800/30" {{if or .DiscoveryURL .CertificateAuthority}}open{{end}}>
+            <summary class="cursor-pointer select-none px-3 py-2 text-xs uppercase tracking-wider text-neutral-500 hover:text-white">Advanced</summary>
+            <div class="space-y-3 px-3 pb-3">
+                <label class="block">
+                    <span class="text-xs uppercase tracking-wider text-neutral-500">Discovery URL</span>
+                    <input type="url" name="discoveryURL" value="{{.DiscoveryURL}}" placeholder="defaults to {issuer}/.well-known/openid-configuration"
+                           class="mt-1.5 w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm font-mono text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+                </label>
+                <label class="block">
+                    <span class="text-xs uppercase tracking-wider text-neutral-500">Certificate authority (PEM)</span>
+                    <textarea name="certificateAuthority" rows="3" placeholder="-----BEGIN CERTIFICATE-----"
+                              class="mt-1.5 w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-xs font-mono text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">{{.CertificateAuthority}}</textarea>
+                </label>
+            </div>
+        </details>
+    </fieldset>
+
+    <fieldset class="space-y-3">
+        <legend class="text-xs font-bold uppercase tracking-wider text-white">Claim mappings (CEL)</legend>
+        <p class="text-xs text-neutral-600">
+            Each expression reads the verified token's claims as <code class="text-neutral-400">claims</code>, exactly
+            like a Kubernetes <code class="text-neutral-400">AuthenticationConfiguration</code>.
+        </p>
+        {{if $.IDPPrefix}}
+        <p class="text-xs text-neutral-400 bg-accent/5 border border-accent/20 rounded-lg px-3 py-2">
+            Every username and group this provider maps is prefixed with
+            <code class="text-accent">{{$.IDPPrefix}}</code>, so it can only be granted access through role bindings
+            that name those prefixed subjects.
+        </p>
+        {{end}}
+        <label class="block">
+            <span class="text-xs uppercase tracking-wider text-neutral-500">Username</span>
+            <input type="text" name="usernameExpression" value="{{.UsernameExpression}}" required placeholder="claims.email"
+                   class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm font-mono text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+        </label>
+        <label class="block">
+            <span class="text-xs uppercase tracking-wider text-neutral-500">Groups</span>
+            <input type="text" name="groupsExpression" value="{{.GroupsExpression}}" placeholder="has(claims.groups) ? claims.groups : []"
+                   class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm font-mono text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+        </label>
+        <label class="block">
+            <span class="text-xs uppercase tracking-wider text-neutral-500">UID</span>
+            <input type="text" name="uidExpression" value="{{.UIDExpression}}" placeholder="claims.sub"
+                   class="mt-1.5 w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm font-mono text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+        </label>
+    </fieldset>
+
+    {{template "idp-rule-group" dict "ID" "idp-claim-rules" "Field" "claimRules" "Title" "Claim validation rules" "Hint" "Tokens are rejected unless every expression is true." "Placeholder" "claims.email_verified == true" "Rules" .ClaimRules}}
+    {{template "idp-rule-group" dict "ID" "idp-user-rules" "Field" "userRules" "Title" "User validation rules" "Hint" "Read the mapped user as user.username, user.groups, user.uid. Every expression must be true." "Placeholder" "!user.username.startsWith('system:')" "Rules" .UserRules}}
+    {{end}}
+
+    <div class="flex justify-end pt-2">
+        <!--
+            hx-disabled-elt plus the icon-swaps-for-spinner pair — see
+            AGENTS.md's UI policy and instance_add_modal.html's identical
+            pattern.
+        -->
+        <button type="submit" hx-disabled-elt="this"
+                class="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium uppercase tracking-wider rounded-lg bg-accent text-neutral-950 hover:bg-accent/90 disabled:opacity-60 disabled:cursor-not-allowed transition-colors">
+            <span class="[.htmx-request_&]:hidden [&>svg]:h-3.5 [&>svg]:w-3.5">{{template "icon-fingerprint"}}</span>
+            <span class="hidden [.htmx-request_&]:inline-flex [&>svg]:h-3.5 [&>svg]:w-3.5 [&>svg]:animate-spin">{{template "icon-loader-circle"}}</span>
+            Add {{.IDPKind}}
+        </button>
+    </div>
+</form>
+{{end}}
+{{end}}
+
+{{/*
+    idp-rule-group renders one list of CEL rules (claim or user validation)
+    with its own "+ Add rule" button and the client-side clone template the
+    dialog's delegated click listener copies from. A group may be empty:
+    unlike a Role's rules, validation rules are optional.
+*/}}
+{{define "idp-rule-group"}}
+<div>
+    <div class="flex items-center justify-between">
+        <span class="text-xs font-bold uppercase tracking-wider text-white">{{.Title}}</span>
+        <button type="button" data-add-cel-rule="{{.ID}}"
+                class="-my-1 -ml-2 px-2 py-1 rounded-lg text-xs font-medium text-accent hover:bg-neutral-800 transition-colors">
+            + Add rule
+        </button>
+    </div>
+    <p class="mt-1 text-xs text-neutral-600">{{.Hint}}</p>
+    <div id="{{.ID}}" class="mt-2 space-y-2">
+        {{$group := .}}
+        {{range $i, $rule := .Rules}}
+        {{template "idp-rule-row" dict "Field" $group.Field "Index" $i "Expression" $rule.Expression "Message" $rule.Message "Placeholder" $group.Placeholder}}
+        {{end}}
+    </div>
+    <template id="{{.ID}}-template">
+        {{template "idp-rule-row" dict "Field" .Field "Index" "__INDEX__" "Expression" "" "Message" "" "Placeholder" .Placeholder}}
+    </template>
+</div>
+{{end}}
+
+{{/*
+    idp-rule-row renders one rule's CEL expression and the message shown
+    when it rejects a request. Index is a real position or the literal
+    "__INDEX__" (the clone template), substituted into every field name so
+    the submitted "<Field>[N][...]" keys line up with parseCELRules.
+*/}}
+{{define "idp-rule-row"}}
+<div class="relative bg-neutral-800/50 border border-neutral-700 rounded-lg p-3 pr-10" data-cel-rule-row>
+    <button type="button" data-remove-cel-rule
+            class="absolute top-1 right-1 p-2 rounded-lg text-neutral-500 hover:text-red-400 hover:bg-red-500/10 transition-colors" aria-label="Remove rule">
+        {{template "icon-x"}}
+    </button>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        <label class="block">
+            <span class="text-xs uppercase tracking-wider text-neutral-500">Expression</span>
+            <input type="text" name="{{.Field}}[{{.Index}}][expression]" value="{{.Expression}}" placeholder="{{.Placeholder}}"
+                   class="mt-1 w-full bg-neutral-900 border border-neutral-700 rounded-md px-2 py-1.5 text-xs font-mono text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+        </label>
+        <label class="block">
+            <span class="text-xs uppercase tracking-wider text-neutral-500">Message</span>
+            <input type="text" name="{{.Field}}[{{.Index}}][message]" value="{{.Message}}" placeholder="optional"
+                   class="mt-1 w-full bg-neutral-900 border border-neutral-700 rounded-md px-2 py-1.5 text-xs text-neutral-100 placeholder-neutral-600 focus:outline-none focus:border-accent">
+        </label>
+    </div>
+</div>
+{{end}}

@@ -70,6 +70,8 @@ All kinds below belong to the `kontinuum.sh/v1alpha2` API group/version (`kontin
 | `InstancePool` | `pkg/domain/instancepool` | Claims a set of `Instance`s matching a selector, up to `spec.replicas`. |
 | `TalosCluster` | `pkg/domain/taloscluster` | Bootstraps a Talos Kubernetes cluster from a control-plane `InstancePool` and optional worker pools. |
 | `Addon` | `pkg/domain/addon` | A Helm-based addon (Cilium, cert-manager) installed and health-probed as part of `TalosCluster` bootstrap. |
+| `ClusterIdentityProvider` | `pkg/domain/identityprovider` | Cluster-wide OIDC issuer whose JWT claims are mapped onto users with CEL — see [Identity providers](identity-providers.md). |
+| `IdentityProvider` | `pkg/domain/identityprovider` | Tenant-scoped OIDC issuer; every identity it maps is prefixed with `tenant:<namespace>:` — see [Identity providers](identity-providers.md). |
 
 See [Architecture](architecture.md) for how these controllers cooperate, and [Add zone](workflows/zone-add.md) for the full `Instance` → `InstancePool` → `TalosCluster` → `Addon` flow.
 

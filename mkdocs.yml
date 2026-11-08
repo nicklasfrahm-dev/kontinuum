@@ -51,6 +51,7 @@ nav:
   - Admin Guide:
       - Production deployment: production-deployment.md
       - Authentication: authentication.md
+      - Identity providers: identity-providers.md
       - Add zone: workflows/zone-add.md
       - Remove zone: workflows/zone-remove.md
       - GitHub Actions: github-actions.md

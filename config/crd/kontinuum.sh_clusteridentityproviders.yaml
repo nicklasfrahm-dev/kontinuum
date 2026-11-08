@@ -1,0 +1,366 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.3
+  name: clusteridentityproviders.kontinuum.sh
+spec:
+  group: kontinuum.sh
+  names:
+    kind: ClusterIdentityProvider
+    listKind: ClusterIdentityProviderList
+    plural: clusteridentityproviders
+    shortNames:
+    - cidp
+    singular: clusteridentityprovider
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.issuer.url
+      name: Issuer
+      type: string
+    - jsonPath: .status.signingKeys
+      name: Keys
+      type: integer
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha2
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ClusterIdentityProvider authenticates users against an OIDC issuer
+          cluster-wide, using CEL to map token claims onto Kubernetes users. Unlike
+          IdentityProvider, the identities it maps are used as-is, so it can grant
+          cluster-scoped access (e.g. via ClusterRoleBindings or the configured
+          admin groups) — only cluster administrators should be allowed to create
+          one.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              IdentityProviderSpec configures how users are discovered from an OIDC
+              issuer's JWTs, mirroring one jwt[] entry of Kubernetes'
+              AuthenticationConfiguration (apiserver.config.k8s.io).
+            properties:
+              claimMappings:
+                description: ClaimMappings maps claims onto the user's identity.
+                properties:
+                  extra:
+                    description: Extra maps additional user attributes.
+                    items:
+                      description: ExtraMapping maps one key of the user's "extra"
+                        attributes.
+                      properties:
+                        key:
+                          description: Key is a domain-prefixed path, e.g. "example.org/department".
+                          minLength: 1
+                          type: string
+                        valueExpression:
+                          description: |-
+                            ValueExpression is a CEL expression over the token's claims (exposed
+                            as "claims") returning a string or a list of strings.
+                          maxLength: 4096
+                          minLength: 1
+                          type: string
+                      required:
+                      - key
+                      - valueExpression
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - key
+                    x-kubernetes-list-type: map
+                  groups:
+                    description: Groups maps the user's group memberships.
+                    properties:
+                      claim:
+                        description: Claim is the top-level claim to read the value
+                          from.
+                        type: string
+                      expression:
+                        description: |-
+                          Expression is a CEL expression over the token's claims (exposed as
+                          "claims"), e.g. "claims.email" or
+                          "has(claims.groups) ? claims.groups : []".
+                        maxLength: 4096
+                        type: string
+                      prefix:
+                        description: |-
+                          Prefix is prepended to the claim's value. Required, but may be empty,
+                          whenever Claim is set; not allowed with Expression, which can build
+                          its own prefix.
+                        type: string
+                    type: object
+                  uid:
+                    description: UID maps the user's unique identifier.
+                    properties:
+                      claim:
+                        description: Claim is the top-level claim to read the value
+                          from.
+                        type: string
+                      expression:
+                        description: |-
+                          Expression is a CEL expression over the token's claims (exposed as
+                          "claims").
+                        maxLength: 4096
+                        type: string
+                    type: object
+                  username:
+                    description: Username maps the user's name. Required.
+                    properties:
+                      claim:
+                        description: Claim is the top-level claim to read the value
+                          from.
+                        type: string
+                      expression:
+                        description: |-
+                          Expression is a CEL expression over the token's claims (exposed as
+                          "claims"), e.g. "claims.email" or
+                          "has(claims.groups) ? claims.groups : []".
+                        maxLength: 4096
+                        type: string
+                      prefix:
+                        description: |-
+                          Prefix is prepended to the claim's value. Required, but may be empty,
+                          whenever Claim is set; not allowed with Expression, which can build
+                          its own prefix.
+                        type: string
+                    type: object
+                required:
+                - username
+                type: object
+              claimValidationRules:
+                description: ClaimValidationRules reject tokens whose claims don't
+                  satisfy them.
+                items:
+                  description: |-
+                    ClaimValidationRule rejects tokens whose claims don't satisfy it. Exactly
+                    one of Claim or Expression must be set.
+                  properties:
+                    claim:
+                      description: |-
+                        Claim is a top-level claim that must be present and equal
+                        RequiredValue.
+                      type: string
+                    expression:
+                      description: |-
+                        Expression is a CEL expression over the token's claims (exposed as
+                        "claims") that must evaluate to true, e.g.
+                        "claims.email_verified == true".
+                      maxLength: 4096
+                      type: string
+                    message:
+                      description: |-
+                        Message is returned when Expression evaluates to false. Only valid
+                        with Expression.
+                      type: string
+                    requiredValue:
+                      description: RequiredValue is the value Claim must equal. Only
+                        valid with Claim.
+                      type: string
+                  type: object
+                maxItems: 64
+                type: array
+              issuer:
+                description: Issuer identifies the token issuer and its acceptable
+                  audiences.
+                properties:
+                  audienceMatchPolicy:
+                    description: |-
+                      AudienceMatchPolicy selects how Audiences is matched. Only MatchAny
+                      is supported, and it is required whenever more than one audience is
+                      listed.
+                    enum:
+                    - MatchAny
+                    type: string
+                  audiences:
+                    description: |-
+                      Audiences lists the acceptable "aud" claim values. At least one must
+                      match.
+                    items:
+                      type: string
+                    maxItems: 16
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-type: set
+                  certificateAuthority:
+                    description: |-
+                      CertificateAuthority is a PEM-encoded CA bundle used to verify the
+                      TLS certificates of the discovery and JWKS endpoints. Empty means
+                      the host's own root CAs.
+                    maxLength: 65536
+                    type: string
+                  discoveryUrl:
+                    description: |-
+                      DiscoveryURL overrides where the discovery document is fetched from,
+                      e.g. an in-cluster address for an issuer whose public URL isn't
+                      reachable from kontinuum itself. The document's own "issuer" field
+                      must still equal URL.
+                    maxLength: 2048
+                    type: string
+                  url:
+                    description: |-
+                      URL is the issuer URL. It must use https and match the token's "iss"
+                      claim exactly. Unless DiscoveryURL is set, the discovery document is
+                      fetched from {URL}/.well-known/openid-configuration.
+                    maxLength: 2048
+                    minLength: 1
+                    type: string
+                required:
+                - audiences
+                - url
+                type: object
+              userValidationRules:
+                description: UserValidationRules reject mapped users that don't satisfy
+                  them.
+                items:
+                  description: UserValidationRule rejects a mapped user that doesn't
+                    satisfy it.
+                  properties:
+                    expression:
+                      description: |-
+                        Expression is a CEL expression over the mapped user (exposed as
+                        "user", with "username", "uid", "groups" and "extra" fields) that
+                        must evaluate to true, e.g. "!user.username.startsWith('system:')".
+                      maxLength: 4096
+                      minLength: 1
+                      type: string
+                    message:
+                      description: Message is returned when Expression evaluates to
+                        false.
+                      type: string
+                  required:
+                  - expression
+                  type: object
+                maxItems: 64
+                type: array
+            required:
+            - claimMappings
+            - issuer
+            type: object
+          status:
+            description: |-
+              IdentityProviderStatus reports whether an identity provider is in use and
+              the state of its signing key cache.
+            properties:
+              conditions:
+                description: Conditions reports this identity provider's state, e.g.
+                  Ready.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              groupsPrefix:
+                description: |-
+                  GroupsPrefix is the prefix kontinuum forces onto every group this
+                  provider maps — see UsernamePrefix.
+                type: string
+              lastKeyRefreshTime:
+                description: |-
+                  LastKeyRefreshTime is when the signing keys were last fetched
+                  successfully.
+                format: date-time
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the metadata.generation this status
+                  reflects.
+                format: int64
+                type: integer
+              signingKeys:
+                description: |-
+                  SigningKeys is the number of signing keys currently cached for the
+                  issuer.
+                format: int32
+                type: integer
+              usernamePrefix:
+                description: |-
+                  UsernamePrefix is the prefix kontinuum forces onto every username
+                  this provider maps. Always empty for a ClusterIdentityProvider;
+                  "tenant:<namespace>:" for a namespaced IdentityProvider, so a
+                  tenant's issuer can never mint another tenant's or a cluster-wide
+                  identity.
+                type: string
+            type: object
+        required:
+        - metadata
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
