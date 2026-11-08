@@ -74,7 +74,9 @@ func TestRunZoneAddCreatesZoneObjects(t *testing.T) {
 	buf := &bytes.Buffer{}
 	cmd := testCmd(buf)
 
-	err := zone.RunZoneAdd(cmd, zone.AddFlags{Region: testRegion, Zone: testZone, TalosAddress: testTalosAddress},
+	err := zone.RunZoneAdd(cmd, zone.AddFlags{
+		Region: testRegion, Zone: testZone, TalosAddresses: []string{testTalosAddress},
+	},
 		func(string, string) (client.Client, error) { return hubClient, nil })
 	require.NoError(t, err)
 	assert.Contains(t, buf.String(), "Created zone")
@@ -97,7 +99,7 @@ func TestRunZoneAddThreadsUnregisterInstancesOnDeleteFlag(t *testing.T) {
 	cmd := testCmd(buf)
 
 	err := zone.RunZoneAdd(cmd, zone.AddFlags{
-		Region: testRegion, Zone: testZone, TalosAddress: testTalosAddress,
+		Region: testRegion, Zone: testZone, TalosAddresses: []string{testTalosAddress},
 		UnregisterInstancesOnDelete: true,
 	}, func(string, string) (client.Client, error) { return hubClient, nil })
 	require.NoError(t, err)
@@ -113,7 +115,9 @@ func TestRunZoneAddPropagatesHubClientBuildError(t *testing.T) {
 
 	cmd := testCmd(&bytes.Buffer{})
 
-	err := zone.RunZoneAdd(cmd, zone.AddFlags{Region: testRegion, Zone: testZone, TalosAddress: testTalosAddress},
+	err := zone.RunZoneAdd(cmd, zone.AddFlags{
+		Region: testRegion, Zone: testZone, TalosAddresses: []string{testTalosAddress},
+	},
 		func(string, string) (client.Client, error) { return nil, assert.AnError })
 	require.ErrorIs(t, err, assert.AnError)
 }
@@ -129,7 +133,9 @@ func TestRunZoneAddSucceedsWithNoDomainToInfer(t *testing.T) {
 	hubClient := newFakeHubClient(t)
 	cmd := testCmd(&bytes.Buffer{})
 
-	err := zone.RunZoneAdd(cmd, zone.AddFlags{Region: testRegion, Zone: testZone, TalosAddress: testTalosAddress},
+	err := zone.RunZoneAdd(cmd, zone.AddFlags{
+		Region: testRegion, Zone: testZone, TalosAddresses: []string{testTalosAddress},
+	},
 		func(string, string) (client.Client, error) { return hubClient, nil })
 	require.NoError(t, err)
 
@@ -163,7 +169,7 @@ func TestRunZoneAddWaitReturnsOnceInstalled(t *testing.T) {
 	cmd := testCmd(buf)
 
 	err := zone.RunZoneAdd(cmd, zone.AddFlags{
-		Region: testRegion, Zone: testZone, TalosAddress: testTalosAddress,
+		Region: testRegion, Zone: testZone, TalosAddresses: []string{testTalosAddress},
 		Wait: true, Timeout: time.Minute,
 	}, func(string, string) (client.Client, error) { return hubClient, nil })
 	require.NoError(t, err)
@@ -178,9 +184,37 @@ func TestRunZoneAddWaitTimesOut(t *testing.T) {
 	cmd := testCmd(buf)
 
 	err := zone.RunZoneAdd(cmd, zone.AddFlags{
-		Region: testRegion, Zone: testZone, TalosAddress: testTalosAddress,
+		Region: testRegion, Zone: testZone, TalosAddresses: []string{testTalosAddress},
 		Wait: true, Timeout: time.Millisecond,
 	}, func(string, string) (client.Client, error) { return hubClient, nil })
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "timed out")
+}
+
+const (
+	// talosAddressFlag is zone add's own repeatable address flag.
+	talosAddressFlag = "--talos-address"
+	// secondAddress and thirdAddress complete a three-node control plane
+	// alongside testTalosAddress.
+	secondAddress = "10.0.0.6"
+	thirdAddress  = "10.0.0.7"
+)
+
+// TestAddTalosAddressFlagIsRepeatable covers --talos-address accepting a
+// comma-separated list, the flag repeated, or both combined, in order.
+func TestAddTalosAddressFlagIsRepeatable(t *testing.T) {
+	t.Parallel()
+
+	for _, args := range [][]string{
+		{talosAddressFlag, testTalosAddress + "," + secondAddress + "," + thirdAddress},
+		{talosAddressFlag, testTalosAddress, talosAddressFlag, secondAddress, talosAddressFlag, thirdAddress},
+		{talosAddressFlag, testTalosAddress + "," + secondAddress, talosAddressFlag, thirdAddress},
+	} {
+		cmd := zone.NewAddCmd()
+		require.NoError(t, cmd.ParseFlags(args))
+
+		addresses, err := cmd.Flags().GetStringSlice("talos-address")
+		require.NoError(t, err)
+		assert.Equal(t, []string{testTalosAddress, secondAddress, thirdAddress}, addresses, args)
+	}
 }

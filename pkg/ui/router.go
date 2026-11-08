@@ -331,7 +331,7 @@ func buildPages() map[string]*template.Template {
 			"templates/components/icon_chevron_left.html", "templates/components/icon_info.html",
 			"templates/components/icon_kubernetes.html", "templates/components/icon_server.html",
 			"templates/components/icon_list_checks.html", "templates/components/icon_trash.html",
-			"templates/components/icon_key.html",
+			"templates/components/icon_key.html", "templates/components/icon_cpu.html",
 			"templates/components/conditions_table.html"),
 		pageIAMNamespace: mustParsePage("templates/iam_namespace_content.html",
 			"templates/components/icon_info.html", "templates/components/icon_shield_user.html",
@@ -1050,8 +1050,37 @@ func (r *Router) handleZoneDetail(writer http.ResponseWriter, request *http.Requ
 
 	data := zoneDetailData(zoneObj, cluster, hasCluster, kontinuum, joined,
 		request.PathValue("ns"), r.version, r.authEnabled, thumbprint, issuedAt, hasIdentity)
+	data["Instances"] = fetchZoneInstances(request.Context(), zones, zoneObj)
 
 	r.render(writer, request, pageZoneDetail, data)
+}
+
+// fetchZoneInstances lists every Instance labeled with zoneObj's own
+// region/zone — one per seed address zone add created, whether or not it's
+// been claimed yet — as rows sorted by name, so the zone detail page shows
+// each of a multi-node control plane's instances with its own status.
+// Like fetchZoneIdentity this is informational only: a failed List just
+// leaves the card empty rather than failing the whole page.
+func fetchZoneInstances(ctx context.Context, zones client.Client, zoneObj v1alpha2.Zone) []instanceRow {
+	var list v1alpha2.InstanceList
+
+	err := zones.List(ctx, &list, client.InNamespace(v1alpha2.KontinuumSystemNamespace), client.MatchingLabels{
+		v1alpha2.LabelRegion: zoneObj.Spec.Region, v1alpha2.LabelZone: zoneObj.Spec.Zone,
+	})
+	if err != nil {
+		return nil
+	}
+
+	slices.SortFunc(list.Items, func(left, right v1alpha2.Instance) int {
+		return strings.Compare(left.Name, right.Name)
+	})
+
+	rows := make([]instanceRow, 0, len(list.Items))
+	for _, item := range list.Items {
+		rows = append(rows, instanceRowFrom(item))
+	}
+
+	return rows
 }
 
 // fetchZoneIdentity reads zoneName's own hub-side etcd gRPC proxy identity
@@ -1266,7 +1295,7 @@ func (r *Router) handleZoneAdd(writer http.ResponseWriter, request *http.Request
 	createdZone, err := zonedomain.Add(request.Context(), zones, zonedomain.AddOptions{
 		Region:                      fields.region,
 		Zone:                        fields.zone,
-		TalosAddress:                fields.talosAddress,
+		TalosAddresses:              zonedomain.SplitTalosAddresses(fields.talosAddress),
 		TalosVersion:                fields.talosVersion,
 		KubernetesVersion:           fields.kubernetesVersion,
 		UnregisterInstancesOnDelete: fields.unregisterInstances,
@@ -2496,8 +2525,11 @@ func (r *Router) handleDeleteClusterRoleBinding(writer http.ResponseWriter, requ
 // doc for why this isn't named "instance", which already means something
 // else in this file.
 type instanceRow struct {
-	Name         string
-	Namespace    string
+	Name      string
+	Namespace string
+	// Address is spec.interfaces[0], the address the Instance is dialed
+	// on — empty for one with no interfaces.
+	Address      string
 	TalosVersion string
 	// Condition/ConditionOK reflect whichever of status.conditions most
 	// recently transitioned (see latestCondition) — an Instance can carry
@@ -2518,11 +2550,21 @@ type instanceRow struct {
 	Deleting bool
 }
 
+// firstInterface returns item's spec.interfaces[0], or "" when it has none.
+func firstInterface(item v1alpha2.Instance) string {
+	if len(item.Spec.Interfaces) == 0 {
+		return ""
+	}
+
+	return item.Spec.Interfaces[0]
+}
+
 // instanceRowFrom builds one instances-list row from item.
 func instanceRowFrom(item v1alpha2.Instance) instanceRow {
 	row := instanceRow{
 		Name:         item.Name,
 		Namespace:    item.Namespace,
+		Address:      firstInterface(item),
 		TalosVersion: item.Status.Talos.Version,
 		ClaimedBy:    item.Labels[v1alpha2.LabelClaimedBy],
 		Age:          formatAge(item.CreationTimestamp.Time),
